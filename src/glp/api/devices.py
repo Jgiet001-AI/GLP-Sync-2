@@ -28,10 +28,23 @@ Example:
 Author: HPE GreenLake Team
 """
 import json
+import logging
 from datetime import datetime
 from typing import Optional
 
 from .client import DEVICES_PAGINATION, GLPClient
+from .database import database_transaction
+from .exceptions import (
+    ConnectionPoolError,
+    DatabaseError,
+    ErrorCollector,
+    GLPError,
+    IntegrityError,
+    PartialSyncError,
+    SyncError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceSyncer:
@@ -102,28 +115,38 @@ class DeviceSyncer:
     # ----------------------------------------
 
     async def sync_to_postgres(self, devices: list[dict]) -> dict:
-        """Upsert devices to PostgreSQL.
+        """Upsert devices to PostgreSQL with proper error handling.
 
         For each device:
         1. Insert or update the main devices table
         2. Sync subscriptions to device_subscriptions table
         3. Sync tags to device_tags table
 
+        Uses database transactions to ensure consistency and ErrorCollector
+        to continue processing on individual device failures.
+
         Args:
             devices: List of device dictionaries from API
 
         Returns:
             Dict with sync statistics
+
+        Raises:
+            ConnectionPoolError: If database pool is not available
+            PartialSyncError: If some devices failed to sync (includes statistics)
         """
         if self.db_pool is None:
-            raise ValueError("Database connection pool is required")
+            raise ConnectionPoolError(
+                "Database connection pool is required for sync"
+            )
 
         inserted = 0
         updated = 0
-        errors = 0
+        error_collector = ErrorCollector()
 
-        async with self.db_pool.acquire() as conn:
+        async with database_transaction(self.db_pool) as conn:
             for device in devices:
+                device_id = device.get("id", "unknown")
                 try:
                     exists = await conn.fetchval(
                         "SELECT 1 FROM devices WHERE id = $1",
@@ -137,19 +160,47 @@ class DeviceSyncer:
                         await self._insert_device(conn, device)
                         inserted += 1
 
+                except IntegrityError as e:
+                    # Log but continue - integrity errors are usually data issues
+                    logger.warning(f"Integrity error syncing device {device_id}: {e}")
+                    error_collector.add(e, context={"device_id": device_id})
+
+                except DatabaseError as e:
+                    # Database errors - collect and continue
+                    logger.error(f"Database error syncing device {device_id}: {e}")
+                    error_collector.add(e, context={"device_id": device_id})
+
                 except Exception as e:
-                    errors += 1
-                    print(f"[DeviceSyncer] Error syncing device {device.get('id')}: {e}")
+                    # Unexpected errors - wrap and collect
+                    logger.error(f"Unexpected error syncing device {device_id}: {e}")
+                    error_collector.add(
+                        SyncError(f"Failed to sync device: {e}", cause=e),
+                        context={"device_id": device_id}
+                    )
 
         stats = {
             "total": len(devices),
             "inserted": inserted,
             "updated": updated,
-            "errors": errors,
+            "errors": error_collector.count(),
             "synced_at": datetime.utcnow().isoformat(),
         }
 
-        print(f"[DeviceSyncer] Sync complete: {inserted} inserted, {updated} updated, {errors} errors")
+        logger.info(
+            f"Device sync complete: {inserted} inserted, {updated} updated, "
+            f"{error_collector.count()} errors"
+        )
+
+        # If there were errors, raise PartialSyncError with full stats
+        if error_collector.has_errors():
+            raise PartialSyncError(
+                f"Device sync completed with {error_collector.count()} errors",
+                succeeded=inserted + updated,
+                failed=error_collector.count(),
+                errors=[e for e, _ in error_collector.get_errors()],
+                details=stats,
+            )
+
         return stats
 
     async def _insert_device(self, conn, device: dict):
@@ -360,13 +411,26 @@ class DeviceSyncer:
 
         Returns:
             Sync statistics dictionary
-        """
-        print(f"[DeviceSyncer] Starting sync at {datetime.utcnow().isoformat()}")
 
-        devices = await self.fetch_all_devices()
+        Raises:
+            GLPError: If API fetch fails
+            PartialSyncError: If some devices failed to sync
+        """
+        logger.info(f"Starting device sync at {datetime.utcnow().isoformat()}")
+
+        try:
+            devices = await self.fetch_all_devices()
+        except GLPError:
+            logger.error("Failed to fetch devices from API")
+            raise
 
         if self.db_pool:
-            stats = await self.sync_to_postgres(devices)
+            try:
+                stats = await self.sync_to_postgres(devices)
+            except PartialSyncError as e:
+                # PartialSyncError contains stats, log and return them
+                logger.warning(f"Partial sync: {e.succeeded} succeeded, {e.failed} failed")
+                return e.details
         else:
             stats = {
                 "total": len(devices),
@@ -385,29 +449,26 @@ class DeviceSyncer:
 
         Returns:
             Number of devices saved
+
+        Raises:
+            GLPError: If API fetch fails
+            IOError: If file cannot be written
         """
         devices = await self.fetch_all_devices()
 
         with open(filepath, "w") as f:
             json.dump(devices, f, indent=2)
 
-        print(f"[DeviceSyncer] Saved {len(devices):,} devices to {filepath}")
+        logger.info(f"Saved {len(devices):,} devices to {filepath}")
         return len(devices)
 
 
 # ============================================
 # Backward Compatibility Layer
 # ============================================
-# These allow the old API to work while transitioning
 
-class APIError(Exception):
-    """Raised when API call fails.
-
-    DEPRECATED: Use GLPClientError from client.py instead.
-    Kept for backward compatibility.
-    """
-    pass
-
+# Import APIError from exceptions for backward compatibility
+from .exceptions import APIError  # noqa: F401, E402
 
 # ============================================
 # Standalone Test

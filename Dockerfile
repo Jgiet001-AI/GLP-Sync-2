@@ -48,7 +48,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy application code
 COPY src/ ./src/
-COPY main.py scheduler.py ./
+COPY main.py scheduler.py server.py ./
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser \

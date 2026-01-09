@@ -19,8 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
-from src.glp.api.client import APIError, GLPClient
+from src.glp.api.client import GLPClient
 from src.glp.api.devices import DeviceSyncer
+from src.glp.api.exceptions import APIError, ConnectionPoolError
 
 # ============================================
 # DeviceSyncer Initialization Tests
@@ -148,10 +149,21 @@ class TestDatabaseSync:
         pool = MagicMock()
         conn = AsyncMock()
 
-        # Mock the pool.acquire() async context manager
-        pool.acquire = MagicMock()
-        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
-        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        # pool.acquire() must return an awaitable that returns the connection
+        async def mock_acquire():
+            return conn
+
+        pool.acquire = mock_acquire
+
+        # Mock the transaction context manager
+        mock_transaction = AsyncMock()
+        mock_transaction.start = AsyncMock()
+        mock_transaction.commit = AsyncMock()
+        mock_transaction.rollback = AsyncMock()
+        conn.transaction = MagicMock(return_value=mock_transaction)
+
+        # Mock release
+        pool.release = AsyncMock()
 
         return pool, conn
 
@@ -160,7 +172,7 @@ class TestDatabaseSync:
         """Should raise error when syncing without database pool."""
         syncer = DeviceSyncer(client=mock_client)
 
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ConnectionPoolError) as exc:
             await syncer.sync_to_postgres([{"id": "test"}])
 
         assert "Database connection pool is required" in str(exc.value)
@@ -225,7 +237,11 @@ class TestErrorHandling:
     async def test_fetch_propagates_api_error(self, mock_client):
         """Should propagate APIError from GLPClient."""
         mock_client.fetch_all = AsyncMock(
-            side_effect=APIError(status=500, message="Server Error")
+            side_effect=APIError(
+                message="Server Error",
+                status_code=500,
+                endpoint="/devices/v1/devices",
+            )
         )
 
         syncer = DeviceSyncer(client=mock_client)
@@ -233,7 +249,7 @@ class TestErrorHandling:
         with pytest.raises(APIError) as exc:
             await syncer.fetch_all_devices()
 
-        assert exc.value.status == 500
+        assert exc.value.status_code == 500
 
 
 # ============================================

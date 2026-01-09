@@ -117,6 +117,60 @@ services:
       GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
     command: ["python", "main.py", "--expiring-days", "90"]
 
+  # ----------------------------------------
+  # MCP Server (FastMCP)
+  # ----------------------------------------
+  # Provides read-only database access for AI assistants
+  # Usage: docker compose up mcp-server
+  #
+  # HTTP mode (recommended for remote access):
+  #   docker compose up mcp-server
+  #   Connect clients to http://localhost:8000
+  #
+  # stdio mode (for local Claude Desktop):
+  #   docker compose run --rm mcp-stdio
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: glp-mcp-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+      # Connection pool tuning
+      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
+      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-10}
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    command: ["python", "server.py", "--transport", "http", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # MCP Server (stdio mode for Claude Desktop)
+  # Usage: docker compose run --rm mcp-stdio
+  mcp-stdio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
+      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-5}
+    stdin_open: true
+    tty: true
+    command: ["python", "server.py"]
+
 volumes:
   postgres_data:
     driver: local

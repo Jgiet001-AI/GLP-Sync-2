@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
 from src.glp.api.auth import CachedToken, TokenManager
+from src.glp.api.exceptions import ConfigurationError
 
 # ============================================
 # CachedToken Tests
@@ -72,12 +73,12 @@ class TestTokenManager:
         monkeypatch.setenv("GLP_TOKEN_URL", "https://auth.example.com/token")
 
     def test_missing_env_vars_raises(self, monkeypatch):
-        """Should raise ValueError when env vars are missing."""
+        """Should raise ConfigurationError when env vars are missing."""
         monkeypatch.delenv("GLP_CLIENT_ID", raising=False)
         monkeypatch.delenv("GLP_CLIENT_SECRET", raising=False)
         monkeypatch.delenv("GLP_TOKEN_URL", raising=False)
 
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ConfigurationError) as exc:
             TokenManager()
 
         assert "GLP_CLIENT_ID" in str(exc.value)

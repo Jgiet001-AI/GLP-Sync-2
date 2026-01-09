@@ -20,8 +20,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
-from src.glp.api.client import APIError, GLPClient
+from src.glp.api.client import GLPClient
 from src.glp.api.subscriptions import SubscriptionSyncer
+from src.glp.api.exceptions import APIError, ConnectionPoolError, ValidationError
 
 # ============================================
 # SubscriptionSyncer Initialization Tests
@@ -155,7 +156,7 @@ class TestSubscriptionFiltering:
     @pytest.mark.asyncio
     async def test_fetch_by_status_invalid(self, syncer, mock_client):
         """Should raise error for invalid status."""
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ValidationError) as exc:
             await syncer.fetch_by_status("INVALID_STATUS")
 
         assert "Invalid status" in str(exc.value)
@@ -202,9 +203,21 @@ class TestDatabaseSync:
         pool = MagicMock()
         conn = AsyncMock()
 
-        pool.acquire = MagicMock()
-        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
-        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        # pool.acquire() must return an awaitable that returns the connection
+        async def mock_acquire():
+            return conn
+
+        pool.acquire = mock_acquire
+
+        # Mock the transaction context manager
+        mock_transaction = AsyncMock()
+        mock_transaction.start = AsyncMock()
+        mock_transaction.commit = AsyncMock()
+        mock_transaction.rollback = AsyncMock()
+        conn.transaction = MagicMock(return_value=mock_transaction)
+
+        # Mock release
+        pool.release = AsyncMock()
 
         return pool, conn
 
@@ -213,7 +226,7 @@ class TestDatabaseSync:
         """Should raise error when syncing without database pool."""
         syncer = SubscriptionSyncer(client=mock_client)
 
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ConnectionPoolError) as exc:
             await syncer.sync_to_postgres([{"id": "test"}])
 
         assert "Database connection pool is required" in str(exc.value)
@@ -321,7 +334,11 @@ class TestErrorHandling:
     async def test_fetch_propagates_api_error(self, mock_client):
         """Should propagate APIError from GLPClient."""
         mock_client.fetch_all = AsyncMock(
-            side_effect=APIError(status=500, message="Server Error")
+            side_effect=APIError(
+                message="Server Error",
+                status_code=500,
+                endpoint="/subscriptions/v1/subscriptions",
+            )
         )
 
         syncer = SubscriptionSyncer(client=mock_client)
@@ -329,7 +346,7 @@ class TestErrorHandling:
         with pytest.raises(APIError) as exc:
             await syncer.fetch_all_subscriptions()
 
-        assert exc.value.status == 500
+        assert exc.value.status_code == 500
 
 
 # ============================================

@@ -9,6 +9,8 @@ common concerns of GreenLake API communication:
     - Rate limit handling with exponential backoff on 429 responses
     - Offset-based pagination with configurable page sizes
     - Connection pooling via shared aiohttp session
+    - Circuit breaker for resilience against API outages
+    - Comprehensive error handling with typed exceptions
 
 Design Philosophy:
     This client knows HOW to talk to GreenLake, but not WHAT to fetch.
@@ -31,12 +33,30 @@ Usage:
 Author: HPE GreenLake Team
 """
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 
 import aiohttp
 
 from .auth import TokenManager
+from .exceptions import (
+    APIError,
+    CircuitOpenError,
+    ConfigurationError,
+    ConnectionError,
+    GLPError,
+    NetworkError,
+    NotFoundError,
+    RateLimitError,
+    ServerError,
+    TimeoutError,
+    TokenExpiredError,
+    ValidationError,
+)
+from .resilience import CircuitBreaker
+
+logger = logging.getLogger(__name__)
 
 # ============================================
 # Configuration
@@ -71,26 +91,11 @@ SUBSCRIPTIONS_PAGINATION = PaginationConfig(
 
 
 # ============================================
-# Exceptions
+# Backward Compatibility Aliases
 # ============================================
 
-class GLPClientError(Exception):
-    """Base exception for GLPClient errors."""
-    pass
-
-
-class APIError(GLPClientError):
-    """Raised when API returns an error response."""
-    def __init__(self, status: int, message: str, response_body: Optional[str] = None):
-        self.status = status
-        self.message = message
-        self.response_body = response_body
-        super().__init__(f"HTTP {status}: {message}")
-
-
-class RateLimitError(GLPClientError):
-    """Raised when rate limit is exceeded and retries are exhausted."""
-    pass
+# These are now imported from exceptions.py but aliased here for compatibility
+GLPClientError = GLPError
 
 
 # ============================================
@@ -121,15 +126,21 @@ class GLPClient:
         self,
         token_manager: TokenManager,
         base_url: Optional[str] = None,
+        enable_circuit_breaker: bool = True,
+        circuit_failure_threshold: int = 5,
+        circuit_timeout: float = 60.0,
     ):
         """Initialize the GLPClient.
 
         Args:
             token_manager: TokenManager instance for authentication
             base_url: API base URL. If not provided, reads from GLP_BASE_URL env var.
+            enable_circuit_breaker: Enable circuit breaker for resilience
+            circuit_failure_threshold: Failures before circuit opens
+            circuit_timeout: Seconds before circuit attempts to close
 
         Raises:
-            ValueError: If base_url is not provided and GLP_BASE_URL is not set.
+            ConfigurationError: If base_url is not provided and GLP_BASE_URL is not set.
         """
         import os
 
@@ -137,12 +148,22 @@ class GLPClient:
         self.base_url = (base_url or os.getenv("GLP_BASE_URL", "")).rstrip("/")
 
         if not self.base_url:
-            raise ValueError(
-                "Base URL is required. Provide base_url parameter or set GLP_BASE_URL environment variable."
+            raise ConfigurationError(
+                "Base URL is required. Provide base_url parameter or set GLP_BASE_URL environment variable.",
+                missing_keys=["GLP_BASE_URL"],
             )
 
         # Session is created in __aenter__, closed in __aexit__
         self._session: Optional[aiohttp.ClientSession] = None
+
+        # Circuit breaker for resilience
+        self._circuit_breaker: Optional[CircuitBreaker] = None
+        if enable_circuit_breaker:
+            self._circuit_breaker = CircuitBreaker(
+                failure_threshold=circuit_failure_threshold,
+                timeout=circuit_timeout,
+                name="glp_api",
+            )
 
     # ----------------------------------------
     # Context Manager Protocol
@@ -206,6 +227,8 @@ class GLPClient:
         Raises:
             APIError: If response status is not 2xx
             RuntimeError: If called outside of async context manager
+            ConnectionError: If connection to server fails
+            TimeoutError: If request times out
         """
         if not self._session:
             raise RuntimeError(
@@ -214,26 +237,106 @@ class GLPClient:
             )
 
         url = f"{self.base_url}{endpoint}"
-        headers = await self._get_auth_headers()
 
-        async with self._session.request(
+        try:
+            headers = await self._get_auth_headers()
+
+            async with self._session.request(
+                method=method,
+                url=url,
+                headers=headers,
+                params=params,
+                json=json_body,
+            ) as response:
+                # Handle specific error statuses with typed exceptions
+                if response.status >= 400:
+                    error_text = await response.text()
+                    raise self._create_api_error(
+                        status=response.status,
+                        method=method,
+                        endpoint=endpoint,
+                        response_body=error_text,
+                    )
+
+                # Success - parse JSON response
+                return await response.json()
+
+        except aiohttp.ClientConnectionError as e:
+            raise ConnectionError(
+                f"Failed to connect to {self.base_url}",
+                host=self.base_url,
+                cause=e,
+            )
+
+        except asyncio.TimeoutError as e:
+            raise TimeoutError(
+                f"Request to {endpoint} timed out",
+                timeout_seconds=60,
+                cause=e,
+            )
+
+        except aiohttp.ClientError as e:
+            raise NetworkError(
+                f"Network error during {method} {endpoint}: {e}",
+                cause=e,
+            )
+
+    def _create_api_error(
+        self,
+        status: int,
+        method: str,
+        endpoint: str,
+        response_body: str,
+    ) -> APIError:
+        """Create appropriate APIError subclass based on status code."""
+        if status == 401:
+            return TokenExpiredError(
+                "Access token expired or invalid",
+                details={"endpoint": endpoint},
+            )
+
+        if status == 404:
+            return NotFoundError(
+                resource_type="Resource",
+                resource_id=endpoint,
+                endpoint=endpoint,
+                response_body=response_body,
+            )
+
+        if status == 429:
+            # Try to extract Retry-After header value from response
+            retry_after = 60  # Default
+            return RateLimitError(
+                f"Rate limit exceeded for {endpoint}",
+                retry_after=retry_after,
+                endpoint=endpoint,
+                response_body=response_body,
+            )
+
+        if status == 400 or status == 422:
+            return ValidationError(
+                f"Validation failed for {method} {endpoint}",
+                status_code=status,
+                endpoint=endpoint,
+                response_body=response_body,
+            )
+
+        if status >= 500:
+            return ServerError(
+                f"Server error ({status}) for {method} {endpoint}",
+                status_code=status,
+                endpoint=endpoint,
+                response_body=response_body,
+            )
+
+        # Generic API error for other status codes
+        return APIError(
+            f"{method} {endpoint} failed",
+            status_code=status,
+            endpoint=endpoint,
             method=method,
-            url=url,
-            headers=headers,
-            params=params,
-            json=json_body,
-        ) as response:
-            # For non-2xx responses, capture error details
-            if response.status >= 400:
-                error_text = await response.text()
-                raise APIError(
-                    status=response.status,
-                    message=f"{method} {endpoint} failed",
-                    response_body=error_text,
-                )
-
-            # Success - parse JSON response
-            return await response.json()
+            response_body=response_body,
+        )
 
     async def _request_with_retry(
         self,
@@ -243,11 +346,14 @@ class GLPClient:
         json_body: Optional[dict] = None,
         max_retries: int = 3,
     ) -> dict[str, Any]:
-        """Make an HTTP request with automatic retry on 401/429.
+        """Make an HTTP request with automatic retry and circuit breaker.
 
         This method wraps _request() with resilience logic:
+            - Circuit breaker: Fail fast if API is down
             - 401 Unauthorized: Invalidate token, refresh, retry
             - 429 Rate Limited: Wait for Retry-After header, retry
+            - 5xx Server Errors: Exponential backoff retry
+            - Network errors: Exponential backoff retry
 
         Args:
             method: HTTP method
@@ -260,40 +366,123 @@ class GLPClient:
             Parsed JSON response
 
         Raises:
+            CircuitOpenError: If circuit breaker is open
             APIError: If request fails after all retries
             RateLimitError: If rate limited and retries exhausted
+            NetworkError: If network error persists after retries
         """
-        last_error: Optional[Exception] = None
+        # Check circuit breaker first
+        if self._circuit_breaker and self._circuit_breaker.is_open:
+            # Check if we should attempt (timeout may have passed)
+            if not self._circuit_breaker._should_attempt():
+                raise CircuitOpenError(
+                    "Circuit breaker is open for GLP API",
+                    failure_count=self._circuit_breaker.failure_count,
+                )
 
-        for attempt in range(max_retries):
+        last_error: Optional[Exception] = None
+        backoff_delay = 1.0  # Initial backoff delay
+
+        for attempt in range(1, max_retries + 1):
             try:
-                return await self._request(method, endpoint, params, json_body)
+                result = await self._request(method, endpoint, params, json_body)
+
+                # Success - reset circuit breaker
+                if self._circuit_breaker:
+                    await self._circuit_breaker._on_success()
+
+                return result
+
+            except TokenExpiredError:
+                # Token expired - invalidate and retry (no backoff needed)
+                logger.warning(f"Token expired, refreshing (attempt {attempt})")
+                self.token_manager.invalidate()
+                continue
+
+            except RateLimitError as e:
+                last_error = e
+                # Rate limited - wait for specified time
+                wait_time = e.retry_after
+                logger.warning(
+                    f"Rate limited, waiting {wait_time}s (attempt {attempt}/{max_retries})"
+                )
+                await asyncio.sleep(wait_time)
+                continue
+
+            except ServerError as e:
+                last_error = e
+                # Server error - exponential backoff
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Server error {e.status_code}, retrying in {backoff_delay}s "
+                        f"(attempt {attempt}/{max_retries})"
+                    )
+                    await asyncio.sleep(backoff_delay)
+                    backoff_delay = min(backoff_delay * 2, 60.0)  # Cap at 60s
+                    continue
+
+                # Update circuit breaker on final failure
+                if self._circuit_breaker:
+                    await self._circuit_breaker._on_failure(e)
+                raise
+
+            except (NetworkError, ConnectionError, TimeoutError) as e:
+                last_error = e
+                # Network error - exponential backoff
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Network error: {e}. Retrying in {backoff_delay}s "
+                        f"(attempt {attempt}/{max_retries})"
+                    )
+                    await asyncio.sleep(backoff_delay)
+                    backoff_delay = min(backoff_delay * 2, 60.0)
+                    continue
+
+                # Update circuit breaker on final failure
+                if self._circuit_breaker:
+                    await self._circuit_breaker._on_failure(e)
+                raise
+
+            except (NotFoundError, ValidationError):
+                # Non-retryable errors - fail immediately
+                raise
 
             except APIError as e:
-                last_error = e
-
-                if e.status == 401:
-                    # Token expired - invalidate and retry
-                    print(f"[GLPClient] Token expired, refreshing (attempt {attempt + 1})")
-                    self.token_manager.invalidate()
+                # Other API errors - check if retryable
+                if e.recoverable and attempt < max_retries:
+                    last_error = e
+                    logger.warning(
+                        f"API error (recoverable): {e}. Retrying in {backoff_delay}s"
+                    )
+                    await asyncio.sleep(backoff_delay)
+                    backoff_delay = min(backoff_delay * 2, 60.0)
                     continue
 
-                elif e.status == 429:
-                    # Rate limited - extract Retry-After and wait
-                    # Default to 60 seconds if header not present
-                    retry_after = 60
-                    print(f"[GLPClient] Rate limited, waiting {retry_after}s (attempt {attempt + 1})")
-                    await asyncio.sleep(retry_after)
-                    continue
-
-                else:
-                    # Other error - don't retry
-                    raise
+                # Update circuit breaker and re-raise
+                if self._circuit_breaker:
+                    await self._circuit_breaker._on_failure(e)
+                raise
 
         # Exhausted retries
-        if isinstance(last_error, APIError) and last_error.status == 429:
-            raise RateLimitError(f"Rate limit exceeded after {max_retries} retries")
-        raise last_error or APIError(0, "Unknown error")
+        if self._circuit_breaker and last_error:
+            await self._circuit_breaker._on_failure(last_error)
+
+        if last_error:
+            raise last_error
+
+        raise APIError(
+            "Request failed after all retries",
+            status_code=0,
+            endpoint=endpoint,
+            method=method,
+        )
+
+    @property
+    def circuit_status(self) -> Optional[dict[str, Any]]:
+        """Get circuit breaker status for monitoring."""
+        if self._circuit_breaker:
+            return self._circuit_breaker.get_status()
+        return None
 
     # ----------------------------------------
     # High-Level Request Methods
@@ -399,7 +588,7 @@ class GLPClient:
             # First page: log total count
             if total is None:
                 total = data.get("total", len(items))
-                print(f"[GLPClient] Paginating {endpoint}: {total:,} total items")
+                logger.info(f"Paginating {endpoint}: {total:,} total items")
 
             # Yield this page's items
             if items:
@@ -409,7 +598,7 @@ class GLPClient:
             pages_fetched += 1
             fetched_count = offset + len(items)
             percent = (fetched_count / total * 100) if total > 0 else 100
-            print(f"[GLPClient] Progress: {fetched_count:,}/{total:,} ({percent:.1f}%)")
+            logger.debug(f"Progress: {fetched_count:,}/{total:,} ({percent:.1f}%)")
 
             # Check termination conditions
             if fetched_count >= total:
@@ -417,7 +606,7 @@ class GLPClient:
             if len(items) < config.page_size:
                 break
             if config.max_pages and pages_fetched >= config.max_pages:
-                print(f"[GLPClient] Reached max_pages limit ({config.max_pages})")
+                logger.info(f"Reached max_pages limit ({config.max_pages})")
                 break
 
             # Prepare for next page
@@ -427,7 +616,7 @@ class GLPClient:
             if config.delay_between_pages > 0:
                 await asyncio.sleep(config.delay_between_pages)
 
-        print(f"[GLPClient] Pagination complete: {fetched_count:,} items in {pages_fetched} pages")
+        logger.info(f"Pagination complete: {fetched_count:,} items in {pages_fetched} pages")
 
     async def fetch_all(
         self,

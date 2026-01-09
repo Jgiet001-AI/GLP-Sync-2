@@ -29,10 +29,24 @@ Example:
 Author: HPE GreenLake Team
 """
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
 from .client import SUBSCRIPTIONS_PAGINATION, GLPClient
+from .database import database_transaction
+from .exceptions import (
+    ConnectionPoolError,
+    DatabaseError,
+    ErrorCollector,
+    GLPError,
+    IntegrityError,
+    PartialSyncError,
+    SyncError,
+    ValidationError,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionSyncer:
@@ -156,7 +170,7 @@ class SubscriptionSyncer:
             f"and endTime lt '{cutoff_iso}'"
         )
 
-        print(f"[SubscriptionSyncer] Fetching subscriptions expiring before {cutoff_iso}")
+        logger.info(f"Fetching subscriptions expiring before {cutoff_iso}")
 
         return await self.fetch_with_filter(
             filter_expr=filter_expr,
@@ -171,10 +185,17 @@ class SubscriptionSyncer:
 
         Returns:
             List of subscriptions with the specified status
+
+        Raises:
+            ValidationError: If status is invalid
         """
         valid_statuses = {"STARTED", "ENDED", "SUSPENDED", "CANCELLED", "LOCKED", "NOT_STARTED"}
         if status not in valid_statuses:
-            raise ValueError(f"Invalid status: {status}. Must be one of {valid_statuses}")
+            raise ValidationError(
+                f"Invalid status: {status}. Must be one of {valid_statuses}",
+                field="status",
+                status_code=400,
+            )
 
         return await self.fetch_with_filter(f"subscriptionStatus eq '{status}'")
 
@@ -194,26 +215,36 @@ class SubscriptionSyncer:
     # ----------------------------------------
 
     async def sync_to_postgres(self, subscriptions: list[dict]) -> dict:
-        """Upsert subscriptions to PostgreSQL.
+        """Upsert subscriptions to PostgreSQL with proper error handling.
 
         NOTE: This assumes a 'subscriptions' table exists. You'll need to
         create the schema first. See db/subscriptions_schema.sql
+
+        Uses database transactions to ensure consistency and ErrorCollector
+        to continue processing on individual subscription failures.
 
         Args:
             subscriptions: List of subscription dictionaries from API
 
         Returns:
             Dict with sync statistics
+
+        Raises:
+            ConnectionPoolError: If database pool is not available
+            PartialSyncError: If some subscriptions failed to sync
         """
         if self.db_pool is None:
-            raise ValueError("Database connection pool is required")
+            raise ConnectionPoolError(
+                "Database connection pool is required for sync"
+            )
 
         inserted = 0
         updated = 0
-        errors = 0
+        error_collector = ErrorCollector()
 
-        async with self.db_pool.acquire() as conn:
+        async with database_transaction(self.db_pool) as conn:
             for sub in subscriptions:
+                sub_id = sub.get("id", "unknown")
                 try:
                     exists = await conn.fetchval(
                         "SELECT 1 FROM subscriptions WHERE id = $1",
@@ -227,17 +258,48 @@ class SubscriptionSyncer:
                         await self._insert_subscription(conn, sub)
                         inserted += 1
 
-                except Exception as e:
-                    errors += 1
-                    print(f"[SubscriptionSyncer] Error syncing subscription {sub.get('id')}: {e}")
+                except IntegrityError as e:
+                    # Log but continue - integrity errors are usually data issues
+                    logger.warning(f"Integrity error syncing subscription {sub_id}: {e}")
+                    error_collector.add(e, context={"subscription_id": sub_id})
 
-        return {
+                except DatabaseError as e:
+                    # Database errors - collect and continue
+                    logger.error(f"Database error syncing subscription {sub_id}: {e}")
+                    error_collector.add(e, context={"subscription_id": sub_id})
+
+                except Exception as e:
+                    # Unexpected errors - wrap and collect
+                    logger.error(f"Unexpected error syncing subscription {sub_id}: {e}")
+                    error_collector.add(
+                        SyncError(f"Failed to sync subscription: {e}", cause=e),
+                        context={"subscription_id": sub_id}
+                    )
+
+        stats = {
             "total": len(subscriptions),
             "inserted": inserted,
             "updated": updated,
-            "errors": errors,
+            "errors": error_collector.count(),
             "synced_at": datetime.utcnow().isoformat(),
         }
+
+        logger.info(
+            f"Subscription sync complete: {inserted} inserted, {updated} updated, "
+            f"{error_collector.count()} errors"
+        )
+
+        # If there were errors, raise PartialSyncError with full stats
+        if error_collector.has_errors():
+            raise PartialSyncError(
+                f"Subscription sync completed with {error_collector.count()} errors",
+                succeeded=inserted + updated,
+                failed=error_collector.count(),
+                errors=[e for e, _ in error_collector.get_errors()],
+                details=stats,
+            )
+
+        return stats
 
     async def _insert_subscription(self, conn, sub: dict):
         """Insert a single subscription into PostgreSQL with all API fields."""
@@ -374,20 +436,33 @@ class SubscriptionSyncer:
 
         Returns:
             Sync statistics dictionary
-        """
-        print(f"[SubscriptionSyncer] Starting sync at {datetime.utcnow().isoformat()}")
 
-        subscriptions = await self.fetch_all_subscriptions()
+        Raises:
+            GLPError: If API fetch fails
+            PartialSyncError: If some subscriptions failed to sync
+        """
+        logger.info(f"Starting subscription sync at {datetime.utcnow().isoformat()}")
+
+        try:
+            subscriptions = await self.fetch_all_subscriptions()
+        except GLPError:
+            logger.error("Failed to fetch subscriptions from API")
+            raise
 
         if self.db_pool:
-            stats = await self.sync_to_postgres(subscriptions)
+            try:
+                stats = await self.sync_to_postgres(subscriptions)
+            except PartialSyncError as e:
+                # PartialSyncError contains stats, log and return them
+                logger.warning(f"Partial sync: {e.succeeded} succeeded, {e.failed} failed")
+                return e.details
         else:
             stats = {
                 "total": len(subscriptions),
                 "note": "No database configured, fetch only",
             }
 
-        print(f"[SubscriptionSyncer] Sync complete: {stats}")
+        logger.info(f"Subscription sync complete: {stats}")
         return stats
 
     async def fetch_and_save_json(self, filepath: str = "subscriptions.json") -> int:
@@ -398,13 +473,17 @@ class SubscriptionSyncer:
 
         Returns:
             Number of subscriptions saved
+
+        Raises:
+            GLPError: If API fetch fails
+            IOError: If file cannot be written
         """
         subscriptions = await self.fetch_all_subscriptions()
 
         with open(filepath, "w") as f:
             json.dump(subscriptions, f, indent=2)
 
-        print(f"[SubscriptionSyncer] Saved {len(subscriptions):,} subscriptions to {filepath}")
+        logger.info(f"Saved {len(subscriptions):,} subscriptions to {filepath}")
         return len(subscriptions)
 
     # ----------------------------------------

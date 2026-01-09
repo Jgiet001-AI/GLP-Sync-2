@@ -9,6 +9,7 @@ Features:
     - Thread-safe token refresh using asyncio.Lock
     - Exponential backoff retry on failures (1s, 2s, 4s)
     - Transparent token refresh on 401 responses
+    - Comprehensive error handling with typed exceptions
 
 Security Notes:
     - Tokens are cached in memory only (never persisted to disk)
@@ -23,6 +24,7 @@ Example:
 Author: HPE GreenLake Team
 """
 import asyncio
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -31,7 +33,18 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 
+from .exceptions import (
+    ConfigurationError,
+    ConnectionError,
+    InvalidCredentialsError,
+    NetworkError,
+    TimeoutError,
+    TokenFetchError,
+)
+
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -99,7 +112,10 @@ class TokenManager:
                 missing.append("GLP_CLIENT_SECRET")
             if not self.token_url:
                 missing.append("GLP_TOKEN_URL")
-            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
+            raise ConfigurationError(
+                f"Missing required environment variables: {', '.join(missing)}",
+                missing_keys=missing,
+            )
 
         self._cached_token: Optional[CachedToken] = None
         self._lock = asyncio.Lock()
@@ -125,7 +141,22 @@ class TokenManager:
             return self._cached_token.access_token
 
     async def _fetch_token(self, max_retries: int = 3) -> CachedToken:
-        """Fetch a new access token from the GLP API."""
+        """Fetch a new access token from the GLP API.
+
+        Uses exponential backoff on failure with detailed error classification.
+
+        Args:
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            CachedToken with the new access token
+
+        Raises:
+            TokenFetchError: If token cannot be fetched after retries
+            InvalidCredentialsError: If credentials are invalid (401)
+            ConnectionError: If connection to token server fails
+            TimeoutError: If request times out
+        """
         payload = {
             "grant_type": "client_credentials",
             "client_id": self.client_id,
@@ -136,15 +167,16 @@ class TokenManager:
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        last_error = None
+        last_error: Optional[Exception] = None
 
-        for attempt in range(max_retries):
+        for attempt in range(1, max_retries + 1):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.post(
                         self.token_url,
                         data=payload,
                         headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
@@ -156,23 +188,86 @@ class TokenManager:
                                 expires_at=expires_at,
                                 token_type=data.get("token_type", "Bearer"),
                             )
-                            print(f"[TokenManager] Token fetched successfully, expires in {expires_in} seconds")
+                            logger.info(
+                                f"Token fetched successfully, expires in {expires_in}s"
+                            )
                             return token
 
-                        else:
-                            error_text = await response.text()
-                            last_error = f"HTTP {response.status}: {error_text}"
-                            print(f"[TokenManager] Failed to fetch token, attempt {attempt + 1} of {max_retries}: {last_error}")
+                        # Handle specific error statuses
+                        error_text = await response.text()
+
+                        if response.status == 401:
+                            raise InvalidCredentialsError(
+                                "Invalid client credentials",
+                                details={"response": error_text[:200]},
+                            )
+
+                        if response.status == 400:
+                            # Bad request - likely invalid grant type or params
+                            raise TokenFetchError(
+                                f"Invalid token request: {error_text[:200]}",
+                                status_code=400,
+                                attempts=attempt,
+                            )
+
+                        # Other errors - will retry
+                        last_error = TokenFetchError(
+                            f"Token server returned HTTP {response.status}",
+                            status_code=response.status,
+                            attempts=attempt,
+                            details={"response": error_text[:200]},
+                        )
+                        logger.warning(
+                            f"Token fetch attempt {attempt}/{max_retries} failed: "
+                            f"HTTP {response.status}"
+                        )
+
+            except InvalidCredentialsError:
+                # Don't retry on invalid credentials
+                raise
+
+            except aiohttp.ClientConnectionError as e:
+                last_error = ConnectionError(
+                    f"Failed to connect to token server: {e}",
+                    host=self.token_url,
+                    cause=e,
+                )
+                logger.warning(
+                    f"Token fetch attempt {attempt}/{max_retries} failed: "
+                    f"Connection error - {e}"
+                )
+
+            except asyncio.TimeoutError as e:
+                last_error = TimeoutError(
+                    "Token request timed out",
+                    timeout_seconds=30,
+                    cause=e,
+                )
+                logger.warning(
+                    f"Token fetch attempt {attempt}/{max_retries} failed: Timeout"
+                )
 
             except aiohttp.ClientError as e:
-                last_error = str(e)
-                print(f"[TokenManager] Failed to fetch token, attempt {attempt + 1} of {max_retries}: {e}")
+                last_error = NetworkError(
+                    f"Network error fetching token: {e}",
+                    cause=e,
+                )
+                logger.warning(
+                    f"Token fetch attempt {attempt}/{max_retries} failed: {e}"
+                )
 
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
+            # Exponential backoff before retry
+            if attempt < max_retries:
+                wait_time = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                logger.debug(f"Waiting {wait_time}s before retry")
                 await asyncio.sleep(wait_time)
 
-        raise TokenError(f"Failed to fetch token after {max_retries} attempts: {last_error}")
+        # All retries exhausted
+        raise TokenFetchError(
+            f"Failed to fetch token after {max_retries} attempts",
+            attempts=max_retries,
+            cause=last_error,
+        )
 
     async def force_refresh(self) -> str:
         """Force a token refresh, ignoring the cache."""
@@ -196,9 +291,8 @@ class TokenManager:
         }
 
 
-class TokenError(Exception):
-    """Exception raised for token-related errors."""
-    pass
+# Backward compatibility alias
+TokenError = TokenFetchError
 
 
 _default_manager: Optional[TokenManager] = None
