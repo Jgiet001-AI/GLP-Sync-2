@@ -3,9 +3,12 @@
 
 Tests cover:
     - DeviceSyncer initialization
-    - API pagination logic
-    - Error handling (401, 429, network errors)
+    - Device fetching via GLPClient
+    - Database sync operations
     - JSON export functionality
+
+Note: DeviceSyncer now composes GLPClient for HTTP operations.
+      The tests mock GLPClient rather than aiohttp directly.
 """
 import pytest
 import asyncio
@@ -17,8 +20,8 @@ from datetime import datetime
 # Import the classes we're testing
 import sys
 sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
-from src.glp.api.devices import DeviceSyncer, APIError
-from src.glp.api.auth import TokenManager
+from src.glp.api.devices import DeviceSyncer
+from src.glp.api.client import GLPClient, APIError
 
 
 # ============================================
@@ -28,50 +31,26 @@ from src.glp.api.auth import TokenManager
 class TestDeviceSyncerInit:
     """Test DeviceSyncer initialization."""
 
-    @pytest.fixture
-    def env_vars(self, monkeypatch):
-        """Set required environment variables."""
-        monkeypatch.setenv("GLP_CLIENT_ID", "test_client_id")
-        monkeypatch.setenv("GLP_CLIENT_SECRET", "test_client_secret")
-        monkeypatch.setenv("GLP_TOKEN_URL", "https://auth.example.com/token")
-        monkeypatch.setenv("GLP_BASE_URL", "https://api.example.com")
+    def test_syncer_requires_client(self):
+        """Should require a GLPClient instance."""
+        mock_client = MagicMock(spec=GLPClient)
+        syncer = DeviceSyncer(client=mock_client)
+        
+        assert syncer.client is mock_client
+        assert syncer.db_pool is None
 
-    def test_missing_base_url_raises(self, monkeypatch):
-        """Should raise ValueError when base URL is missing."""
-        monkeypatch.setenv("GLP_CLIENT_ID", "test")
-        monkeypatch.setenv("GLP_CLIENT_SECRET", "test")
-        monkeypatch.setenv("GLP_TOKEN_URL", "https://example.com/token")
-        monkeypatch.delenv("GLP_BASE_URL", raising=False)
+    def test_syncer_accepts_db_pool(self):
+        """Should accept optional database pool."""
+        mock_client = MagicMock(spec=GLPClient)
+        mock_pool = MagicMock()
         
-        with pytest.raises(ValueError) as exc:
-            DeviceSyncer(token_manager=MagicMock())
+        syncer = DeviceSyncer(client=mock_client, db_pool=mock_pool)
         
-        assert "Base URL" in str(exc.value)
+        assert syncer.db_pool is mock_pool
 
-    def test_api_url_construction(self, env_vars):
-        """Should correctly construct the API URL."""
-        syncer = DeviceSyncer(
-            token_manager=MagicMock(),
-            base_url="https://api.example.com",
-        )
-        
-        assert syncer.api_url == "https://api.example.com/devices/v1/devices"
-
-    def test_base_url_trailing_slash_handling(self, env_vars):
-        """Should handle base URLs with and without trailing slashes."""
-        # Without slash
-        syncer1 = DeviceSyncer(
-            token_manager=MagicMock(),
-            base_url="https://api.example.com",
-        )
-        
-        # With slash
-        syncer2 = DeviceSyncer(
-            token_manager=MagicMock(),
-            base_url="https://api.example.com/",
-        )
-        
-        assert syncer1.api_url == syncer2.api_url
+    def test_endpoint_constant(self):
+        """Should have correct API endpoint constant."""
+        assert DeviceSyncer.ENDPOINT == "/devices/v1/devices"
 
 
 # ============================================
@@ -79,113 +58,70 @@ class TestDeviceSyncerInit:
 # ============================================
 
 class TestDeviceFetching:
-    """Test device fetching and pagination."""
+    """Test device fetching via GLPClient."""
 
     @pytest.fixture
-    def mock_token_manager(self):
-        """Create a mock token manager."""
-        manager = MagicMock()
-        manager.get_token = AsyncMock(return_value="test_token_123")
-        manager.invalidate = MagicMock()
-        return manager
+    def mock_client(self):
+        """Create a mock GLPClient."""
+        client = MagicMock(spec=GLPClient)
+        return client
 
     @pytest.fixture
-    def syncer(self, mock_token_manager, monkeypatch):
-        """Create a DeviceSyncer with mocked dependencies."""
-        monkeypatch.setenv("GLP_BASE_URL", "https://api.example.com")
-        return DeviceSyncer(token_manager=mock_token_manager)
+    def syncer(self, mock_client):
+        """Create a DeviceSyncer with mocked GLPClient."""
+        return DeviceSyncer(client=mock_client)
 
     @pytest.mark.asyncio
-    async def test_fetch_single_page(self, syncer):
-        """Should fetch devices from a single page."""
-        mock_devices = [
+    async def test_fetch_all_devices(self, syncer, mock_client):
+        """Should fetch devices via GLPClient.fetch_all."""
+        expected_devices = [
             {"id": "device-1", "serialNumber": "SN001"},
             {"id": "device-2", "serialNumber": "SN002"},
         ]
         
-        # Create proper async context manager mocks
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.json = AsyncMock(return_value={
-            "items": mock_devices,
-            "total": 2,
-        })
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=None)
+        mock_client.fetch_all = AsyncMock(return_value=expected_devices)
         
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_response)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
+        devices = await syncer.fetch_all_devices()
         
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            devices = await syncer.fetch_all_devices()
+        # Verify correct endpoint and pagination config
+        mock_client.fetch_all.assert_called_once()
+        call_args = mock_client.fetch_all.call_args
+        assert call_args[0][0] == "/devices/v1/devices"
         
         assert len(devices) == 2
         assert devices[0]["id"] == "device-1"
 
     @pytest.mark.asyncio
-    async def test_fetch_handles_pagination(self, syncer):
-        """Should fetch all pages when devices exceed limit."""
-        # First page: 2000 devices
-        page1_devices = [{"id": f"device-{i}"} for i in range(2000)]
-        # Second page: remaining 500 devices
-        page2_devices = [{"id": f"device-{i}"} for i in range(2000, 2500)]
+    async def test_fetch_devices_generator(self, syncer, mock_client):
+        """Should yield device pages via GLPClient.paginate."""
+        page1 = [{"id": "device-1"}, {"id": "device-2"}]
+        page2 = [{"id": "device-3"}]
         
-        call_count = 0
+        async def mock_paginate(*args, **kwargs):
+            yield page1
+            yield page2
         
-        async def mock_response_factory(*args, **kwargs):
-            nonlocal call_count
-            mock_resp = AsyncMock()
-            mock_resp.status = 200
-            if call_count == 0:
-                mock_resp.json = AsyncMock(return_value={
-                    "items": page1_devices,
-                    "total": 2500,
-                })
-            else:
-                mock_resp.json = AsyncMock(return_value={
-                    "items": page2_devices,
-                    "total": 2500,
-                })
-            call_count += 1
-            return mock_resp
+        mock_client.paginate = mock_paginate
         
-        with patch("aiohttp.ClientSession") as mock_session_cls:
-            mock_session = AsyncMock()
-            mock_session.__aenter__.return_value = mock_session
-            mock_session.get.return_value.__aenter__ = mock_response_factory
-            mock_session_cls.return_value = mock_session
-            
-            # Note: This test is simplified; real pagination test would need 
-            # proper async context manager mocking
+        all_pages = []
+        async for page in syncer.fetch_devices_generator():
+            all_pages.append(page)
+        
+        assert len(all_pages) == 2
+        assert len(all_pages[0]) == 2
+        assert len(all_pages[1]) == 1
 
     @pytest.mark.asyncio
-    async def test_fetch_and_save_json(self, syncer, tmp_path):
+    async def test_fetch_and_save_json(self, syncer, mock_client, tmp_path):
         """Should save devices to JSON file."""
         mock_devices = [
             {"id": "device-1", "serialNumber": "SN001"},
         ]
         
-        # Create proper async context manager mocks
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.json = AsyncMock(return_value={
-            "items": mock_devices,
-            "total": 1,
-        })
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=None)
-        
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_response)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
+        mock_client.fetch_all = AsyncMock(return_value=mock_devices)
         
         output_file = tmp_path / "devices.json"
-        
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            count = await syncer.fetch_and_save_json(str(output_file))
+        count = await syncer.fetch_and_save_json(str(output_file))
         
         assert count == 1
         assert output_file.exists()
@@ -198,6 +134,85 @@ class TestDeviceFetching:
 
 
 # ============================================
+# Database Sync Tests
+# ============================================
+
+class TestDatabaseSync:
+    """Test database synchronization."""
+
+    @pytest.fixture
+    def mock_client(self):
+        return MagicMock(spec=GLPClient)
+
+    @pytest.fixture
+    def mock_db_pool(self):
+        """Create a mock database connection pool."""
+        pool = MagicMock()
+        conn = AsyncMock()
+        
+        # Mock the pool.acquire() async context manager
+        pool.acquire = MagicMock()
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+        
+        return pool, conn
+
+    @pytest.mark.asyncio
+    async def test_sync_requires_db_pool(self, mock_client):
+        """Should raise error when syncing without database pool."""
+        syncer = DeviceSyncer(client=mock_client)
+        
+        with pytest.raises(ValueError) as exc:
+            await syncer.sync_to_postgres([{"id": "test"}])
+        
+        assert "Database connection pool is required" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_sync_inserts_new_device(self, mock_client, mock_db_pool):
+        """Should insert new devices."""
+        pool, conn = mock_db_pool
+        
+        # Device doesn't exist (fetchval returns None)
+        conn.fetchval = AsyncMock(return_value=None)
+        conn.execute = AsyncMock()
+        
+        syncer = DeviceSyncer(client=mock_client, db_pool=pool)
+        
+        devices = [{
+            "id": "device-1",
+            "serialNumber": "SN001",
+            "macAddress": "AA:BB:CC:DD:EE:FF",
+        }]
+        
+        stats = await syncer.sync_to_postgres(devices)
+        
+        assert stats["inserted"] == 1
+        assert stats["updated"] == 0
+        assert stats["errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_sync_updates_existing_device(self, mock_client, mock_db_pool):
+        """Should update existing devices."""
+        pool, conn = mock_db_pool
+        
+        # Device exists (fetchval returns truthy)
+        conn.fetchval = AsyncMock(return_value=1)
+        conn.execute = AsyncMock()
+        
+        syncer = DeviceSyncer(client=mock_client, db_pool=pool)
+        
+        devices = [{
+            "id": "device-1",
+            "serialNumber": "SN001",
+        }]
+        
+        stats = await syncer.sync_to_postgres(devices)
+        
+        assert stats["inserted"] == 0
+        assert stats["updated"] == 1
+
+
+# ============================================
 # Error Handling Tests
 # ============================================
 
@@ -205,37 +220,22 @@ class TestErrorHandling:
     """Test error handling scenarios."""
 
     @pytest.fixture
-    def mock_token_manager(self):
-        manager = MagicMock()
-        manager.get_token = AsyncMock(return_value="test_token")
-        manager.invalidate = MagicMock()
-        return manager
-
-    @pytest.fixture
-    def syncer(self, mock_token_manager, monkeypatch):
-        monkeypatch.setenv("GLP_BASE_URL", "https://api.example.com")
-        return DeviceSyncer(token_manager=mock_token_manager)
+    def mock_client(self):
+        return MagicMock(spec=GLPClient)
 
     @pytest.mark.asyncio
-    async def test_api_error_on_non_200(self, syncer):
-        """Should raise APIError on non-200 status."""
-        # Create proper async context manager mocks
-        mock_response = MagicMock()
-        mock_response.status = 500
-        mock_response.text = AsyncMock(return_value="Internal Server Error")
-        mock_response.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_response.__aexit__ = AsyncMock(return_value=None)
+    async def test_fetch_propagates_api_error(self, mock_client):
+        """Should propagate APIError from GLPClient."""
+        mock_client.fetch_all = AsyncMock(
+            side_effect=APIError(status=500, message="Server Error")
+        )
         
-        mock_session = MagicMock()
-        mock_session.get = MagicMock(return_value=mock_response)
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock(return_value=None)
+        syncer = DeviceSyncer(client=mock_client)
         
-        with patch("aiohttp.ClientSession", return_value=mock_session):
-            with pytest.raises(APIError) as exc:
-                await syncer.fetch_all_devices()
-            
-            assert "500" in str(exc.value)
+        with pytest.raises(APIError) as exc:
+            await syncer.fetch_all_devices()
+        
+        assert exc.value.status == 500
 
 
 # ============================================
