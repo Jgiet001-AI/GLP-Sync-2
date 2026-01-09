@@ -19,10 +19,10 @@ Environment Variables Required:
     - DATABASE_URL: PostgreSQL connection string (optional for --json-only)
 
 Example Usage:
-    $ python main.py                              # Sync devices to database
-    $ python main.py --json-only                  # Export devices to JSON
-    $ python main.py --subscriptions              # Sync subscriptions
-    $ python main.py --all                        # Sync devices + subscriptions
+    $ python main.py                              # Sync both devices + subscriptions
+    $ python main.py --devices                    # Sync devices only
+    $ python main.py --subscriptions              # Sync subscriptions only
+    $ python main.py --json-only                  # Export both to JSON
     $ python main.py --expiring-days 90           # Show expiring subscriptions
 
 Author: HPE GreenLake Team
@@ -223,8 +223,17 @@ async def run_sync(args: argparse.Namespace):
                 return
             
             # Determine what to sync
-            sync_devices = args.devices or args.all or (not args.subscriptions)
-            sync_subscriptions = args.subscriptions or args.all
+            # Default: sync both. If specific flag given, sync only that one.
+            if args.devices and not args.subscriptions:
+                sync_devices = True
+                sync_subscriptions = False
+            elif args.subscriptions and not args.devices:
+                sync_devices = False
+                sync_subscriptions = True
+            else:
+                # Default or --all: sync both
+                sync_devices = True
+                sync_subscriptions = True
             
             results = {}
             

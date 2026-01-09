@@ -14,27 +14,25 @@ Sync device and subscription inventory from HPE GreenLake Platform to PostgreSQL
 ## CLI Usage
 
 ```bash
-# DEVICES (default)
-python main.py                        # Sync devices to database
-python main.py --devices              # Explicit: sync devices only
+# DEFAULT: syncs both devices AND subscriptions
+python main.py
 
-# SUBSCRIPTIONS
-python main.py --subscriptions        # Sync subscriptions only
+# SYNC ONLY ONE
+python main.py --devices              # Devices only
+python main.py --subscriptions        # Subscriptions only
+
+# SUBSCRIPTIONS UTILITIES
 python main.py --expiring-days 90     # Show subscriptions expiring in 90 days
 
-# BOTH
-python main.py --all                  # Sync devices AND subscriptions
-
 # JSON EXPORT (no database needed)
-python main.py --json-only            # Export devices to devices.json
-python main.py --subscriptions --json-only  # Export subscriptions to subscriptions.json
+python main.py --json-only            # Export both to JSON files
+python main.py --devices --json-only  # Export devices only
 
 # BACKUPS (sync to DB + save JSON)
-python main.py --backup devices_backup.json
-python main.py --subscriptions --subscription-backup subs_backup.json
+python main.py --backup devices.json --subscription-backup subs.json
 ```
 
-> **Note**: By default (no flags), only devices are synced. Use `--all` to sync both resources.
+> **Note**: By default, both devices and subscriptions are synced. Use `--devices` or `--subscriptions` to sync only one.
 
 ## Quick Start
 
