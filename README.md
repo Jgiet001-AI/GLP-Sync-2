@@ -72,6 +72,74 @@ python main.py --json-only            # Export to JSON files
 python main.py --backup devices.json --subscription-backup subs.json
 ```
 
+## MCP Server
+
+A read-only MCP (Model Context Protocol) server for AI assistants to query the database.
+
+### Starting the Server
+
+```bash
+# stdio transport (default, for Claude Desktop)
+python server.py
+
+# HTTP transport (for remote/web access)
+python server.py --transport http --port 8000
+```
+
+### Claude Desktop Configuration
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "greenlake-inventory": {
+      "command": "uv",
+      "args": ["run", "python", "server.py"],
+      "cwd": "/path/to/Demo_Comcast_GLP",
+      "env": {
+        "DATABASE_URL": "postgresql://user:pass@localhost:5432/postgres"
+      }
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+| ---- | ----------- |
+| `search_devices` | Full-text search across devices |
+| `get_device_by_serial` | Get device by serial number |
+| `list_devices` | List devices with filters (type, region, state) |
+| `get_device_subscriptions` | Get subscriptions linked to a device |
+| `search_subscriptions` | Full-text search across subscriptions |
+| `get_subscription_by_key` | Get subscription by key |
+| `list_expiring_subscriptions` | Subscriptions expiring within N days |
+| `get_device_summary` | Device counts by type and region |
+| `get_subscription_summary` | Subscription counts by type/status |
+| `run_query` | Execute read-only SQL queries |
+| `ask_database` | Natural language database queries (uses sampling) |
+
+### Available MCP Resources
+
+| Resource URI | Description |
+| ------------ | ----------- |
+| `schema://devices` | Devices table schema with descriptions |
+| `schema://subscriptions` | Subscriptions table schema |
+| `schema://views` | Available database views documentation |
+| `data://valid-values` | Valid values for categorical columns |
+| `data://query-examples` | Example SQL queries |
+
+### Available MCP Prompts
+
+| Prompt | Description |
+| ------ | ----------- |
+| `analyze_device` | Analyze a specific device by serial |
+| `analyze_expiring` | Subscription renewal analysis |
+| `device_report` | Device inventory report by type |
+| `subscription_utilization` | License utilization analysis |
+
 ## Docker Commands
 
 ```bash
@@ -116,6 +184,7 @@ docker compose down -v
 
 ```text
 ├── main.py                      # CLI entry point
+├── server.py                    # FastMCP server (read-only database access)
 ├── scheduler.py                 # Automated sync scheduler
 ├── Dockerfile                   # Production container
 ├── docker-compose.yml           # Full stack deployment
@@ -126,7 +195,7 @@ docker compose down -v
 │   ├── devices.py               # Device sync logic
 │   └── subscriptions.py         # Subscription sync logic
 ├── db/
-│   ├── schema.sql               # Device tables
+│   ├── schema.sql               # Device tables + LLM helper views
 │   ├── subscriptions_schema.sql # Subscription tables
 │   └── migrations/              # Schema migrations
 └── tests/                       # 49 tests
