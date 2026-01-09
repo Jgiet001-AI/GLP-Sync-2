@@ -131,6 +131,74 @@ class TestSchema:
             """)
         assert result is True
 
+    @pytest.mark.asyncio
+    async def test_subscriptions_table_exists(self, db_pool):
+        """The subscriptions table should exist."""
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'subscriptions'
+                )
+            """)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_subscriptions_table_columns(self, db_pool):
+        """The subscriptions table should have required columns."""
+        async with db_pool.acquire() as conn:
+            columns = await conn.fetch("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'subscriptions'
+            """)
+        
+        column_names = {row["column_name"] for row in columns}
+        
+        required_columns = {
+            "id", "key", "resource_type", "subscription_type", "subscription_status",
+            "quantity", "available_quantity", "sku", "start_time", "end_time",
+            "tier", "product_type", "is_eval", "raw_data", "synced_at"
+        }
+        
+        assert required_columns.issubset(column_names)
+
+    @pytest.mark.asyncio
+    async def test_subscription_tags_table_exists(self, db_pool):
+        """The subscription_tags table should exist."""
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'subscription_tags'
+                )
+            """)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_device_subscriptions_table_exists(self, db_pool):
+        """The device_subscriptions table should exist."""
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'device_subscriptions'
+                )
+            """)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_device_tags_table_exists(self, db_pool):
+        """The device_tags table should exist."""
+        async with db_pool.acquire() as conn:
+            result = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'device_tags'
+                )
+            """)
+        assert result is True
+
 
 # ============================================
 # Device CRUD Tests
