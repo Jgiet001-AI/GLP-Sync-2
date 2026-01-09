@@ -554,6 +554,68 @@ class CircuitOpenError(SyncError):
         self.failure_count = failure_count
 
 
+class AsyncOperationError(SyncError):
+    """Raised when an async API operation fails.
+
+    Attributes:
+        operation_url: URL of the failed operation
+        operation_status: Final status of the operation
+    """
+
+    def __init__(
+        self,
+        message: str = "Async operation failed",
+        operation_url: Optional[str] = None,
+        operation_status: Optional[str] = None,
+        **kwargs,
+    ):
+        details = kwargs.pop("details", {})
+        if operation_url:
+            details["operation_url"] = operation_url
+        if operation_status:
+            details["operation_status"] = operation_status
+
+        super().__init__(
+            message,
+            code="ASYNC_OPERATION_FAILED",
+            details=details,
+            recoverable=False,
+            **kwargs,
+        )
+        self.operation_url = operation_url
+        self.operation_status = operation_status
+
+
+class DeviceLimitError(GLPError):
+    """Raised when device count exceeds API limits.
+
+    Attributes:
+        device_count: Number of devices provided
+        max_devices: Maximum allowed devices
+    """
+
+    def __init__(
+        self,
+        device_count: int,
+        max_devices: int = 25,
+        **kwargs,
+    ):
+        message = f"Device count ({device_count}) exceeds maximum ({max_devices})"
+        details = kwargs.pop("details", {})
+        details["device_count"] = device_count
+        details["max_devices"] = max_devices
+
+        super().__init__(
+            message,
+            code="DEVICE_LIMIT_EXCEEDED",
+            details=details,
+            recoverable=False,
+            **kwargs,
+        )
+        self.device_count = device_count
+        self.max_devices = max_devices
+
+
 # ============================================
 # Error Aggregation
 # ============================================
@@ -647,6 +709,9 @@ __all__ = [
     "SyncError",
     "PartialSyncError",
     "CircuitOpenError",
+    "AsyncOperationError",
+    # Device Management
+    "DeviceLimitError",
     # Utilities
     "ErrorCollector",
 ]

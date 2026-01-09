@@ -34,8 +34,8 @@ Author: HPE GreenLake Team
 """
 import asyncio
 import logging
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Optional
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Optional, Union
 
 import aiohttp
 
@@ -74,6 +74,20 @@ class PaginationConfig:
     page_size: int = 50
     delay_between_pages: float = 0.5
     max_pages: Optional[int] = None
+
+
+@dataclass
+class AsyncOperationResult:
+    """Result from an async API operation (202 Accepted).
+
+    Attributes:
+        operation_url: URL to poll for operation status (from Location header)
+        accepted: Whether the operation was accepted
+        response_body: Optional response body from the API
+    """
+    operation_url: str
+    accepted: bool = True
+    response_body: Optional[dict] = field(default=None)
 
 
 # Pre-configured settings for known APIs
@@ -209,7 +223,9 @@ class GLPClient:
         endpoint: str,
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
-    ) -> dict[str, Any]:
+        extra_headers: Optional[dict[str, str]] = None,
+        accept_202: bool = False,
+    ) -> Union[dict[str, Any], AsyncOperationResult]:
         """Make a single HTTP request (no retry logic).
 
         This is the lowest-level request method. It handles URL construction
@@ -218,11 +234,16 @@ class GLPClient:
         Args:
             method: HTTP method (GET, POST, PATCH, DELETE)
             endpoint: API endpoint path (e.g., "/devices/v1/devices")
-            params: Query parameters
+            params: Query parameters. Values can be lists for multi-value params
+                    (e.g., {"id": ["uuid1", "uuid2"]} becomes ?id=uuid1&id=uuid2)
             json_body: JSON request body (for POST/PATCH)
+            extra_headers: Additional headers to include (overrides defaults)
+            accept_202: If True, treat 202 Accepted as success and return
+                       AsyncOperationResult with Location header
 
         Returns:
-            Parsed JSON response as dict
+            Parsed JSON response as dict, or AsyncOperationResult if accept_202=True
+            and response is 202
 
         Raises:
             APIError: If response status is not 2xx
@@ -238,16 +259,34 @@ class GLPClient:
 
         url = f"{self.base_url}{endpoint}"
 
+        # Handle multi-value query parameters (e.g., ?id=x&id=y)
+        query_params = self._build_query_params(params) if params else None
+
         try:
             headers = await self._get_auth_headers()
+            if extra_headers:
+                headers.update(extra_headers)
 
             async with self._session.request(
                 method=method,
                 url=url,
                 headers=headers,
-                params=params,
+                params=query_params,
                 json=json_body,
             ) as response:
+                # Handle 202 Accepted for async operations
+                if accept_202 and response.status == 202:
+                    location = response.headers.get("Location", "")
+                    try:
+                        body = await response.json()
+                    except Exception:
+                        body = None
+                    return AsyncOperationResult(
+                        operation_url=location,
+                        accepted=True,
+                        response_body=body,
+                    )
+
                 # Handle specific error statuses with typed exceptions
                 if response.status >= 400:
                     error_text = await response.text()
@@ -280,6 +319,24 @@ class GLPClient:
                 f"Network error during {method} {endpoint}: {e}",
                 cause=e,
             )
+
+    @staticmethod
+    def _build_query_params(
+        params: dict[str, Any]
+    ) -> list[tuple[str, str]]:
+        """Build query parameters, handling multi-value params.
+
+        Converts dict with list values to list of tuples for aiohttp.
+        Example: {"id": ["a", "b"], "limit": 10} -> [("id", "a"), ("id", "b"), ("limit", "10")]
+        """
+        result = []
+        for key, value in params.items():
+            if isinstance(value, list):
+                for v in value:
+                    result.append((key, str(v)))
+            elif value is not None:
+                result.append((key, str(value)))
+        return result
 
     def _create_api_error(
         self,
@@ -344,8 +401,10 @@ class GLPClient:
         endpoint: str,
         params: Optional[dict] = None,
         json_body: Optional[dict] = None,
+        extra_headers: Optional[dict[str, str]] = None,
+        accept_202: bool = False,
         max_retries: int = 3,
-    ) -> dict[str, Any]:
+    ) -> Union[dict[str, Any], AsyncOperationResult]:
         """Make an HTTP request with automatic retry and circuit breaker.
 
         This method wraps _request() with resilience logic:
@@ -360,10 +419,12 @@ class GLPClient:
             endpoint: API endpoint path
             params: Query parameters
             json_body: JSON request body
+            extra_headers: Additional headers to include
+            accept_202: If True, treat 202 as success and return AsyncOperationResult
             max_retries: Maximum retry attempts (default: 3)
 
         Returns:
-            Parsed JSON response
+            Parsed JSON response, or AsyncOperationResult if accept_202=True
 
         Raises:
             CircuitOpenError: If circuit breaker is open
@@ -385,7 +446,9 @@ class GLPClient:
 
         for attempt in range(1, max_retries + 1):
             try:
-                result = await self._request(method, endpoint, params, json_body)
+                result = await self._request(
+                    method, endpoint, params, json_body, extra_headers, accept_202
+                )
 
                 # Success - reset circuit breaker
                 if self._circuit_breaker:
@@ -539,6 +602,75 @@ class GLPClient:
             Parsed JSON response
         """
         return await self._request_with_retry("PATCH", endpoint, params=params, json_body=json_body)
+
+    async def patch_merge(
+        self,
+        endpoint: str,
+        json_body: dict,
+        params: Optional[dict] = None,
+    ) -> AsyncOperationResult:
+        """Make a PATCH request with application/merge-patch+json content type.
+
+        Used for GreenLake v2 APIs that use JSON Merge Patch (RFC 7396) and
+        return 202 Accepted with a Location header for async operations.
+
+        Args:
+            endpoint: API endpoint path
+            json_body: Request body as dict (will be JSON-encoded)
+            params: Query parameters (supports lists for multi-value params)
+
+        Returns:
+            AsyncOperationResult with operation_url for status tracking.
+            Note: If the API unexpectedly returns a non-202 response, the
+            operation_url will be empty. Callers should check operation_url
+            is truthy before polling for status.
+        """
+        result = await self._request_with_retry(
+            "PATCH",
+            endpoint,
+            params=params,
+            json_body=json_body,
+            extra_headers={"Content-Type": "application/merge-patch+json"},
+            accept_202=True,
+        )
+        if isinstance(result, AsyncOperationResult):
+            return result
+        # Unexpected: API returned non-202 response
+        return AsyncOperationResult(operation_url="", response_body=result)
+
+    async def post_async(
+        self,
+        endpoint: str,
+        json_body: dict,
+        params: Optional[dict] = None,
+    ) -> AsyncOperationResult:
+        """Make a POST request expecting 202 Accepted response.
+
+        Used for GreenLake v2 APIs that return 202 Accepted with a Location
+        header for async operations.
+
+        Args:
+            endpoint: API endpoint path
+            json_body: Request body as dict (will be JSON-encoded)
+            params: Query parameters
+
+        Returns:
+            AsyncOperationResult with operation_url for status tracking.
+            Note: If the API unexpectedly returns a non-202 response, the
+            operation_url will be empty. Callers should check operation_url
+            is truthy before polling for status.
+        """
+        result = await self._request_with_retry(
+            "POST",
+            endpoint,
+            params=params,
+            json_body=json_body,
+            accept_202=True,
+        )
+        if isinstance(result, AsyncOperationResult):
+            return result
+        # Unexpected: API returned non-202 response
+        return AsyncOperationResult(operation_url="", response_body=result)
 
     # ----------------------------------------
     # Pagination Methods

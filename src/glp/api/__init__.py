@@ -6,7 +6,8 @@ for interacting with the HPE GreenLake Platform.
 Classes:
     GLPClient: Generic HTTP client with pagination, retry, and circuit breaker
     TokenManager: OAuth2 token management with caching
-    DeviceSyncer: Device inventory synchronization
+    DeviceSyncer: Device inventory synchronization (read operations)
+    DeviceManager: Device management operations (write operations)
     SubscriptionSyncer: Subscription synchronization
 
 Exceptions:
@@ -19,6 +20,8 @@ Exceptions:
     NetworkError: Network connectivity issues
     DatabaseError: Database operation failures
     SyncError: Synchronization failures
+    DeviceLimitError: Device count exceeds API limits
+    AsyncOperationError: Async operation failed
 
 Resilience:
     CircuitBreaker: Prevent cascading failures
@@ -28,6 +31,7 @@ from .auth import TokenError, TokenManager, get_token
 from .client import (
     DEVICES_PAGINATION,
     SUBSCRIPTIONS_PAGINATION,
+    AsyncOperationResult,
     GLPClient,
     GLPClientError,
     PaginationConfig,
@@ -41,15 +45,18 @@ from .database import (
     database_connection,
     database_transaction,
 )
+from .device_manager import DeviceManager, DeviceType, OperationStatus
 from .devices import DeviceSyncer
 from .exceptions import (
     APIError,
+    AsyncOperationError,
     AuthenticationError,
     CircuitOpenError,
     ConfigurationError,
     ConnectionError,
     ConnectionPoolError,
     DatabaseError,
+    DeviceLimitError,
     DNSError,
     ErrorCollector,
     GLPError,
@@ -91,6 +98,7 @@ __all__ = [
     "GLPClient",
     "GLPClientError",
     "PaginationConfig",
+    "AsyncOperationResult",
     "DEVICES_PAGINATION",
     "SUBSCRIPTIONS_PAGINATION",
     # Exceptions - Base
@@ -118,6 +126,9 @@ __all__ = [
     "SyncError",
     "PartialSyncError",
     "CircuitOpenError",
+    "AsyncOperationError",
+    # Exceptions - Device Management
+    "DeviceLimitError",
     # Error utilities
     "ErrorCollector",
     # Resilience
@@ -137,7 +148,11 @@ __all__ = [
     "create_pool",
     "close_pool",
     "check_database_health",
-    # Syncers
+    # Syncers (read operations)
     "DeviceSyncer",
     "SubscriptionSyncer",
+    # Device Management (write operations)
+    "DeviceManager",
+    "DeviceType",
+    "OperationStatus",
 ]
