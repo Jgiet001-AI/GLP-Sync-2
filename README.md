@@ -1,20 +1,46 @@
-# HPE GreenLake Device Sync
+# HPE GreenLake Device & Subscription Sync
 
-Sync device inventory from HPE GreenLake Platform to PostgreSQL.
+Sync device and subscription inventory from HPE GreenLake Platform to PostgreSQL.
 
 ## Features
 
 - OAuth2 authentication with automatic token refresh
-- Paginated API fetching (2000 devices/request)
-- PostgreSQL upsert with JSONB storage
+- Paginated API fetching (devices: 2000/request, subscriptions: 50/request)
+- PostgreSQL upsert with JSONB storage + normalized tables
 - Full-text search and tag-based queries
+- Subscription expiration monitoring
 - JSON export mode (no database required)
+
+## CLI Usage
+
+```bash
+# DEVICES (default)
+python main.py                        # Sync devices to database
+python main.py --devices              # Explicit: sync devices only
+
+# SUBSCRIPTIONS
+python main.py --subscriptions        # Sync subscriptions only
+python main.py --expiring-days 90     # Show subscriptions expiring in 90 days
+
+# BOTH
+python main.py --all                  # Sync devices AND subscriptions
+
+# JSON EXPORT (no database needed)
+python main.py --json-only            # Export devices to devices.json
+python main.py --subscriptions --json-only  # Export subscriptions to subscriptions.json
+
+# BACKUPS (sync to DB + save JSON)
+python main.py --backup devices_backup.json
+python main.py --subscriptions --subscription-backup subs_backup.json
+```
+
+> **Note**: By default (no flags), only devices are synced. Use `--all` to sync both resources.
 
 ## Quick Start
 
 ```bash
 # Clone and setup
-git clone https://github.com/YOUR_USERNAME/Demo_Comcast_GLP.git
+git clone https://github.com/Jgiet001-AI/Demo_Comcast_GLP.git
 cd Demo_Comcast_GLP
 
 # Create virtual environment
@@ -26,8 +52,7 @@ cp .env.example .env
 
 # Run sync
 source .venv/bin/activate
-python main.py                    # Full sync to database
-python main.py --json-only        # Export to devices.json
+python main.py --all                  # Full sync (devices + subscriptions)
 ```
 
 ## Environment Variables
@@ -43,18 +68,20 @@ python main.py --json-only        # Export to devices.json
 ## Project Structure
 
 ```
-├── main.py                 # CLI entry point
-├── src/glp/
-│   ├── api/
-│   │   ├── auth.py         # OAuth2 token management
-│   │   └── devices.py      # Device sync logic
-│   └── constants.py        # API endpoints
+├── main.py                      # CLI entry point
+├── src/glp/api/
+│   ├── auth.py                  # OAuth2 token management
+│   ├── client.py                # Generic HTTP client with pagination
+│   ├── devices.py               # Device sync logic
+│   └── subscriptions.py         # Subscription sync logic
 ├── db/
-│   └── schema.sql          # PostgreSQL schema
+│   ├── schema.sql               # Device tables
+│   ├── subscriptions_schema.sql # Subscription tables
+│   └── migrations/              # Schema migrations
 └── tests/
-    ├── test_auth.py        # Auth unit tests
-    ├── test_devices.py     # Device sync tests
-    └── test_database.py    # DB integration tests
+    ├── test_auth.py             # Auth unit tests
+    ├── test_devices.py          # Device sync tests
+    └── test_database.py         # DB integration tests
 ```
 
 ## Testing
