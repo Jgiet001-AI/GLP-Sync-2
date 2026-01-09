@@ -11,19 +11,17 @@ Tests cover:
 Note: SubscriptionSyncer composes GLPClient for HTTP operations.
       The tests mock GLPClient rather than aiohttp directly.
 """
-import pytest
-import asyncio
 import json
-import os
-from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timedelta
 
 # Import the classes we're testing
 import sys
-sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
-from src.glp.api.subscriptions import SubscriptionSyncer
-from src.glp.api.client import GLPClient, APIError
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
+from src.glp.api.client import APIError, GLPClient
+from src.glp.api.subscriptions import SubscriptionSyncer
 
 # ============================================
 # SubscriptionSyncer Initialization Tests
@@ -36,7 +34,7 @@ class TestSubscriptionSyncerInit:
         """Should require a GLPClient instance."""
         mock_client = MagicMock(spec=GLPClient)
         syncer = SubscriptionSyncer(client=mock_client)
-        
+
         assert syncer.client is mock_client
         assert syncer.db_pool is None
 
@@ -44,9 +42,9 @@ class TestSubscriptionSyncerInit:
         """Should accept optional database pool."""
         mock_client = MagicMock(spec=GLPClient)
         mock_pool = MagicMock()
-        
+
         syncer = SubscriptionSyncer(client=mock_client, db_pool=mock_pool)
-        
+
         assert syncer.db_pool is mock_pool
 
     def test_endpoint_constant(self):
@@ -79,16 +77,16 @@ class TestSubscriptionFetching:
             {"id": "sub-1", "key": "KEY001", "subscriptionType": "CENTRAL_SWITCH"},
             {"id": "sub-2", "key": "KEY002", "subscriptionType": "CENTRAL_AP"},
         ]
-        
+
         mock_client.fetch_all = AsyncMock(return_value=expected_subs)
-        
+
         subs = await syncer.fetch_all_subscriptions()
-        
+
         # Verify correct endpoint
         mock_client.fetch_all.assert_called_once()
         call_args = mock_client.fetch_all.call_args
         assert call_args[0][0] == "/subscriptions/v1/subscriptions"
-        
+
         assert len(subs) == 2
         assert subs[0]["id"] == "sub-1"
 
@@ -96,11 +94,11 @@ class TestSubscriptionFetching:
     async def test_fetch_subscription_by_id(self, syncer, mock_client):
         """Should fetch single subscription by ID."""
         expected_sub = {"id": "sub-123", "key": "KEYABC"}
-        
+
         mock_client.get = AsyncMock(return_value=expected_sub)
-        
+
         sub = await syncer.fetch_subscription_by_id("sub-123")
-        
+
         mock_client.get.assert_called_once_with("/subscriptions/v1/subscriptions/sub-123")
         assert sub["id"] == "sub-123"
 
@@ -110,18 +108,18 @@ class TestSubscriptionFetching:
         mock_subs = [
             {"id": "sub-1", "key": "KEY001"},
         ]
-        
+
         mock_client.fetch_all = AsyncMock(return_value=mock_subs)
-        
+
         output_file = tmp_path / "subscriptions.json"
         count = await syncer.fetch_and_save_json(str(output_file))
-        
+
         assert count == 1
         assert output_file.exists()
-        
+
         with open(output_file) as f:
             saved_data = json.load(f)
-        
+
         assert len(saved_data) == 1
         assert saved_data[0]["id"] == "sub-1"
 
@@ -145,9 +143,9 @@ class TestSubscriptionFiltering:
     async def test_fetch_by_status(self, syncer, mock_client):
         """Should filter by status."""
         mock_client.fetch_all = AsyncMock(return_value=[{"id": "sub-1"}])
-        
-        result = await syncer.fetch_by_status("STARTED")
-        
+
+        await syncer.fetch_by_status("STARTED")
+
         # Verify filter was passed
         call_args = mock_client.fetch_all.call_args
         params = call_args[1].get("params", {})
@@ -159,16 +157,16 @@ class TestSubscriptionFiltering:
         """Should raise error for invalid status."""
         with pytest.raises(ValueError) as exc:
             await syncer.fetch_by_status("INVALID_STATUS")
-        
+
         assert "Invalid status" in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_fetch_by_type(self, syncer, mock_client):
         """Should filter by subscription type."""
         mock_client.fetch_all = AsyncMock(return_value=[{"id": "sub-1"}])
-        
-        result = await syncer.fetch_by_type("CENTRAL_SWITCH")
-        
+
+        await syncer.fetch_by_type("CENTRAL_SWITCH")
+
         call_args = mock_client.fetch_all.call_args
         params = call_args[1].get("params", {})
         assert "CENTRAL_SWITCH" in params["filter"]
@@ -177,9 +175,9 @@ class TestSubscriptionFiltering:
     async def test_fetch_expiring_soon(self, syncer, mock_client):
         """Should filter for expiring subscriptions."""
         mock_client.fetch_all = AsyncMock(return_value=[])
-        
-        result = await syncer.fetch_expiring_soon(days=90)
-        
+
+        await syncer.fetch_expiring_soon(days=90)
+
         call_args = mock_client.fetch_all.call_args
         params = call_args[1].get("params", {})
         # Should have filter with date conditions
@@ -203,43 +201,43 @@ class TestDatabaseSync:
         """Create a mock database connection pool."""
         pool = MagicMock()
         conn = AsyncMock()
-        
+
         pool.acquire = MagicMock()
         pool.acquire.return_value.__aenter__ = AsyncMock(return_value=conn)
         pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
-        
+
         return pool, conn
 
     @pytest.mark.asyncio
     async def test_sync_requires_db_pool(self, mock_client):
         """Should raise error when syncing without database pool."""
         syncer = SubscriptionSyncer(client=mock_client)
-        
+
         with pytest.raises(ValueError) as exc:
             await syncer.sync_to_postgres([{"id": "test"}])
-        
+
         assert "Database connection pool is required" in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_sync_inserts_new_subscription(self, mock_client, mock_db_pool):
         """Should insert new subscriptions."""
         pool, conn = mock_db_pool
-        
+
         # Subscription doesn't exist
         conn.fetchval = AsyncMock(return_value=None)
         conn.execute = AsyncMock()
-        
+
         syncer = SubscriptionSyncer(client=mock_client, db_pool=pool)
-        
+
         subs = [{
             "id": "sub-1",
             "key": "KEY001",
             "subscriptionType": "CENTRAL_SWITCH",
             "subscriptionStatus": "STARTED",
         }]
-        
+
         stats = await syncer.sync_to_postgres(subs)
-        
+
         assert stats["inserted"] == 1
         assert stats["updated"] == 0
         assert stats["errors"] == 0
@@ -248,20 +246,20 @@ class TestDatabaseSync:
     async def test_sync_updates_existing_subscription(self, mock_client, mock_db_pool):
         """Should update existing subscriptions."""
         pool, conn = mock_db_pool
-        
+
         # Subscription exists
         conn.fetchval = AsyncMock(return_value=1)
         conn.execute = AsyncMock()
-        
+
         syncer = SubscriptionSyncer(client=mock_client, db_pool=pool)
-        
+
         subs = [{
             "id": "sub-1",
             "key": "KEY001",
         }]
-        
+
         stats = await syncer.sync_to_postgres(subs)
-        
+
         assert stats["inserted"] == 0
         assert stats["updated"] == 1
 
@@ -288,9 +286,9 @@ class TestBusinessLogic:
             {"subscriptionStatus": "STARTED"},
             {"subscriptionStatus": "ENDED"},
         ]
-        
+
         summary = syncer.summarize_by_status(subs)
-        
+
         assert summary["STARTED"] == 2
         assert summary["ENDED"] == 1
 
@@ -301,9 +299,9 @@ class TestBusinessLogic:
             {"subscriptionType": "CENTRAL_AP"},
             {"subscriptionType": "CENTRAL_SWITCH"},
         ]
-        
+
         summary = syncer.summarize_by_type(subs)
-        
+
         assert summary["CENTRAL_SWITCH"] == 2
         assert summary["CENTRAL_AP"] == 1
 
@@ -325,12 +323,12 @@ class TestErrorHandling:
         mock_client.fetch_all = AsyncMock(
             side_effect=APIError(status=500, message="Server Error")
         )
-        
+
         syncer = SubscriptionSyncer(client=mock_client)
-        
+
         with pytest.raises(APIError) as exc:
             await syncer.fetch_all_subscriptions()
-        
+
         assert exc.value.status == 500
 
 

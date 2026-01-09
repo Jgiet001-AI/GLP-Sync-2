@@ -13,16 +13,15 @@ BEST PRACTICES FOR TEST ISOLATION:
     2. Tests run in transactions that are ROLLED BACK (no data persists)
     3. DATABASE_URL loaded from .env for local dev
     4. CI/CD should set DATABASE_URL explicitly or skip these tests
-    
+
 NOTE: Requires running PostgreSQL instance with schema applied.
 """
+import json
+import os
+from uuid import uuid4
+
 import pytest
 import pytest_asyncio
-import asyncio
-import os
-import json
-from datetime import datetime, timezone
-from uuid import uuid4
 from dotenv import load_dotenv
 
 # Load environment variables from .env file (for local development)
@@ -64,7 +63,7 @@ async def db_pool():
 async def db_connection(db_pool):
     """
     Provide a database connection wrapped in a transaction.
-    
+
     ISOLATION: This fixture starts a transaction that is ROLLED BACK
     after each test, ensuring no test data persists in the database.
     This is the gold standard for database test isolation.
@@ -73,9 +72,9 @@ async def db_connection(db_pool):
         # Start a transaction
         tr = conn.transaction()
         await tr.start()
-        
+
         yield conn
-        
+
         # ROLLBACK: Undo all changes made during the test
         await tr.rollback()
 
@@ -93,7 +92,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'devices'
                 )
             """)
@@ -104,19 +103,19 @@ class TestSchema:
         """The devices table should have required columns."""
         async with db_pool.acquire() as conn:
             columns = await conn.fetch("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
+                SELECT column_name, data_type
+                FROM information_schema.columns
                 WHERE table_name = 'devices'
             """)
-        
+
         column_names = {row["column_name"] for row in columns}
-        
+
         required_columns = {
             "id", "mac_address", "serial_number", "part_number",
             "device_type", "model", "region", "archived",
             "device_name", "raw_data", "synced_at"
         }
-        
+
         assert required_columns.issubset(column_names)
 
     @pytest.mark.asyncio
@@ -125,7 +124,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'sync_history'
                 )
             """)
@@ -137,7 +136,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'subscriptions'
                 )
             """)
@@ -148,19 +147,19 @@ class TestSchema:
         """The subscriptions table should have required columns."""
         async with db_pool.acquire() as conn:
             columns = await conn.fetch("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
+                SELECT column_name, data_type
+                FROM information_schema.columns
                 WHERE table_name = 'subscriptions'
             """)
-        
+
         column_names = {row["column_name"] for row in columns}
-        
+
         required_columns = {
             "id", "key", "resource_type", "subscription_type", "subscription_status",
             "quantity", "available_quantity", "sku", "start_time", "end_time",
             "tier", "product_type", "is_eval", "raw_data", "synced_at"
         }
-        
+
         assert required_columns.issubset(column_names)
 
     @pytest.mark.asyncio
@@ -169,7 +168,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'subscription_tags'
                 )
             """)
@@ -181,7 +180,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'device_subscriptions'
                 )
             """)
@@ -193,7 +192,7 @@ class TestSchema:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'device_tags'
                 )
             """)
@@ -219,10 +218,10 @@ class TestDeviceCRUD:
             "model": "Aruba 6200",
             "region": "US-WEST",
         }
-        
+
         await db_connection.execute("""
             INSERT INTO devices (
-                id, serial_number, mac_address, device_type, 
+                id, serial_number, mac_address, device_type,
                 model, region, raw_data
             ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
         """,
@@ -234,12 +233,12 @@ class TestDeviceCRUD:
             device_data["region"],
             json.dumps(device_data),
         )
-        
+
         # Verify insertion
         result = await db_connection.fetchrow(
             "SELECT * FROM devices WHERE id = $1", device_id
         )
-        
+
         assert result is not None
         assert result["serial_number"] == "TEST-SN001"
         assert result["device_type"] == "SWITCH"
@@ -248,7 +247,7 @@ class TestDeviceCRUD:
     async def test_query_by_serial(self, db_connection):
         """Should query device by serial number (rolled back after test)."""
         device_id = uuid4()
-        
+
         await db_connection.execute("""
             INSERT INTO devices (id, serial_number, device_type, raw_data)
             VALUES ($1, $2, $3, $4::jsonb)
@@ -256,11 +255,11 @@ class TestDeviceCRUD:
             device_id, "TEST-SERIAL-123", "AP",
             json.dumps({"id": str(device_id)})
         )
-        
+
         result = await db_connection.fetchrow("""
             SELECT * FROM devices WHERE serial_number = $1
         """, "TEST-SERIAL-123")
-        
+
         assert result is not None
         assert result["id"] == device_id
 
@@ -276,13 +275,13 @@ class TestDeviceCRUD:
                 uuid4(), f"TEST-TYPE-{i}", dtype,
                 json.dumps({"test": True})
             )
-        
+
         switches = await db_connection.fetch("""
-            SELECT * FROM devices 
-            WHERE device_type = 'SWITCH' 
+            SELECT * FROM devices
+            WHERE device_type = 'SWITCH'
             AND serial_number LIKE 'TEST-%'
         """)
-        
+
         assert len(switches) == 2
 
 
@@ -305,7 +304,7 @@ class TestJSONBQueries:
             ],
             "tags": {"environment": "production", "team": "network"},
         }
-        
+
         await db_connection.execute("""
             INSERT INTO devices (id, serial_number, device_type, raw_data)
             VALUES ($1, $2, $3, $4::jsonb)
@@ -313,14 +312,14 @@ class TestJSONBQueries:
             device_id, "TEST-JSONB-001", "SWITCH",
             json.dumps(raw_data)
         )
-        
+
         # Query for specific tag
         result = await db_connection.fetchrow("""
-            SELECT * FROM devices 
+            SELECT * FROM devices
             WHERE raw_data->'tags'->>'environment' = 'production'
             AND serial_number LIKE 'TEST-%'
         """)
-        
+
         assert result is not None
         assert result["id"] == device_id
 
@@ -336,7 +335,7 @@ class TestFullTextSearch:
     async def test_search_by_serial(self, db_connection):
         """Should find device by partial serial number search (rolled back after test)."""
         device_id = uuid4()
-        
+
         await db_connection.execute("""
             INSERT INTO devices (id, serial_number, device_name, device_type, raw_data)
             VALUES ($1, $2, $3, $4, $5::jsonb)
@@ -344,7 +343,7 @@ class TestFullTextSearch:
             device_id, "TEST-FTS-ABC123", "Core Switch Alpha",
             "SWITCH", json.dumps({"id": str(device_id)})
         )
-        
+
         # Search using the search_devices function (if it exists)
         try:
             results = await db_connection.fetch("""

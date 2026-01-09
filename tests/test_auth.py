@@ -7,17 +7,16 @@ Tests cover:
     - Retry logic on failures
     - Thread-safety of concurrent token requests
 """
-import pytest
-import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock, patch
-from aiohttp import ClientError
 
 # Import the classes we're testing
 import sys
-sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
-from src.glp.api.auth import TokenManager, CachedToken, TokenError
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+sys.path.insert(0, str(__file__).rsplit("/tests", 1)[0])
+from src.glp.api.auth import CachedToken, TokenManager
 
 # ============================================
 # CachedToken Tests
@@ -77,22 +76,22 @@ class TestTokenManager:
         monkeypatch.delenv("GLP_CLIENT_ID", raising=False)
         monkeypatch.delenv("GLP_CLIENT_SECRET", raising=False)
         monkeypatch.delenv("GLP_TOKEN_URL", raising=False)
-        
+
         with pytest.raises(ValueError) as exc:
             TokenManager()
-        
+
         assert "GLP_CLIENT_ID" in str(exc.value)
 
     def test_explicit_credentials(self, monkeypatch):
         """Should accept explicit credentials over env vars."""
         monkeypatch.delenv("GLP_CLIENT_ID", raising=False)
-        
+
         manager = TokenManager(
             client_id="explicit_id",
             client_secret="explicit_secret",
             token_url="https://explicit.example.com/token",
         )
-        
+
         assert manager.client_id == "explicit_id"
         assert manager.client_secret == "explicit_secret"
 
@@ -100,7 +99,7 @@ class TestTokenManager:
     async def test_get_token_fetches_new(self, env_vars):
         """First call to get_token should fetch a new token."""
         manager = TokenManager()
-        
+
         # Mock the HTTP response
         mock_response = MagicMock()
         mock_response.status = 200
@@ -109,37 +108,37 @@ class TestTokenManager:
             "expires_in": 3600,
             "token_type": "Bearer",
         })
-        
+
         # Create proper async context manager mocks
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=None)
-        
+
         mock_session = MagicMock()
         mock_session.post = MagicMock(return_value=mock_response)
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=None)
-        
+
         with patch("aiohttp.ClientSession", return_value=mock_session):
             token = await manager.get_token()
-        
+
         assert token == "new_access_token_abc123"
 
     @pytest.mark.asyncio
     async def test_get_token_returns_cached(self, env_vars):
         """Second call should return cached token without HTTP call."""
         manager = TokenManager()
-        
+
         # Pre-populate the cache
         manager._cached_token = CachedToken(
             access_token="cached_token_xyz",
             expires_at=time.time() + 3600,
         )
-        
+
         # This should NOT make an HTTP call
         with patch("aiohttp.ClientSession") as mock_session_cls:
             token = await manager.get_token()
             mock_session_cls.assert_not_called()
-        
+
         assert token == "cached_token_xyz"
 
     @pytest.mark.asyncio
@@ -150,9 +149,9 @@ class TestTokenManager:
             access_token="cached_token",
             expires_at=time.time() + 3600,
         )
-        
+
         manager.invalidate()
-        
+
         assert manager._cached_token is None
 
     def test_token_info_returns_debug_data(self, env_vars):
@@ -162,9 +161,9 @@ class TestTokenManager:
             access_token="a_very_long_token_that_should_be_truncated",
             expires_at=time.time() + 3600,
         )
-        
+
         info = manager.token_info
-        
+
         assert not info["is_expired"]
         assert info["time_remaining_seconds"] > 3500
         assert "..." in info["token_preview"]  # Should be truncated

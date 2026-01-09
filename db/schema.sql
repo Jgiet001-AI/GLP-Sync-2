@@ -9,42 +9,42 @@ CREATE TABLE IF NOT EXISTS devices (
     -- Primary identifier (UUID from GreenLake API)
     id UUID PRIMARY KEY,
     -- Core indexed fields for common queries
-    mac_address VARCHAR(17),
-    serial_number VARCHAR(100) NOT NULL,
-    part_number VARCHAR(100),
-    device_type VARCHAR(50),
+    mac_address TEXT CHECK (LENGTH(mac_address) <= 17),
+    serial_number TEXT NOT NULL,
+    part_number TEXT,
+    device_type TEXT,
     -- SWITCH, AP, COMPUTE, STORAGE, etc.
-    model VARCHAR(100),
-    region VARCHAR(50),
+    model TEXT,
+    region TEXT,
     archived BOOLEAN DEFAULT FALSE,
-    device_name VARCHAR(255),
-    secondary_name VARCHAR(255),
-    assigned_state VARCHAR(50),
-    -- ASSIGNED_TO_SERVICE, UNASSIGNED, etc.
-    
-    -- NEW: Additional fields from API schema
-    resource_type VARCHAR(50),              -- e.g., "devices/device"
+    device_name TEXT,
+    secondary_name TEXT,
+    assigned_state TEXT CHECK (assigned_state IS NULL OR assigned_state IN ('ASSIGNED_TO_SERVICE', 'UNASSIGNED')),
+    -- ASSIGNED_TO_SERVICE, UNASSIGNED
+
+    -- Additional fields from API schema
+    resource_type TEXT,                     -- e.g., "devices/device"
     tenant_workspace_id UUID,               -- MSP tenant workspace
-    
+
     -- Application reference
     application_id UUID,
-    application_resource_uri VARCHAR(255),
-    
+    application_resource_uri TEXT,
+
     -- Dedicated platform workspace
     dedicated_platform_id UUID,
-    
+
     -- Location (flattened for fast queries)
     location_id UUID,
-    location_name VARCHAR(255),
-    location_city VARCHAR(100),
-    location_state VARCHAR(100),
-    location_country VARCHAR(100),
-    location_postal_code VARCHAR(20),
-    location_street_address VARCHAR(255),
+    location_name TEXT,
+    location_city TEXT,
+    location_state TEXT,
+    location_country TEXT,
+    location_postal_code TEXT,
+    location_street_address TEXT,
     location_latitude DOUBLE PRECISION,
     location_longitude DOUBLE PRECISION,
-    location_source VARCHAR(50),
-    
+    location_source TEXT,
+
     -- Timestamps from API
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
@@ -115,7 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_devices_dedicated_platform ON devices(dedicated_p
 CREATE TABLE IF NOT EXISTS device_subscriptions (
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
     subscription_id UUID NOT NULL,
-    resource_uri VARCHAR(255),
+    resource_uri TEXT,
     synced_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (device_id, subscription_id)
 );
@@ -150,13 +150,14 @@ $$;
 -- ============================================
 CREATE TABLE IF NOT EXISTS device_tags (
     device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
-    tag_key VARCHAR(100) NOT NULL,
-    tag_value VARCHAR(255),
+    tag_key TEXT NOT NULL,
+    tag_value TEXT,
     synced_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (device_id, tag_key)
 );
 CREATE INDEX IF NOT EXISTS idx_device_tags_key ON device_tags(tag_key);
 CREATE INDEX IF NOT EXISTS idx_device_tags_key_value ON device_tags(tag_key, tag_value);
+CREATE INDEX IF NOT EXISTS idx_device_tags_device ON device_tags(device_id);
 -- ============================================
 -- VIEWS: Pre-built queries for common needs
 -- ============================================
@@ -262,11 +263,11 @@ CREATE OR REPLACE FUNCTION search_devices(
         max_results INTEGER DEFAULT 50
     ) RETURNS TABLE (
         id UUID,
-        serial_number VARCHAR,
-        device_name VARCHAR,
-        device_type VARCHAR,
-        model VARCHAR,
-        region VARCHAR,
+        serial_number TEXT,
+        device_name TEXT,
+        device_type TEXT,
+        model TEXT,
+        region TEXT,
         rank REAL
     ) AS $$ BEGIN RETURN QUERY
 SELECT d.id,
@@ -306,20 +307,29 @@ END IF;
 END;
 $$ LANGUAGE plpgsql;
 -- ============================================
--- SYNC TRACKING TABLE (optional)
+-- SYNC TRACKING TABLE
 -- ============================================
 CREATE TABLE IF NOT EXISTS sync_history (
-    id SERIAL PRIMARY KEY,
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    resource_type TEXT NOT NULL DEFAULT 'devices' CHECK (resource_type IN ('devices', 'subscriptions', 'all')),
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
-    status VARCHAR(20) DEFAULT 'running',
-    -- running, completed, failed
-    devices_fetched INTEGER,
-    devices_inserted INTEGER,
-    devices_updated INTEGER,
-    devices_errors INTEGER,
-    error_message TEXT
+    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+    -- Sync metrics
+    records_fetched INTEGER NOT NULL DEFAULT 0,
+    records_inserted INTEGER NOT NULL DEFAULT 0,
+    records_updated INTEGER NOT NULL DEFAULT 0,
+    records_errors INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    -- Computed duration
+    duration_ms INTEGER GENERATED ALWAYS AS (
+        CASE WHEN completed_at IS NOT NULL
+             THEN (EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)::INTEGER
+        END
+    ) STORED
 );
+CREATE INDEX IF NOT EXISTS idx_sync_history_resource_type ON sync_history(resource_type);
+CREATE INDEX IF NOT EXISTS idx_sync_history_started ON sync_history(started_at DESC);
 -- ============================================
 -- TABLE & COLUMN COMMENTS (for LLM understanding)
 -- ============================================
@@ -385,10 +395,12 @@ ORDER BY table_name, column_name, occurrence_count DESC;
 -- EXAMPLE QUERIES TABLE (for LLM learning)
 -- ============================================
 CREATE TABLE IF NOT EXISTS query_examples (
-    id SERIAL PRIMARY KEY,
-    category VARCHAR(50),
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    category TEXT NOT NULL CHECK (category IN ('search', 'filter', 'expiring', 'summary', 'join', 'tags')),
     description TEXT NOT NULL,
-    sql_query TEXT NOT NULL
+    sql_query TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (category, description)
 );
 
 -- Insert example queries (only if table is empty)

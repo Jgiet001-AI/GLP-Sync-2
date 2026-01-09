@@ -7,21 +7,21 @@ Classes:
     GLPClient: Generic HTTP client with pagination and retry logic
     TokenManager: OAuth2 token management with caching
     DeviceSyncer: Device inventory synchronization
-    
+
 Exceptions:
     TokenError: Token acquisition failures
     APIError: API request failures
     GLPClientError: Base exception for client errors
 """
-from .auth import TokenManager, TokenError, get_token
+from .auth import TokenError, TokenManager, get_token
 from .client import (
-    GLPClient,
-    GLPClientError,
-    APIError,
-    RateLimitError,
-    PaginationConfig,
     DEVICES_PAGINATION,
     SUBSCRIPTIONS_PAGINATION,
+    APIError,
+    GLPClient,
+    GLPClientError,
+    PaginationConfig,
+    RateLimitError,
 )
 from .devices import DeviceSyncer
 from .subscriptions import SubscriptionSyncer
@@ -29,7 +29,7 @@ from .subscriptions import SubscriptionSyncer
 __all__ = [
     # Auth
     "TokenManager",
-    "TokenError", 
+    "TokenError",
     "get_token",
     # Client
     "GLPClient",

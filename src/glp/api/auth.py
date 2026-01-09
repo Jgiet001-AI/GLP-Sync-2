@@ -22,12 +22,13 @@ Example:
 
 Author: HPE GreenLake Team
 """
-import os
 import asyncio
-import aiohttp
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+import aiohttp
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -36,7 +37,7 @@ load_dotenv()
 @dataclass
 class CachedToken:
     """Immutable container for cached OAuth2 access tokens.
-    
+
     Attributes:
         access_token: The OAuth2 bearer token string.
         expires_at: Unix timestamp when the token expires.
@@ -60,36 +61,36 @@ class CachedToken:
 
 class TokenManager:
     """Thread-safe OAuth2 token manager with automatic refresh.
-    
+
     Handles the OAuth2 client credentials flow for GreenLake Platform API
     authentication. Tokens are cached and automatically refreshed before
     expiration to ensure uninterrupted API access.
-    
+
     Attributes:
         client_id: OAuth2 client ID (from env: GLP_CLIENT_ID).
         client_secret: OAuth2 client secret (from env: GLP_CLIENT_SECRET).
         token_url: OAuth2 token endpoint (from env: GLP_TOKEN_URL).
-    
+
     Thread Safety:
         All public methods are thread-safe. Token refresh operations are
         serialized using an async lock to prevent duplicate token fetches
         during concurrent requests.
-    
+
     Example:
         >>> manager = TokenManager()
         >>> token = await manager.get_token()  # Fetches new token
         >>> token = await manager.get_token()  # Returns cached token
     """
     def __init__(
-        self, 
-        client_id: Optional[str] = None, 
-        client_secret: Optional[str] = None, 
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
         token_url: Optional[str] = None,
         ):
         self.client_id = client_id or os.getenv("GLP_CLIENT_ID")
         self.client_secret = client_secret or os.getenv("GLP_CLIENT_SECRET")
         self.token_url = token_url or os.getenv("GLP_TOKEN_URL")
-    
+
         if not all([self.client_id, self.client_secret, self.token_url]):
             missing = []
             if not self.client_id:
@@ -103,26 +104,26 @@ class TokenManager:
         self._cached_token: Optional[CachedToken] = None
         self._lock = asyncio.Lock()
 
-    async def get_token(self) -> str: 
+    async def get_token(self) -> str:
         """
         Get a valid access token, fetching or refreshing as needed.
-        
+
         Returns:
             str: The access token string
-            
+
         Raises:
             TokenError: If token cannot be obtained after retries
     """
         if self._cached_token and not self._cached_token.is_expired:
             return self._cached_token.access_token
-        
+
         async with self._lock:
             if self._cached_token and not self._cached_token.is_expired:
                 return self._cached_token.access_token
-        
+
             self._cached_token = await self._fetch_token()
             return self._cached_token.access_token
-    
+
     async def _fetch_token(self, max_retries: int = 3) -> CachedToken:
         """Fetch a new access token from the GLP API."""
         payload = {
@@ -157,32 +158,32 @@ class TokenManager:
                             )
                             print(f"[TokenManager] Token fetched successfully, expires in {expires_in} seconds")
                             return token
-                        
+
                         else:
                             error_text = await response.text()
                             last_error = f"HTTP {response.status}: {error_text}"
                             print(f"[TokenManager] Failed to fetch token, attempt {attempt + 1} of {max_retries}: {last_error}")
-            
+
             except aiohttp.ClientError as e:
                 last_error = str(e)
                 print(f"[TokenManager] Failed to fetch token, attempt {attempt + 1} of {max_retries}: {e}")
-            
+
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt
                 await asyncio.sleep(wait_time)
-        
+
         raise TokenError(f"Failed to fetch token after {max_retries} attempts: {last_error}")
-    
+
     async def force_refresh(self) -> str:
         """Force a token refresh, ignoring the cache."""
         async with self._lock:
             self._cached_token = await self._fetch_token()
             return self._cached_token.access_token
-        
+
     def invalidate(self):
         """Invalidate the cached token."""
         self._cached_token = None
-    
+
     @property
     def token_info(self) -> Optional[dict]:
         """Get the info about the current cached token for debugging."""
@@ -193,7 +194,7 @@ class TokenManager:
             "time_remaining_seconds": self._cached_token.time_remaining,
             "token_preview": self._cached_token.access_token[:20] + "...",
         }
-    
+
 
 class TokenError(Exception):
     """Exception raised for token-related errors."""
@@ -231,5 +232,5 @@ if __name__ == "__main__":
             ]
         )
         print(f"All tokens are the same: {len(set(tokens)) == 1}")
-        
+
     asyncio.run(test())

@@ -6,49 +6,49 @@
 CREATE TABLE IF NOT EXISTS subscriptions (
     -- Primary identifier (UUID from GreenLake API)
     id UUID PRIMARY KEY,
-    
+
     -- Core fields
-    key VARCHAR(100),
-    resource_type VARCHAR(50),              -- e.g., "subscriptions/subscription"
-    subscription_type VARCHAR(50),          -- CENTRAL_AP, CENTRAL_SWITCH, etc.
-    subscription_status VARCHAR(20),        -- STARTED, ENDED, SUSPENDED, etc.
-    
+    key TEXT,
+    resource_type TEXT,                     -- e.g., "subscriptions/subscription"
+    subscription_type TEXT,                 -- CENTRAL_AP, CENTRAL_SWITCH, etc.
+    subscription_status TEXT CHECK (subscription_status IN ('STARTED', 'ENDED', 'SUSPENDED', 'CANCELLED')),
+
     -- Quantities
     quantity INTEGER,
     available_quantity INTEGER,
-    
+
     -- SKU details
-    sku VARCHAR(100),
+    sku TEXT,
     sku_description TEXT,
-    
+
     -- Time range
     start_time TIMESTAMPTZ,
     end_time TIMESTAMPTZ,
-    
+
     -- Tier information
-    tier VARCHAR(100),
+    tier TEXT,
     tier_description TEXT,
-    
+
     -- Classification
-    product_type VARCHAR(50),               -- DEVICE, SERVICE, etc.
+    product_type TEXT,                      -- DEVICE, SERVICE, etc.
     is_eval BOOLEAN DEFAULT FALSE,
-    
+
     -- Order references
-    contract VARCHAR(100),
-    quote VARCHAR(100),
-    po VARCHAR(100),
-    reseller_po VARCHAR(100),               -- For indirect orders
-    
+    contract TEXT,
+    quote TEXT,
+    po TEXT,
+    reseller_po TEXT,                       -- For indirect orders
+
     -- Timestamps from API
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
-    
+
     -- Our sync tracking
     synced_at TIMESTAMPTZ DEFAULT NOW(),
-    
+
     -- Full API response for flexibility
     raw_data JSONB NOT NULL,
-    
+
     -- Auto-generated full-text search vector
     search_vector tsvector GENERATED ALWAYS AS (
         setweight(to_tsvector('english', coalesce(key, '')), 'A') ||
@@ -80,6 +80,12 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_start_time ON subscriptions(start_t
 CREATE INDEX IF NOT EXISTS idx_subscriptions_expiring ON subscriptions(subscription_status, end_time)
 WHERE subscription_status = 'STARTED';
 
+-- Covering index for expiring subscriptions view (enables index-only scans)
+CREATE INDEX IF NOT EXISTS idx_subscriptions_expiring_covering
+ON subscriptions(end_time)
+INCLUDE (key, subscription_type, tier, sku, quantity, available_quantity)
+WHERE subscription_status = 'STARTED';
+
 -- Full-text search
 CREATE INDEX IF NOT EXISTS idx_subscriptions_search ON subscriptions USING GIN(search_vector);
 
@@ -92,14 +98,15 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_tags ON subscriptions USING GIN((ra
 -- ============================================
 CREATE TABLE IF NOT EXISTS subscription_tags (
     subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
-    tag_key VARCHAR(100) NOT NULL,
-    tag_value VARCHAR(255),
+    tag_key TEXT NOT NULL,
+    tag_value TEXT,
     synced_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (subscription_id, tag_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_subscription_tags_key ON subscription_tags(tag_key);
 CREATE INDEX IF NOT EXISTS idx_subscription_tags_key_value ON subscription_tags(tag_key, tag_value);
+CREATE INDEX IF NOT EXISTS idx_subscription_tags_subscription ON subscription_tags(subscription_id);
 
 -- ============================================
 -- USEFUL VIEWS
