@@ -143,6 +143,26 @@ GROUP BY subscription_type, subscription_status
 ORDER BY subscription_type, subscription_status;
 
 -- ============================================
+-- TABLE & COLUMN COMMENTS (for LLM understanding)
+-- ============================================
+COMMENT ON TABLE subscriptions IS 'HPE GreenLake subscription licenses. Primary key is subscription UUID (id). Each subscription also has a human-readable key. Subscriptions have types (CENTRAL_AP, CENTRAL_SWITCH), statuses (STARTED, ENDED), and expiration dates (end_time).';
+COMMENT ON TABLE subscription_tags IS 'Key-value tags attached to subscriptions. Join on subscription_id to subscriptions.id.';
+
+-- Subscription column comments
+COMMENT ON COLUMN subscriptions.id IS 'Subscription UUID - unique identifier for this subscription. Use this to join with device_subscriptions.subscription_id';
+COMMENT ON COLUMN subscriptions.key IS 'Subscription key - human-readable identifier (e.g., PAT4DYYJAEEEJA). Each subscription UUID has exactly one key. Use key for display, UUID for joins';
+COMMENT ON COLUMN subscriptions.subscription_type IS 'License type: CENTRAL_AP, CENTRAL_SWITCH, CENTRAL_GW, CENTRAL_BRIDGE, SERVICE';
+COMMENT ON COLUMN subscriptions.subscription_status IS 'Current status: STARTED (active), ENDED (expired), SUSPENDED, CANCELLED';
+COMMENT ON COLUMN subscriptions.quantity IS 'Total number of licenses in this subscription';
+COMMENT ON COLUMN subscriptions.available_quantity IS 'Remaining unused licenses';
+COMMENT ON COLUMN subscriptions.start_time IS 'When subscription became active';
+COMMENT ON COLUMN subscriptions.end_time IS 'When subscription expires - critical for renewal planning';
+COMMENT ON COLUMN subscriptions.tier IS 'Service tier level (e.g., FOUNDATION_AP, FOUNDATION_SWITCH_6200)';
+COMMENT ON COLUMN subscriptions.is_eval IS 'True if this is an evaluation/trial subscription';
+COMMENT ON COLUMN subscriptions.sku IS 'Stock keeping unit code for the subscription';
+COMMENT ON COLUMN subscriptions.raw_data IS 'Full JSON response from GreenLake API for advanced queries';
+
+-- ============================================
 -- SYNC HISTORY (extend existing if present)
 -- ============================================
 -- Note: sync_history table already exists from devices schema
