@@ -517,6 +517,317 @@ def try_or_default(
 
 
 # ============================================
+# Concurrent Processing Patterns
+# ============================================
+
+async def process_concurrent(
+    items: list[T],
+    processor: Callable[[T], Awaitable[Any]],
+    max_concurrent: int = 10,
+    return_exceptions: bool = False,
+) -> list[Any]:
+    """Process items concurrently with bounded concurrency.
+
+    Uses a semaphore to limit the number of concurrent operations,
+    preventing resource exhaustion when processing large item lists.
+
+    Args:
+        items: List of items to process
+        processor: Async function to apply to each item
+        max_concurrent: Maximum concurrent operations (default: 10)
+        return_exceptions: If True, return exceptions instead of raising
+
+    Returns:
+        List of results in the same order as input items
+
+    Example:
+        async def fetch_user(user_id: int) -> dict:
+            return await api.get(f"/users/{user_id}")
+
+        users = await process_concurrent(
+            user_ids,
+            fetch_user,
+            max_concurrent=5
+        )
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def bounded_processor(item: T) -> Any:
+        async with semaphore:
+            return await processor(item)
+
+    tasks = [bounded_processor(item) for item in items]
+    return await asyncio.gather(*tasks, return_exceptions=return_exceptions)
+
+
+async def process_pages_concurrent(
+    pages_iterator,
+    item_processor: Callable[[Any], Awaitable[Any]],
+    max_concurrent: int = 10,
+    on_page_complete: Optional[Callable[[int, list], None]] = None,
+) -> tuple[list[Any], list[Exception]]:
+    """Process paginated data with concurrent item processing.
+
+    Fetches pages sequentially (respecting rate limits) but processes
+    items within each page concurrently for optimal throughput.
+
+    Args:
+        pages_iterator: Async iterator yielding pages of items
+        item_processor: Async function to process each item
+        max_concurrent: Max concurrent item processors per page
+        on_page_complete: Optional callback(page_num, results) after each page
+
+    Returns:
+        Tuple of (all_results, all_errors)
+
+    Example:
+        async for page in client.paginate("/devices"):
+            # This processes items sequentially
+
+        # Better: Process items concurrently within pages
+        results, errors = await process_pages_concurrent(
+            client.paginate("/devices"),
+            process_device,
+            max_concurrent=20
+        )
+    """
+    all_results = []
+    all_errors = []
+    page_num = 0
+
+    async for page in pages_iterator:
+        page_num += 1
+
+        results = await process_concurrent(
+            page,
+            item_processor,
+            max_concurrent=max_concurrent,
+            return_exceptions=True,
+        )
+
+        # Separate successes from failures
+        page_results = []
+        for result in results:
+            if isinstance(result, Exception):
+                all_errors.append(result)
+            else:
+                page_results.append(result)
+
+        all_results.extend(page_results)
+
+        if on_page_complete:
+            on_page_complete(page_num, page_results)
+
+    return all_results, all_errors
+
+
+async def gather_with_errors(
+    *coros_or_futures,
+    max_concurrent: Optional[int] = None,
+) -> tuple[list[Any], list[Exception]]:
+    """Execute coroutines concurrently, separating results from errors.
+
+    Unlike asyncio.gather(return_exceptions=True), this returns
+    results and errors in separate lists for easier handling.
+
+    Args:
+        *coros_or_futures: Coroutines or futures to execute
+        max_concurrent: Optional limit on concurrent execution
+
+    Returns:
+        Tuple of (successful_results, exceptions)
+
+    Example:
+        results, errors = await gather_with_errors(
+            fetch_user(1),
+            fetch_user(2),
+            fetch_user(3),
+        )
+        if errors:
+            logger.warning(f"{len(errors)} requests failed")
+    """
+    if max_concurrent:
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def bounded(coro):
+            async with semaphore:
+                return await coro
+
+        coros_or_futures = [bounded(c) for c in coros_or_futures]
+
+    outcomes = await asyncio.gather(*coros_or_futures, return_exceptions=True)
+
+    results = []
+    errors = []
+    for outcome in outcomes:
+        if isinstance(outcome, Exception):
+            errors.append(outcome)
+        else:
+            results.append(outcome)
+
+    return results, errors
+
+
+async def run_concurrent_tasks(
+    tasks_dict: dict[str, Callable[[], Awaitable[T]]],
+    fail_fast: bool = False,
+) -> dict[str, T | Exception]:
+    """Run named tasks concurrently with result tracking.
+
+    Provides TaskGroup-like functionality that works across Python versions.
+    Each task is identified by a name for easy result retrieval.
+
+    Args:
+        tasks_dict: Dict mapping task names to async callables
+        fail_fast: If True, cancel remaining tasks on first failure
+
+    Returns:
+        Dict mapping task names to results or exceptions
+
+    Example:
+        results = await run_concurrent_tasks({
+            "devices": fetch_devices,
+            "subscriptions": fetch_subscriptions,
+            "users": fetch_users,
+        })
+
+        devices = results["devices"]
+        if isinstance(devices, Exception):
+            logger.error(f"Device fetch failed: {devices}")
+    """
+    async def execute_named(name: str, func: Callable[[], Awaitable[T]]) -> tuple[str, T | Exception]:
+        try:
+            result = await func()
+            return (name, result)
+        except Exception as e:
+            return (name, e)
+
+    if fail_fast:
+        # Use TaskGroup for fail-fast behavior (Python 3.11+)
+        task_handles: dict[str, asyncio.Task] = {}
+        exception_occurred = False
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                task_handles = {
+                    name: tg.create_task(func())
+                    for name, func in tasks_dict.items()
+                }
+        except ExceptionGroup:
+            # TaskGroup raised ExceptionGroup - collect results outside the except block
+            exception_occurred = True
+
+        # Collect results (works whether exception occurred or not)
+        results = {}
+        for name, task in task_handles.items():
+            if task.done():
+                try:
+                    results[name] = task.result()
+                except Exception as e:
+                    results[name] = e
+            else:
+                results[name] = asyncio.CancelledError("Task was cancelled")
+
+        return results
+    else:
+        # Standard gather for non-fail-fast
+        outcomes = await asyncio.gather(
+            *[execute_named(name, func) for name, func in tasks_dict.items()],
+            return_exceptions=True,
+        )
+
+        results = {}
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                # This shouldn't happen since execute_named catches exceptions
+                continue
+            name, result = outcome
+            results[name] = result
+
+        return results
+
+
+class ConcurrentBatcher:
+    """Batch and process items concurrently with configurable limits.
+
+    Collects items and processes them in batches when the batch size
+    is reached or when explicitly flushed.
+
+    Attributes:
+        batch_size: Number of items per batch
+        max_concurrent: Max concurrent batch processors
+        processor: Async function to process a batch
+
+    Example:
+        async def save_devices(devices: list[dict]):
+            await db.insert_many("devices", devices)
+
+        batcher = ConcurrentBatcher(
+            batch_size=100,
+            max_concurrent=3,
+            processor=save_devices
+        )
+
+        async for page in client.paginate("/devices"):
+            for device in page:
+                await batcher.add(device)
+
+        await batcher.flush()  # Process remaining items
+    """
+
+    def __init__(
+        self,
+        batch_size: int,
+        processor: Callable[[list[Any]], Awaitable[Any]],
+        max_concurrent: int = 3,
+    ):
+        self.batch_size = batch_size
+        self.processor = processor
+        self.max_concurrent = max_concurrent
+
+        self._buffer: list[Any] = []
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._pending_tasks: list[asyncio.Task] = []
+        self._results: list[Any] = []
+        self._errors: list[Exception] = []
+
+    async def add(self, item: Any) -> None:
+        """Add an item to the buffer, processing if batch size reached."""
+        self._buffer.append(item)
+
+        if len(self._buffer) >= self.batch_size:
+            await self._process_batch(self._buffer[:])
+            self._buffer = []
+
+    async def _process_batch(self, batch: list[Any]) -> None:
+        """Process a batch with concurrency limiting."""
+        async with self._semaphore:
+            try:
+                result = await self.processor(batch)
+                self._results.append(result)
+            except Exception as e:
+                logger.error(f"Batch processing failed: {e}")
+                self._errors.append(e)
+
+    async def flush(self) -> tuple[list[Any], list[Exception]]:
+        """Process any remaining items and wait for all batches.
+
+        Returns:
+            Tuple of (all_results, all_errors)
+        """
+        if self._buffer:
+            await self._process_batch(self._buffer)
+            self._buffer = []
+
+        return self._results, self._errors
+
+    @property
+    def pending_count(self) -> int:
+        """Number of items waiting to be processed."""
+        return len(self._buffer)
+
+
+# ============================================
 # Exports
 # ============================================
 
@@ -532,4 +843,10 @@ __all__ = [
     "with_fallback",
     "with_timeout",
     "try_or_default",
+    # Concurrent Processing
+    "process_concurrent",
+    "process_pages_concurrent",
+    "gather_with_errors",
+    "run_concurrent_tasks",
+    "ConcurrentBatcher",
 ]
