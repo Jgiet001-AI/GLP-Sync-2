@@ -1,5 +1,5 @@
 -- HPE GreenLake Device Inventory Schema
--- PostgreSQL 18+
+-- PostgreSQL 16+
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
@@ -21,6 +21,30 @@ CREATE TABLE IF NOT EXISTS devices (
     secondary_name VARCHAR(255),
     assigned_state VARCHAR(50),
     -- ASSIGNED_TO_SERVICE, UNASSIGNED, etc.
+    
+    -- NEW: Additional fields from API schema
+    resource_type VARCHAR(50),              -- e.g., "devices/device"
+    tenant_workspace_id UUID,               -- MSP tenant workspace
+    
+    -- Application reference
+    application_id UUID,
+    application_resource_uri VARCHAR(255),
+    
+    -- Dedicated platform workspace
+    dedicated_platform_id UUID,
+    
+    -- Location (flattened for fast queries)
+    location_id UUID,
+    location_name VARCHAR(255),
+    location_city VARCHAR(100),
+    location_state VARCHAR(100),
+    location_country VARCHAR(100),
+    location_postal_code VARCHAR(20),
+    location_street_address VARCHAR(255),
+    location_latitude DOUBLE PRECISION,
+    location_longitude DOUBLE PRECISION,
+    location_source VARCHAR(50),
+    
     -- Timestamps from API
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ,
@@ -45,6 +69,12 @@ CREATE TABLE IF NOT EXISTS devices (
             'C'
         ) || setweight(
             to_tsvector('english', coalesce(region, '')),
+            'C'
+        ) || setweight(
+            to_tsvector('english', coalesce(location_city, '')),
+            'C'
+        ) || setweight(
+            to_tsvector('english', coalesce(location_country, '')),
             'C'
         )
     ) STORED
@@ -72,6 +102,36 @@ CREATE INDEX IF NOT EXISTS idx_devices_raw ON devices USING GIN(raw_data jsonb_p
 CREATE INDEX IF NOT EXISTS idx_devices_subscriptions ON devices USING GIN((raw_data->'subscription'));
 -- Tags index
 CREATE INDEX IF NOT EXISTS idx_devices_tags ON devices USING GIN((raw_data->'tags'));
+-- New indexes for added columns
+CREATE INDEX IF NOT EXISTS idx_devices_application ON devices(application_id);
+CREATE INDEX IF NOT EXISTS idx_devices_location ON devices(location_id);
+CREATE INDEX IF NOT EXISTS idx_devices_location_country ON devices(location_country);
+CREATE INDEX IF NOT EXISTS idx_devices_location_city ON devices(location_city);
+CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_workspace_id);
+CREATE INDEX IF NOT EXISTS idx_devices_dedicated_platform ON devices(dedicated_platform_id);
+-- ============================================
+-- SUBSCRIPTION TABLE: Normalized from API array
+-- ============================================
+CREATE TABLE IF NOT EXISTS device_subscriptions (
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    subscription_id UUID NOT NULL,
+    resource_uri VARCHAR(255),
+    synced_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (device_id, subscription_id)
+);
+CREATE INDEX IF NOT EXISTS idx_device_subscriptions_sub ON device_subscriptions(subscription_id);
+-- ============================================
+-- TAGS TABLE: Normalized from API key-value object
+-- ============================================
+CREATE TABLE IF NOT EXISTS device_tags (
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    tag_key VARCHAR(100) NOT NULL,
+    tag_value VARCHAR(255),
+    synced_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (device_id, tag_key)
+);
+CREATE INDEX IF NOT EXISTS idx_device_tags_key ON device_tags(tag_key);
+CREATE INDEX IF NOT EXISTS idx_device_tags_key_value ON device_tags(tag_key, tag_value);
 -- ============================================
 -- VIEWS: Pre-built queries for common needs
 -- ============================================

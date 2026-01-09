@@ -205,7 +205,7 @@ class DeviceSyncer:
         return stats
 
     async def _insert_device(self, conn, device: dict):
-        """Insert a single device into PostgreSQL."""
+        """Insert a single device into PostgreSQL with all API fields."""
         # Parse ISO timestamp strings to datetime objects
         # Replace 'Z' with '+00:00' for fromisoformat compatibility
         created_at = None
@@ -216,15 +216,27 @@ class DeviceSyncer:
         if device.get("updatedAt"):
             updated_at = datetime.fromisoformat(device.get("updatedAt").replace('Z', '+00:00'))
 
+        # Extract nested objects (handle None gracefully)
+        application = device.get("application") or {}
+        location = device.get("location") or {}
+        dedicated = device.get("dedicatedPlatformWorkspace") or {}
+
         await conn.execute('''
                 INSERT INTO devices (
                     id, mac_address, serial_number, part_number,
                     device_type, model, region, archived,
                     device_name, secondary_name, assigned_state,
+                    resource_type, tenant_workspace_id,
+                    application_id, application_resource_uri,
+                    dedicated_platform_id,
+                    location_id, location_name, location_city, location_state,
+                    location_country, location_postal_code, location_street_address,
+                    location_latitude, location_longitude, location_source,
                     created_at, updated_at, raw_data, synced_at
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                    $12, $13, $14::jsonb, NOW()
+                    $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                    $21, $22, $23, $24, $25, $26, $27, $28, $29::jsonb, NOW()
                 )
             ''',
                 device["id"],
@@ -238,18 +250,44 @@ class DeviceSyncer:
                 device.get("deviceName"),
                 device.get("secondaryName"),
                 device.get("assignedState"),
+                device.get("type"),  # resource_type
+                device.get("tenantWorkspaceId"),
+                application.get("id"),
+                application.get("resourceUri"),
+                dedicated.get("id"),
+                location.get("id"),
+                location.get("locationName"),
+                location.get("city"),
+                location.get("state"),
+                location.get("country"),
+                location.get("postalCode"),
+                location.get("streetAddress"),
+                location.get("latitude"),
+                location.get("longitude"),
+                location.get("locationSource"),
                 created_at,
                 updated_at,
                 json.dumps(device),
             )
 
+        # Sync subscriptions to device_subscriptions table
+        await self._sync_subscriptions(conn, device["id"], device.get("subscription") or [])
+
+        # Sync tags to device_tags table
+        await self._sync_tags(conn, device["id"], device.get("tags") or {})
+
     async def _update_device(self, conn, device: dict):
-        """Update a single device in PostgreSQL."""
+        """Update a single device in PostgreSQL with all API fields."""
         # Parse ISO timestamp string to datetime object
         # Replace 'Z' with '+00:00' for fromisoformat compatibility
         updated_at = None
         if device.get("updatedAt"):
             updated_at = datetime.fromisoformat(device.get("updatedAt").replace('Z', '+00:00'))
+
+        # Extract nested objects (handle None gracefully)
+        application = device.get("application") or {}
+        location = device.get("location") or {}
+        dedicated = device.get("dedicatedPlatformWorkspace") or {}
 
         await conn.execute('''
                 UPDATE devices
@@ -264,8 +302,24 @@ class DeviceSyncer:
                     device_name = $9,
                     secondary_name = $10,
                     assigned_state = $11,
-                    updated_at = $12,
-                    raw_data = $13::jsonb
+                    resource_type = $12,
+                    tenant_workspace_id = $13,
+                    application_id = $14,
+                    application_resource_uri = $15,
+                    dedicated_platform_id = $16,
+                    location_id = $17,
+                    location_name = $18,
+                    location_city = $19,
+                    location_state = $20,
+                    location_country = $21,
+                    location_postal_code = $22,
+                    location_street_address = $23,
+                    location_latitude = $24,
+                    location_longitude = $25,
+                    location_source = $26,
+                    updated_at = $27,
+                    raw_data = $28::jsonb,
+                    synced_at = NOW()
                 WHERE id = $1
             ''',
                 device["id"],
@@ -279,9 +333,61 @@ class DeviceSyncer:
                 device.get("deviceName"),
                 device.get("secondaryName"),
                 device.get("assignedState"),
+                device.get("type"),  # resource_type
+                device.get("tenantWorkspaceId"),
+                application.get("id"),
+                application.get("resourceUri"),
+                dedicated.get("id"),
+                location.get("id"),
+                location.get("locationName"),
+                location.get("city"),
+                location.get("state"),
+                location.get("country"),
+                location.get("postalCode"),
+                location.get("streetAddress"),
+                location.get("latitude"),
+                location.get("longitude"),
+                location.get("locationSource"),
                 updated_at,
                 json.dumps(device),
             )
+
+        # Sync subscriptions to device_subscriptions table
+        await self._sync_subscriptions(conn, device["id"], device.get("subscription") or [])
+
+        # Sync tags to device_tags table
+        await self._sync_tags(conn, device["id"], device.get("tags") or {})
+
+    async def _sync_subscriptions(self, conn, device_id: str, subscriptions: list):
+        """Sync device subscriptions to the device_subscriptions table."""
+        # Delete existing subscriptions for this device
+        await conn.execute(
+            'DELETE FROM device_subscriptions WHERE device_id = $1',
+            device_id
+        )
+
+        # Insert new subscriptions
+        for sub in subscriptions:
+            if sub.get("id"):
+                await conn.execute('''
+                    INSERT INTO device_subscriptions (device_id, subscription_id, resource_uri)
+                    VALUES ($1, $2, $3)
+                ''', device_id, sub.get("id"), sub.get("resourceUri"))
+
+    async def _sync_tags(self, conn, device_id: str, tags: dict):
+        """Sync device tags to the device_tags table."""
+        # Delete existing tags for this device
+        await conn.execute(
+            'DELETE FROM device_tags WHERE device_id = $1',
+            device_id
+        )
+
+        # Insert new tags
+        for key, value in tags.items():
+            await conn.execute('''
+                INSERT INTO device_tags (device_id, tag_key, tag_value)
+                VALUES ($1, $2, $3)
+            ''', device_id, key, value)
 
     async def sync(self) -> dict:
         """
