@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ============================================
+  # Unit Tests (no database required)
+  # ============================================
+  unit-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+      
+      - name: Set up Python
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: uv sync --dev
+      
+      - name: Run unit tests (auth + devices)
+        run: |
+          uv run pytest tests/test_auth.py tests/test_devices.py -v --tb=short
+        env:
+          # Mock credentials for unit tests
+          GLP_CLIENT_ID: "test_client_id"
+          GLP_CLIENT_SECRET: "test_client_secret"
+          GLP_TOKEN_URL: "https://test.example.com/token"
+          GLP_BASE_URL: "https://test.example.com"
+
+  # ============================================
+  # Integration Tests (requires PostgreSQL)
+  # ============================================
+  integration-tests:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+      
+      - name: Set up Python
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: uv sync --dev
+      
+      - name: Apply database schema
+        run: |
+          PGPASSWORD=test psql -h localhost -U test -d test_db -f db/schema.sql
+      
+      - name: Run database integration tests
+        run: |
+          uv run pytest tests/test_database.py -v --tb=short
+        env:
+          DATABASE_URL: "postgresql://test:test@localhost:5432/test_db"
+          GLP_CLIENT_ID: "test_client_id"
+          GLP_CLIENT_SECRET: "test_client_secret"
+          GLP_TOKEN_URL: "https://test.example.com/token"
+          GLP_BASE_URL: "https://test.example.com"
+
+  # ============================================
+  # Lint Check
+  # ============================================
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "0.5.x"
+      
+      - name: Set up Python
+        run: uv python install 3.11
+      
+      - name: Install dependencies
+        run: uv sync --dev
+      
+      - name: Run ruff check
+        run: uv run ruff check . || true  # Non-blocking for now
