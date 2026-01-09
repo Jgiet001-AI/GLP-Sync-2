@@ -4,12 +4,53 @@ Sync device and subscription inventory from HPE GreenLake Platform to PostgreSQL
 
 ## Features
 
-- OAuth2 authentication with automatic token refresh
-- Paginated API fetching (devices: 2000/request, subscriptions: 50/request)
-- PostgreSQL upsert with JSONB storage + normalized tables
-- Full-text search and tag-based queries
-- Subscription expiration monitoring
-- JSON export mode (no database required)
+- **OAuth2 Authentication** — Automatic token refresh with 5-minute buffer
+- **Paginated Fetching** — Devices: 2,000/page, Subscriptions: 50/page
+- **PostgreSQL Sync** — Upsert with JSONB storage + normalized tables
+- **Full-Text Search** — Search devices by serial, name, model
+- **Scheduler** — Automated sync at configurable intervals
+- **Docker Ready** — Production-ready container with health checks
+
+## Quick Start
+
+### Option 1: Interactive Setup (Recommended)
+
+```bash
+git clone https://github.com/Jgiet001-AI/Demo_Comcast_GLP.git
+cd Demo_Comcast_GLP
+
+chmod +x setup.sh
+./setup.sh
+```
+
+### Option 2: Docker Compose
+
+```bash
+# Create .env file with credentials
+cp .env.example .env
+# Edit .env with your GreenLake credentials
+
+# Start services
+docker compose up -d
+
+# View logs
+docker compose logs -f scheduler
+```
+
+### Option 3: Local Development
+
+```bash
+# Create virtual environment
+uv sync
+
+# Configure credentials
+cp .env.example .env
+# Edit .env
+
+# Run sync
+source .venv/bin/activate
+python main.py
+```
 
 ## CLI Usage
 
@@ -21,95 +62,120 @@ python main.py
 python main.py --devices              # Devices only
 python main.py --subscriptions        # Subscriptions only
 
-# SUBSCRIPTIONS UTILITIES
-python main.py --expiring-days 90     # Show subscriptions expiring in 90 days
+# UTILITIES
+python main.py --expiring-days 90     # Show expiring subscriptions
 
 # JSON EXPORT (no database needed)
-python main.py --json-only            # Export both to JSON files
-python main.py --devices --json-only  # Export devices only
+python main.py --json-only            # Export to JSON files
 
-# BACKUPS (sync to DB + save JSON)
+# BACKUPS
 python main.py --backup devices.json --subscription-backup subs.json
 ```
 
-> **Note**: By default, both devices and subscriptions are synced. Use `--devices` or `--subscriptions` to sync only one.
-
-## Quick Start
+## Docker Commands
 
 ```bash
-# Clone and setup
-git clone https://github.com/Jgiet001-AI/Demo_Comcast_GLP.git
-cd Demo_Comcast_GLP
+# Start scheduler (syncs every hour by default)
+docker compose up -d
 
-# Create virtual environment
-uv sync
+# View logs
+docker compose logs -f scheduler
 
-# Configure credentials
-cp .env.example .env
-# Edit .env with your GreenLake API credentials
+# Health check
+curl http://localhost:8080/
 
-# Run sync
-source .venv/bin/activate
-python main.py --all                  # Full sync (devices + subscriptions)
+# Manual one-time sync
+docker compose run --rm sync-once
+
+# Check expiring subscriptions
+docker compose run --rm check-expiring
+
+# Stop services
+docker compose down
+
+# Stop and remove data
+docker compose down -v
 ```
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `GLP_CLIENT_ID` | OAuth2 client ID |
-| `GLP_CLIENT_SECRET` | OAuth2 client secret |
-| `GLP_TOKEN_URL` | OAuth2 token endpoint |
-| `GLP_BASE_URL` | GreenLake API base URL |
-| `DATABASE_URL` | PostgreSQL connection string |
+| Variable | Description | Default |
+| -------- | ----------- | ------- |
+| `GLP_CLIENT_ID` | OAuth2 client ID | *required* |
+| `GLP_CLIENT_SECRET` | OAuth2 client secret | *required* |
+| `GLP_TOKEN_URL` | OAuth2 token endpoint | *required* |
+| `GLP_BASE_URL` | GreenLake API base URL | `https://global.api.greenlake.hpe.com` |
+| `DATABASE_URL` | PostgreSQL connection | *required for DB sync* |
+| `SYNC_INTERVAL_MINUTES` | Minutes between syncs | `60` |
+| `SYNC_DEVICES` | Enable device sync | `true` |
+| `SYNC_SUBSCRIPTIONS` | Enable subscription sync | `true` |
+| `SYNC_ON_STARTUP` | Sync immediately on start | `true` |
+| `HEALTH_CHECK_PORT` | Health endpoint port | `8080` |
 
 ## Project Structure
 
-```
+```text
 ├── main.py                      # CLI entry point
+├── scheduler.py                 # Automated sync scheduler
+├── Dockerfile                   # Production container
+├── docker-compose.yml           # Full stack deployment
+├── setup.sh                     # Interactive setup wizard
 ├── src/glp/api/
 │   ├── auth.py                  # OAuth2 token management
-│   ├── client.py                # Generic HTTP client with pagination
+│   ├── client.py                # Generic HTTP client
 │   ├── devices.py               # Device sync logic
 │   └── subscriptions.py         # Subscription sync logic
 ├── db/
 │   ├── schema.sql               # Device tables
 │   ├── subscriptions_schema.sql # Subscription tables
 │   └── migrations/              # Schema migrations
-└── tests/
-    ├── test_auth.py             # Auth unit tests
-    ├── test_devices.py          # Device sync tests
-    └── test_database.py         # DB integration tests
+└── tests/                       # 49 tests
 ```
+
+## Database Schema
+
+### Tables
+
+| Table | Purpose |
+| ----- | ------- |
+| `devices` | Device inventory (28 columns) |
+| `subscriptions` | Subscription inventory (20 columns) |
+| `device_subscriptions` | Device-subscription relationships |
+| `device_tags` | Device tags (normalized) |
+| `subscription_tags` | Subscription tags (normalized) |
+| `sync_history` | Sync audit log |
+
+### Useful Views
+
+- `active_subscriptions` — Only STARTED subscriptions
+- `subscriptions_expiring_soon` — Expiring in 90 days
+- `subscription_summary` — Count by type/status
 
 ## Testing
 
 ```bash
-# Run all tests
-python -m pytest tests/ -v
+# Run all tests (49 tests)
+uv run pytest tests/ -v
 
 # Unit tests only (no database)
-python -m pytest tests/test_auth.py tests/test_devices.py -v
+uv run pytest tests/test_auth.py tests/test_devices.py tests/test_subscriptions.py -v
 
 # Database tests (requires PostgreSQL)
-python -m pytest tests/test_database.py -v
+uv run pytest tests/test_database.py -v
 ```
 
-### Test Isolation
+## Architecture
 
-Database tests use transaction rollback for complete isolation:
-
-- Each test runs in a transaction that is rolled back after completion
-- No test data persists in the database
-- Safe to run against development databases
-
-## CI/CD
-
-GitHub Actions workflow includes:
-
-- **Unit tests**: Run without database
-- **Integration tests**: PostgreSQL 16 service container
-- **Lint**: Ruff check (non-blocking)
+```text
+┌─────────────────┐     ┌──────────────┐     ┌────────────┐
+│  GreenLake API  │────▶│   GLPClient  │────▶│ PostgreSQL │
+└─────────────────┘     └──────────────┘     └────────────┘
+         │                      │
+         │              ┌───────┴───────┐
+         │              │               │
+         ▼              ▼               ▼
+   TokenManager    DeviceSyncer  SubscriptionSyncer
+```
 
 ## License
 

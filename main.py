@@ -170,7 +170,7 @@ async def show_expiring_subscriptions(
         print(f"✓ No subscriptions expiring in the next {days} days")
         return
     
-    print(f"\n⚠️  Found {len(expiring)} expiring subscription(s):\n")
+    print(f"\nFound {len(expiring)} expiring subscription(s):\n")
     print(f"{'Key':<20} {'Type':<20} {'End Date':<25} {'Status':<12}")
     print("-" * 80)
     

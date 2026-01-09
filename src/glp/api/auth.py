@@ -120,8 +120,8 @@ class TokenManager:
             if self._cached_token and not self._cached_token.is_expired:
                 return self._cached_token.access_token
         
-        self._cached_token = await self._fetch_token()
-        return self._cached_token.access_token
+            self._cached_token = await self._fetch_token()
+            return self._cached_token.access_token
     
     async def _fetch_token(self, max_retries: int = 3) -> CachedToken:
         """Fetch a new access token from the GLP API."""
@@ -194,11 +194,14 @@ class TokenManager:
             "token_preview": self._cached_token.access_token[:20] + "...",
         }
     
+
 class TokenError(Exception):
     """Exception raised for token-related errors."""
     pass
 
+
 _default_manager: Optional[TokenManager] = None
+
 
 async def get_token() -> str:
     """Get a valid access token, fetching or refreshing as needed."""
@@ -221,7 +224,7 @@ if __name__ == "__main__":
         t2 = await manager.get_token()
         print(f'Token: {t2 == t1}')
 
-        print("\n10 concurrrent calls (should still be 1 fetch)")
+        print("\n10 concurrent calls (should still be 1 fetch)")
         tokens = await asyncio.gather(
             *[
                 manager.get_token() for _ in range(10)
@@ -230,4 +233,3 @@ if __name__ == "__main__":
         print(f"All tokens are the same: {len(set(tokens)) == 1}")
         
     asyncio.run(test())
-        

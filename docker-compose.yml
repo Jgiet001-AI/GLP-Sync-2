@@ -1,0 +1,138 @@
+# ============================================
+# HPE GreenLake Sync - Docker Compose
+# ============================================
+# 
+# Usage:
+#   # Start everything (scheduler + database)
+#   docker compose up -d
+#
+#   # View logs
+#   docker compose logs -f scheduler
+#
+#   # One-time sync (instead of scheduled)
+#   docker compose run --rm scheduler python main.py --all
+#
+#   # Stop everything
+#   docker compose down
+#
+#   # Stop and remove data
+#   docker compose down -v
+
+services:
+  # ----------------------------------------
+  # PostgreSQL Database
+  # ----------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: glp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-glp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glp_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-greenlake}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-devices.sql:ro
+      - ./db/subscriptions_schema.sql:/docker-entrypoint-initdb.d/02-subscriptions.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-glp} -d ${POSTGRES_DB:-greenlake}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------
+  # GLP Sync Scheduler
+  # ----------------------------------------
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: glp-scheduler
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # GreenLake API credentials (required)
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      
+      # Database connection
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+      
+      # Scheduler settings
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-60}
+      SYNC_DEVICES: ${SYNC_DEVICES:-true}
+      SYNC_SUBSCRIPTIONS: ${SYNC_SUBSCRIPTIONS:-true}
+      SYNC_ON_STARTUP: ${SYNC_ON_STARTUP:-true}
+      SYNC_MAX_RETRIES: ${SYNC_MAX_RETRIES:-3}
+      SYNC_RETRY_DELAY_MINUTES: ${SYNC_RETRY_DELAY_MINUTES:-5}
+      HEALTH_CHECK_PORT: 8080
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ----------------------------------------
+  # One-Time Sync (manual trigger)
+  # ----------------------------------------
+  # Usage: docker compose run --rm sync-once
+  sync-once:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]  # Only runs when explicitly called
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+    command: ["python", "main.py", "--all"]
+
+  # ----------------------------------------
+  # Expiring Subscriptions Report
+  # ----------------------------------------
+  # Usage: docker compose run --rm check-expiring
+  check-expiring:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]
+    environment:
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+    command: ["python", "main.py", "--expiring-days", "90"]
+
+volumes:
+  postgres_data:
+    driver: local
+
+# ============================================
+# Environment File (.env)
+# ============================================
+# Create a .env file with:
+#
+# GLP_CLIENT_ID=your_client_id
+# GLP_CLIENT_SECRET=your_client_secret
+# GLP_TOKEN_URL=https://sso.common.cloud.hpe.com/as/token.oauth2
+# GLP_BASE_URL=https://global.api.greenlake.hpe.com
+#
+# # Optional overrides:
+# SYNC_INTERVAL_MINUTES=60
+# POSTGRES_USER=glp
+# POSTGRES_PASSWORD=your_secure_password
+# POSTGRES_DB=greenlake
