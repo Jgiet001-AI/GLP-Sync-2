@@ -672,6 +672,37 @@ class GLPClient:
         # Unexpected: API returned non-202 response
         return AsyncOperationResult(operation_url="", response_body=result)
 
+    async def delete_async(
+        self,
+        endpoint: str,
+        params: Optional[dict] = None,
+    ) -> AsyncOperationResult:
+        """Make a DELETE request expecting 202 Accepted response.
+
+        Used for GreenLake v2 APIs that return 202 Accepted with a Location
+        header for async operations.
+
+        Args:
+            endpoint: API endpoint path
+            params: Query parameters (supports lists for multi-value params)
+
+        Returns:
+            AsyncOperationResult with operation_url for status tracking.
+            Note: If the API unexpectedly returns a non-202 response, the
+            operation_url will be empty. Callers should check operation_url
+            is truthy before polling for status.
+        """
+        result = await self._request_with_retry(
+            "DELETE",
+            endpoint,
+            params=params,
+            accept_202=True,
+        )
+        if isinstance(result, AsyncOperationResult):
+            return result
+        # Unexpected: API returned non-202 response
+        return AsyncOperationResult(operation_url="", response_body=result)
+
     # ----------------------------------------
     # Pagination Methods
     # ----------------------------------------

@@ -9,12 +9,23 @@ dependencies = [
     "asyncpg>=0.29.0",
     "python-dotenv>=1.0.0",
     "fastmcp>=2.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.31.0",
+    "openpyxl>=3.1.0",
+    "pydantic>=2.9.0",
 ]
 
 [dependency-groups]
 dev = [
+    "playwright>=1.57.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+]
+profiling = [
+    "snakeviz>=2.2.0",
+    "memory-profiler>=0.61.0",
+    "line-profiler>=4.1.0",
+    "py-spy>=0.3.14",
 ]
 
 [project.scripts]

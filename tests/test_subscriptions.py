@@ -232,12 +232,12 @@ class TestDatabaseSync:
         assert "Database connection pool is required" in str(exc.value)
 
     @pytest.mark.asyncio
-    async def test_sync_inserts_new_subscription(self, mock_client, mock_db_pool):
-        """Should insert new subscriptions."""
+    async def test_sync_upserts_subscriptions(self, mock_client, mock_db_pool):
+        """Should upsert subscriptions using bulk operations."""
         pool, conn = mock_db_pool
 
-        # Subscription doesn't exist
-        conn.fetchval = AsyncMock(return_value=None)
+        # Mock bulk operations
+        conn.executemany = AsyncMock()
         conn.execute = AsyncMock()
 
         syncer = SubscriptionSyncer(client=mock_client, db_pool=pool)
@@ -251,30 +251,31 @@ class TestDatabaseSync:
 
         stats = await syncer.sync_to_postgres(subs)
 
-        assert stats["inserted"] == 1
-        assert stats["updated"] == 0
+        assert stats["upserted"] == 1
         assert stats["errors"] == 0
+        # Verify executemany was called for bulk upsert
+        assert conn.executemany.called
 
     @pytest.mark.asyncio
-    async def test_sync_updates_existing_subscription(self, mock_client, mock_db_pool):
-        """Should update existing subscriptions."""
+    async def test_sync_multiple_subscriptions(self, mock_client, mock_db_pool):
+        """Should upsert multiple subscriptions in bulk."""
         pool, conn = mock_db_pool
 
-        # Subscription exists
-        conn.fetchval = AsyncMock(return_value=1)
+        conn.executemany = AsyncMock()
         conn.execute = AsyncMock()
 
         syncer = SubscriptionSyncer(client=mock_client, db_pool=pool)
 
-        subs = [{
-            "id": "sub-1",
-            "key": "KEY001",
-        }]
+        subs = [
+            {"id": "sub-1", "key": "KEY001"},
+            {"id": "sub-2", "key": "KEY002"},
+            {"id": "sub-3", "key": "KEY003"},
+        ]
 
         stats = await syncer.sync_to_postgres(subs)
 
-        assert stats["inserted"] == 0
-        assert stats["updated"] == 1
+        assert stats["upserted"] == 3
+        assert stats["total"] == 3
 
 
 # ============================================

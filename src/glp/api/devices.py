@@ -111,19 +111,18 @@ class DeviceSyncer:
             yield page
 
     # ----------------------------------------
-    # Database Operations
+    # Database Operations (Optimized with Bulk Operations)
     # ----------------------------------------
 
     async def sync_to_postgres(self, devices: list[dict]) -> dict:
-        """Upsert devices to PostgreSQL with proper error handling.
+        """Upsert devices to PostgreSQL using optimized bulk operations.
 
-        For each device:
-        1. Insert or update the main devices table
-        2. Sync subscriptions to device_subscriptions table
-        3. Sync tags to device_tags table
+        Performance optimizations:
+        1. Uses UPSERT (INSERT ON CONFLICT) - eliminates N SELECT queries
+        2. Bulk DELETE with ANY() - single query for all device IDs
+        3. executemany() for bulk inserts - batched subscriptions/tags
 
-        Uses database transactions to ensure consistency and ErrorCollector
-        to continue processing on individual device failures.
+        This reduces ~47,000 queries to ~5 queries for 11,000 devices.
 
         Args:
             devices: List of device dictionaries from API
@@ -133,69 +132,77 @@ class DeviceSyncer:
 
         Raises:
             ConnectionPoolError: If database pool is not available
-            PartialSyncError: If some devices failed to sync (includes statistics)
+            PartialSyncError: If sync fails
         """
         if self.db_pool is None:
             raise ConnectionPoolError(
                 "Database connection pool is required for sync"
             )
 
-        inserted = 0
-        updated = 0
+        if not devices:
+            return {
+                "total": 0,
+                "upserted": 0,
+                "errors": 0,
+                "synced_at": datetime.utcnow().isoformat(),
+            }
+
         error_collector = ErrorCollector()
+        upserted = 0
 
-        async with database_transaction(self.db_pool) as conn:
-            for device in devices:
-                device_id = device.get("id", "unknown")
-                try:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM devices WHERE id = $1",
-                        device["id"]
-                    )
+        try:
+            async with database_transaction(self.db_pool) as conn:
+                # Step 1: Bulk UPSERT all devices
+                device_records = self._prepare_device_records(devices)
+                upserted = await self._bulk_upsert_devices(conn, device_records)
 
-                    if exists:
-                        await self._update_device(conn, device)
-                        updated += 1
-                    else:
-                        await self._insert_device(conn, device)
-                        inserted += 1
+                # Step 2: Collect all device IDs for bulk operations
+                device_ids = [d["id"] for d in devices]
 
-                except IntegrityError as e:
-                    # Log but continue - integrity errors are usually data issues
-                    logger.warning(f"Integrity error syncing device {device_id}: {e}")
-                    error_collector.add(e, context={"device_id": device_id})
+                # Step 3: Bulk DELETE existing subscriptions and tags
+                await self._bulk_delete_related(conn, device_ids)
 
-                except DatabaseError as e:
-                    # Database errors - collect and continue
-                    logger.error(f"Database error syncing device {device_id}: {e}")
-                    error_collector.add(e, context={"device_id": device_id})
+                # Step 4: Bulk INSERT subscriptions
+                subscription_records = self._prepare_subscription_records(devices)
+                if subscription_records:
+                    await self._bulk_insert_subscriptions(conn, subscription_records)
 
-                except Exception as e:
-                    # Unexpected errors - wrap and collect
-                    logger.error(f"Unexpected error syncing device {device_id}: {e}")
-                    error_collector.add(
-                        SyncError(f"Failed to sync device: {e}", cause=e),
-                        context={"device_id": device_id}
-                    )
+                # Step 5: Bulk INSERT tags
+                tag_records = self._prepare_tag_records(devices)
+                if tag_records:
+                    await self._bulk_insert_tags(conn, tag_records)
+
+        except IntegrityError as e:
+            logger.error(f"Integrity error during bulk sync: {e}")
+            error_collector.add(e, context={"operation": "bulk_upsert"})
+
+        except DatabaseError as e:
+            logger.error(f"Database error during bulk sync: {e}")
+            error_collector.add(e, context={"operation": "bulk_upsert"})
+
+        except Exception as e:
+            logger.error(f"Unexpected error during bulk sync: {e}")
+            error_collector.add(
+                SyncError(f"Bulk sync failed: {e}", cause=e),
+                context={"operation": "bulk_upsert"}
+            )
 
         stats = {
             "total": len(devices),
-            "inserted": inserted,
-            "updated": updated,
+            "upserted": upserted,
             "errors": error_collector.count(),
             "synced_at": datetime.utcnow().isoformat(),
         }
 
         logger.info(
-            f"Device sync complete: {inserted} inserted, {updated} updated, "
+            f"Device sync complete: {upserted} upserted, "
             f"{error_collector.count()} errors"
         )
 
-        # If there were errors, raise PartialSyncError with full stats
         if error_collector.has_errors():
             raise PartialSyncError(
                 f"Device sync completed with {error_collector.count()} errors",
-                succeeded=inserted + updated,
+                succeeded=upserted,
                 failed=error_collector.count(),
                 errors=[e for e, _ in error_collector.get_errors()],
                 details=stats,
@@ -203,18 +210,71 @@ class DeviceSyncer:
 
         return stats
 
-    async def _insert_device(self, conn, device: dict):
-        """Insert a single device into PostgreSQL with all API fields."""
-        # Parse timestamps
-        created_at = self._parse_timestamp(device.get("createdAt"))
-        updated_at = self._parse_timestamp(device.get("updatedAt"))
+    def _prepare_device_records(self, devices: list[dict]) -> list[tuple]:
+        """Prepare device records for bulk insert.
 
-        # Extract nested objects (handle None gracefully)
-        application = device.get("application") or {}
-        location = device.get("location") or {}
-        dedicated = device.get("dedicatedPlatformWorkspace") or {}
+        Extracts and transforms all fields from API format to database format.
 
-        await conn.execute('''
+        Args:
+            devices: List of device dictionaries from API
+
+        Returns:
+            List of tuples ready for executemany()
+        """
+        records = []
+        for device in devices:
+            created_at = self._parse_timestamp(device.get("createdAt"))
+            updated_at = self._parse_timestamp(device.get("updatedAt"))
+
+            application = device.get("application") or {}
+            location = device.get("location") or {}
+            dedicated = device.get("dedicatedPlatformWorkspace") or {}
+
+            records.append((
+                device["id"],
+                device.get("macAddress"),
+                device.get("serialNumber"),
+                device.get("partNumber"),
+                device.get("deviceType"),
+                device.get("model"),
+                device.get("region"),
+                device.get("archived", False),
+                device.get("deviceName"),
+                device.get("secondaryName"),
+                device.get("assignedState"),
+                device.get("type"),  # resource_type
+                device.get("tenantWorkspaceId"),
+                application.get("id"),
+                application.get("resourceUri"),
+                dedicated.get("id"),
+                location.get("id"),
+                location.get("locationName"),
+                location.get("city"),
+                location.get("state"),
+                location.get("country"),
+                location.get("postalCode"),
+                location.get("streetAddress"),
+                location.get("latitude"),
+                location.get("longitude"),
+                location.get("locationSource"),
+                created_at,
+                updated_at,
+                json.dumps(device),
+            ))
+        return records
+
+    async def _bulk_upsert_devices(self, conn, records: list[tuple]) -> int:
+        """Bulk upsert devices using INSERT ON CONFLICT.
+
+        Args:
+            conn: Database connection
+            records: List of device record tuples
+
+        Returns:
+            Number of rows affected
+        """
+        # Use executemany with UPSERT query
+        await conn.executemany('''
             INSERT INTO devices (
                 id, mac_address, serial_number, part_number,
                 device_type, model, region, archived,
@@ -231,166 +291,122 @@ class DeviceSyncer:
                 $12, $13, $14, $15, $16, $17, $18, $19, $20,
                 $21, $22, $23, $24, $25, $26, $27, $28, $29::jsonb, NOW()
             )
-        ''',
-            device["id"],
-            device.get("macAddress"),
-            device.get("serialNumber"),
-            device.get("partNumber"),
-            device.get("deviceType"),
-            device.get("model"),
-            device.get("region"),
-            device.get("archived", False),
-            device.get("deviceName"),
-            device.get("secondaryName"),
-            device.get("assignedState"),
-            device.get("type"),  # resource_type
-            device.get("tenantWorkspaceId"),
-            application.get("id"),
-            application.get("resourceUri"),
-            dedicated.get("id"),
-            location.get("id"),
-            location.get("locationName"),
-            location.get("city"),
-            location.get("state"),
-            location.get("country"),
-            location.get("postalCode"),
-            location.get("streetAddress"),
-            location.get("latitude"),
-            location.get("longitude"),
-            location.get("locationSource"),
-            created_at,
-            updated_at,
-            json.dumps(device),
-        )
-
-        # Sync related tables
-        await self._sync_subscriptions(conn, device["id"], device.get("subscription") or [])
-        await self._sync_tags(conn, device["id"], device.get("tags") or {})
-
-    async def _update_device(self, conn, device: dict):
-        """Update a single device in PostgreSQL with all API fields."""
-        # Parse timestamp
-        updated_at = self._parse_timestamp(device.get("updatedAt"))
-
-        # Extract nested objects (handle None gracefully)
-        application = device.get("application") or {}
-        location = device.get("location") or {}
-        dedicated = device.get("dedicatedPlatformWorkspace") or {}
-
-        await conn.execute('''
-            UPDATE devices SET
-                mac_address = $2,
-                serial_number = $3,
-                part_number = $4,
-                device_type = $5,
-                model = $6,
-                region = $7,
-                archived = $8,
-                device_name = $9,
-                secondary_name = $10,
-                assigned_state = $11,
-                resource_type = $12,
-                tenant_workspace_id = $13,
-                application_id = $14,
-                application_resource_uri = $15,
-                dedicated_platform_id = $16,
-                location_id = $17,
-                location_name = $18,
-                location_city = $19,
-                location_state = $20,
-                location_country = $21,
-                location_postal_code = $22,
-                location_street_address = $23,
-                location_latitude = $24,
-                location_longitude = $25,
-                location_source = $26,
-                updated_at = $27,
-                raw_data = $28::jsonb,
+            ON CONFLICT (id) DO UPDATE SET
+                mac_address = EXCLUDED.mac_address,
+                serial_number = EXCLUDED.serial_number,
+                part_number = EXCLUDED.part_number,
+                device_type = EXCLUDED.device_type,
+                model = EXCLUDED.model,
+                region = EXCLUDED.region,
+                archived = EXCLUDED.archived,
+                device_name = EXCLUDED.device_name,
+                secondary_name = EXCLUDED.secondary_name,
+                assigned_state = EXCLUDED.assigned_state,
+                resource_type = EXCLUDED.resource_type,
+                tenant_workspace_id = EXCLUDED.tenant_workspace_id,
+                application_id = EXCLUDED.application_id,
+                application_resource_uri = EXCLUDED.application_resource_uri,
+                dedicated_platform_id = EXCLUDED.dedicated_platform_id,
+                location_id = EXCLUDED.location_id,
+                location_name = EXCLUDED.location_name,
+                location_city = EXCLUDED.location_city,
+                location_state = EXCLUDED.location_state,
+                location_country = EXCLUDED.location_country,
+                location_postal_code = EXCLUDED.location_postal_code,
+                location_street_address = EXCLUDED.location_street_address,
+                location_latitude = EXCLUDED.location_latitude,
+                location_longitude = EXCLUDED.location_longitude,
+                location_source = EXCLUDED.location_source,
+                updated_at = EXCLUDED.updated_at,
+                raw_data = EXCLUDED.raw_data,
                 synced_at = NOW()
-            WHERE id = $1
-        ''',
-            device["id"],
-            device.get("macAddress"),
-            device.get("serialNumber"),
-            device.get("partNumber"),
-            device.get("deviceType"),
-            device.get("model"),
-            device.get("region"),
-            device.get("archived", False),
-            device.get("deviceName"),
-            device.get("secondaryName"),
-            device.get("assignedState"),
-            device.get("type"),  # resource_type
-            device.get("tenantWorkspaceId"),
-            application.get("id"),
-            application.get("resourceUri"),
-            dedicated.get("id"),
-            location.get("id"),
-            location.get("locationName"),
-            location.get("city"),
-            location.get("state"),
-            location.get("country"),
-            location.get("postalCode"),
-            location.get("streetAddress"),
-            location.get("latitude"),
-            location.get("longitude"),
-            location.get("locationSource"),
-            updated_at,
-            json.dumps(device),
-        )
+        ''', records)
 
-        # Sync related tables
-        await self._sync_subscriptions(conn, device["id"], device.get("subscription") or [])
-        await self._sync_tags(conn, device["id"], device.get("tags") or {})
+        return len(records)
 
-    async def _sync_subscriptions(self, conn, device_id: str, subscriptions: list):
-        """Sync device subscriptions to the device_subscriptions table.
+    async def _bulk_delete_related(self, conn, device_ids: list[str]) -> None:
+        """Bulk delete subscriptions and tags for all devices.
 
-        Strategy: Delete all existing, insert fresh. This ensures we capture
-        any subscriptions that were removed from the device.
+        Uses ANY() with array for efficient bulk deletion.
 
         Args:
             conn: Database connection
-            device_id: UUID of the device
-            subscriptions: List of subscription dicts from API
+            device_ids: List of device UUIDs
         """
-        # Delete existing subscriptions for this device
+        # Delete all subscriptions for these devices in one query
         await conn.execute(
-            'DELETE FROM device_subscriptions WHERE device_id = $1',
-            device_id
+            'DELETE FROM device_subscriptions WHERE device_id = ANY($1)',
+            device_ids
         )
 
-        # Insert new subscriptions
-        for sub in subscriptions:
-            if sub.get("id"):
-                await conn.execute('''
-                    INSERT INTO device_subscriptions (device_id, subscription_id, resource_uri)
-                    VALUES ($1, $2, $3)
-                ''', device_id, sub.get("id"), sub.get("resourceUri"))
+        # Delete all tags for these devices in one query
+        await conn.execute(
+            'DELETE FROM device_tags WHERE device_id = ANY($1)',
+            device_ids
+        )
 
-    async def _sync_tags(self, conn, device_id: str, tags: dict):
-        """Sync device tags to the device_tags table.
+    def _prepare_subscription_records(self, devices: list[dict]) -> list[tuple]:
+        """Prepare subscription records for bulk insert.
 
-        Strategy: Delete all existing, insert fresh. This ensures we capture
-        any tags that were removed from the device.
+        Args:
+            devices: List of device dictionaries
+
+        Returns:
+            List of (device_id, subscription_id, resource_uri) tuples
+        """
+        records = []
+        for device in devices:
+            device_id = device["id"]
+            subscriptions = device.get("subscription") or []
+            for sub in subscriptions:
+                if sub.get("id"):
+                    records.append((
+                        device_id,
+                        sub.get("id"),
+                        sub.get("resourceUri"),
+                    ))
+        return records
+
+    async def _bulk_insert_subscriptions(self, conn, records: list[tuple]) -> None:
+        """Bulk insert device subscriptions.
 
         Args:
             conn: Database connection
-            device_id: UUID of the device
-            tags: Dict of tag key-value pairs from API
+            records: List of subscription record tuples
         """
-        # Delete existing tags for this device
-        await conn.execute(
-            'DELETE FROM device_tags WHERE device_id = $1',
-            device_id
-        )
+        await conn.executemany('''
+            INSERT INTO device_subscriptions (device_id, subscription_id, resource_uri)
+            VALUES ($1, $2, $3)
+        ''', records)
 
-        # Insert new tags
-        for key, value in tags.items():
-            await conn.execute('''
-                INSERT INTO device_tags (device_id, tag_key, tag_value)
-                VALUES ($1, $2, $3)
-            ''', device_id, key, value)
+    def _prepare_tag_records(self, devices: list[dict]) -> list[tuple]:
+        """Prepare tag records for bulk insert.
+
+        Args:
+            devices: List of device dictionaries
+
+        Returns:
+            List of (device_id, tag_key, tag_value) tuples
+        """
+        records = []
+        for device in devices:
+            device_id = device["id"]
+            tags = device.get("tags") or {}
+            for key, value in tags.items():
+                records.append((device_id, key, value))
+        return records
+
+    async def _bulk_insert_tags(self, conn, records: list[tuple]) -> None:
+        """Bulk insert device tags.
+
+        Args:
+            conn: Database connection
+            records: List of tag record tuples
+        """
+        await conn.executemany('''
+            INSERT INTO device_tags (device_id, tag_key, tag_value)
+            VALUES ($1, $2, $3)
+        ''', records)
 
     @staticmethod
     def _parse_timestamp(iso_string: Optional[str]) -> Optional[datetime]:

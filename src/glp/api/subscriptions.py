@@ -100,6 +100,21 @@ class SubscriptionSyncer:
             config=SUBSCRIPTIONS_PAGINATION,
         )
 
+    async def fetch_subscriptions_generator(self):
+        """Yield subscriptions page by page (memory efficient).
+
+        Use this for very large datasets where you want to process
+        subscriptions as they arrive rather than loading all into memory.
+
+        Yields:
+            Lists of subscription dictionaries, one page at a time.
+        """
+        async for page in self.client.paginate(
+            self.ENDPOINT,
+            config=SUBSCRIPTIONS_PAGINATION,
+        ):
+            yield page
+
     async def fetch_subscription_by_id(self, subscription_id: str) -> dict:
         """Fetch a single subscription by ID.
 
@@ -211,17 +226,16 @@ class SubscriptionSyncer:
         return await self.fetch_with_filter(f"subscriptionType eq '{subscription_type}'")
 
     # ----------------------------------------
-    # Database Operations
+    # Database Operations (Optimized with Bulk Operations)
     # ----------------------------------------
 
     async def sync_to_postgres(self, subscriptions: list[dict]) -> dict:
-        """Upsert subscriptions to PostgreSQL with proper error handling.
+        """Upsert subscriptions to PostgreSQL using optimized bulk operations.
 
-        NOTE: This assumes a 'subscriptions' table exists. You'll need to
-        create the schema first. See db/subscriptions_schema.sql
-
-        Uses database transactions to ensure consistency and ErrorCollector
-        to continue processing on individual subscription failures.
+        Performance optimizations:
+        1. Uses UPSERT (INSERT ON CONFLICT) - eliminates N SELECT queries
+        2. Bulk DELETE with ANY() - single query for all subscription IDs
+        3. executemany() for bulk inserts - batched tags
 
         Args:
             subscriptions: List of subscription dictionaries from API
@@ -231,69 +245,75 @@ class SubscriptionSyncer:
 
         Raises:
             ConnectionPoolError: If database pool is not available
-            PartialSyncError: If some subscriptions failed to sync
+            PartialSyncError: If sync fails
         """
         if self.db_pool is None:
             raise ConnectionPoolError(
                 "Database connection pool is required for sync"
             )
 
-        inserted = 0
-        updated = 0
+        if not subscriptions:
+            return {
+                "total": 0,
+                "upserted": 0,
+                "errors": 0,
+                "synced_at": datetime.utcnow().isoformat(),
+            }
+
         error_collector = ErrorCollector()
+        upserted = 0
 
-        async with database_transaction(self.db_pool) as conn:
-            for sub in subscriptions:
-                sub_id = sub.get("id", "unknown")
-                try:
-                    exists = await conn.fetchval(
-                        "SELECT 1 FROM subscriptions WHERE id = $1",
-                        sub["id"]
-                    )
+        try:
+            async with database_transaction(self.db_pool) as conn:
+                # Step 1: Bulk UPSERT all subscriptions
+                subscription_records = self._prepare_subscription_records(subscriptions)
+                upserted = await self._bulk_upsert_subscriptions(conn, subscription_records)
 
-                    if exists:
-                        await self._update_subscription(conn, sub)
-                        updated += 1
-                    else:
-                        await self._insert_subscription(conn, sub)
-                        inserted += 1
+                # Step 2: Collect all subscription IDs for bulk operations
+                subscription_ids = [s["id"] for s in subscriptions]
 
-                except IntegrityError as e:
-                    # Log but continue - integrity errors are usually data issues
-                    logger.warning(f"Integrity error syncing subscription {sub_id}: {e}")
-                    error_collector.add(e, context={"subscription_id": sub_id})
+                # Step 3: Bulk DELETE existing tags
+                await conn.execute(
+                    'DELETE FROM subscription_tags WHERE subscription_id = ANY($1)',
+                    subscription_ids
+                )
 
-                except DatabaseError as e:
-                    # Database errors - collect and continue
-                    logger.error(f"Database error syncing subscription {sub_id}: {e}")
-                    error_collector.add(e, context={"subscription_id": sub_id})
+                # Step 4: Bulk INSERT tags
+                tag_records = self._prepare_tag_records(subscriptions)
+                if tag_records:
+                    await self._bulk_insert_tags(conn, tag_records)
 
-                except Exception as e:
-                    # Unexpected errors - wrap and collect
-                    logger.error(f"Unexpected error syncing subscription {sub_id}: {e}")
-                    error_collector.add(
-                        SyncError(f"Failed to sync subscription: {e}", cause=e),
-                        context={"subscription_id": sub_id}
-                    )
+        except IntegrityError as e:
+            logger.error(f"Integrity error during bulk sync: {e}")
+            error_collector.add(e, context={"operation": "bulk_upsert"})
+
+        except DatabaseError as e:
+            logger.error(f"Database error during bulk sync: {e}")
+            error_collector.add(e, context={"operation": "bulk_upsert"})
+
+        except Exception as e:
+            logger.error(f"Unexpected error during bulk sync: {e}")
+            error_collector.add(
+                SyncError(f"Bulk sync failed: {e}", cause=e),
+                context={"operation": "bulk_upsert"}
+            )
 
         stats = {
             "total": len(subscriptions),
-            "inserted": inserted,
-            "updated": updated,
+            "upserted": upserted,
             "errors": error_collector.count(),
             "synced_at": datetime.utcnow().isoformat(),
         }
 
         logger.info(
-            f"Subscription sync complete: {inserted} inserted, {updated} updated, "
+            f"Subscription sync complete: {upserted} upserted, "
             f"{error_collector.count()} errors"
         )
 
-        # If there were errors, raise PartialSyncError with full stats
         if error_collector.has_errors():
             raise PartialSyncError(
                 f"Subscription sync completed with {error_collector.count()} errors",
-                succeeded=inserted + updated,
+                succeeded=upserted,
                 failed=error_collector.count(),
                 errors=[e for e, _ in error_collector.get_errors()],
                 details=stats,
@@ -301,9 +321,54 @@ class SubscriptionSyncer:
 
         return stats
 
-    async def _insert_subscription(self, conn, sub: dict):
-        """Insert a single subscription into PostgreSQL with all API fields."""
-        await conn.execute('''
+    def _prepare_subscription_records(self, subscriptions: list[dict]) -> list[tuple]:
+        """Prepare subscription records for bulk insert.
+
+        Args:
+            subscriptions: List of subscription dictionaries from API
+
+        Returns:
+            List of tuples ready for executemany()
+        """
+        records = []
+        for sub in subscriptions:
+            records.append((
+                sub["id"],
+                sub.get("key"),
+                sub.get("type"),  # resource_type
+                sub.get("subscriptionType"),
+                sub.get("subscriptionStatus"),
+                int(sub.get("quantity", 0)) if sub.get("quantity") else None,
+                int(sub.get("availableQuantity", 0)) if sub.get("availableQuantity") else None,
+                sub.get("sku"),
+                sub.get("skuDescription"),
+                self._parse_timestamp(sub.get("startTime")),
+                self._parse_timestamp(sub.get("endTime")),
+                sub.get("tier"),
+                sub.get("tierDescription"),
+                sub.get("productType"),
+                sub.get("isEval", False),
+                sub.get("contract"),
+                sub.get("quote"),
+                sub.get("po"),
+                sub.get("resellerPo"),
+                self._parse_timestamp(sub.get("createdAt")),
+                self._parse_timestamp(sub.get("updatedAt")),
+                json.dumps(sub),
+            ))
+        return records
+
+    async def _bulk_upsert_subscriptions(self, conn, records: list[tuple]) -> int:
+        """Bulk upsert subscriptions using INSERT ON CONFLICT.
+
+        Args:
+            conn: Database connection
+            records: List of subscription record tuples
+
+        Returns:
+            Number of rows affected
+        """
+        await conn.executemany('''
             INSERT INTO subscriptions (
                 id, key, resource_type, subscription_type, subscription_status,
                 quantity, available_quantity, sku, sku_description,
@@ -315,110 +380,60 @@ class SubscriptionSyncer:
                 $11, $12, $13, $14, $15, $16, $17, $18, $19,
                 $20, $21, $22::jsonb, NOW()
             )
-        ''',
-            sub["id"],
-            sub.get("key"),
-            sub.get("type"),  # resource_type
-            sub.get("subscriptionType"),
-            sub.get("subscriptionStatus"),
-            int(sub.get("quantity", 0)) if sub.get("quantity") else None,
-            int(sub.get("availableQuantity", 0)) if sub.get("availableQuantity") else None,
-            sub.get("sku"),
-            sub.get("skuDescription"),
-            self._parse_timestamp(sub.get("startTime")),
-            self._parse_timestamp(sub.get("endTime")),
-            sub.get("tier"),
-            sub.get("tierDescription"),
-            sub.get("productType"),
-            sub.get("isEval", False),
-            sub.get("contract"),
-            sub.get("quote"),
-            sub.get("po"),
-            sub.get("resellerPo"),
-            self._parse_timestamp(sub.get("createdAt")),
-            self._parse_timestamp(sub.get("updatedAt")),
-            json.dumps(sub),
-        )
-
-        # Sync tags to subscription_tags table
-        await self._sync_tags(conn, sub["id"], sub.get("tags") or {})
-
-    async def _update_subscription(self, conn, sub: dict):
-        """Update a single subscription in PostgreSQL with all API fields."""
-        await conn.execute('''
-            UPDATE subscriptions SET
-                key = $2,
-                resource_type = $3,
-                subscription_type = $4,
-                subscription_status = $5,
-                quantity = $6,
-                available_quantity = $7,
-                sku = $8,
-                sku_description = $9,
-                start_time = $10,
-                end_time = $11,
-                tier = $12,
-                tier_description = $13,
-                product_type = $14,
-                is_eval = $15,
-                contract = $16,
-                quote = $17,
-                po = $18,
-                reseller_po = $19,
-                updated_at = $20,
-                raw_data = $21::jsonb,
+            ON CONFLICT (id) DO UPDATE SET
+                key = EXCLUDED.key,
+                resource_type = EXCLUDED.resource_type,
+                subscription_type = EXCLUDED.subscription_type,
+                subscription_status = EXCLUDED.subscription_status,
+                quantity = EXCLUDED.quantity,
+                available_quantity = EXCLUDED.available_quantity,
+                sku = EXCLUDED.sku,
+                sku_description = EXCLUDED.sku_description,
+                start_time = EXCLUDED.start_time,
+                end_time = EXCLUDED.end_time,
+                tier = EXCLUDED.tier,
+                tier_description = EXCLUDED.tier_description,
+                product_type = EXCLUDED.product_type,
+                is_eval = EXCLUDED.is_eval,
+                contract = EXCLUDED.contract,
+                quote = EXCLUDED.quote,
+                po = EXCLUDED.po,
+                reseller_po = EXCLUDED.reseller_po,
+                updated_at = EXCLUDED.updated_at,
+                raw_data = EXCLUDED.raw_data,
                 synced_at = NOW()
-            WHERE id = $1
-        ''',
-            sub["id"],
-            sub.get("key"),
-            sub.get("type"),  # resource_type
-            sub.get("subscriptionType"),
-            sub.get("subscriptionStatus"),
-            int(sub.get("quantity", 0)) if sub.get("quantity") else None,
-            int(sub.get("availableQuantity", 0)) if sub.get("availableQuantity") else None,
-            sub.get("sku"),
-            sub.get("skuDescription"),
-            self._parse_timestamp(sub.get("startTime")),
-            self._parse_timestamp(sub.get("endTime")),
-            sub.get("tier"),
-            sub.get("tierDescription"),
-            sub.get("productType"),
-            sub.get("isEval", False),
-            sub.get("contract"),
-            sub.get("quote"),
-            sub.get("po"),
-            sub.get("resellerPo"),
-            self._parse_timestamp(sub.get("updatedAt")),
-            json.dumps(sub),
-        )
+        ''', records)
 
-        # Sync tags to subscription_tags table
-        await self._sync_tags(conn, sub["id"], sub.get("tags") or {})
+        return len(records)
 
-    async def _sync_tags(self, conn, subscription_id: str, tags: dict):
-        """Sync subscription tags to the subscription_tags table.
+    def _prepare_tag_records(self, subscriptions: list[dict]) -> list[tuple]:
+        """Prepare tag records for bulk insert.
 
-        Strategy: Delete all existing, insert fresh. This ensures we capture
-        any tags that were removed from the subscription.
+        Args:
+            subscriptions: List of subscription dictionaries
+
+        Returns:
+            List of (subscription_id, tag_key, tag_value) tuples
+        """
+        records = []
+        for sub in subscriptions:
+            subscription_id = sub["id"]
+            tags = sub.get("tags") or {}
+            for key, value in tags.items():
+                records.append((subscription_id, key, value))
+        return records
+
+    async def _bulk_insert_tags(self, conn, records: list[tuple]) -> None:
+        """Bulk insert subscription tags.
 
         Args:
             conn: Database connection
-            subscription_id: UUID of the subscription
-            tags: Dict of tag key-value pairs from API
+            records: List of tag record tuples
         """
-        # Delete existing tags for this subscription
-        await conn.execute(
-            'DELETE FROM subscription_tags WHERE subscription_id = $1',
-            subscription_id
-        )
-
-        # Insert new tags
-        for key, value in tags.items():
-            await conn.execute('''
-                INSERT INTO subscription_tags (subscription_id, tag_key, tag_value)
-                VALUES ($1, $2, $3)
-            ''', subscription_id, key, value)
+        await conn.executemany('''
+            INSERT INTO subscription_tags (subscription_id, tag_key, tag_value)
+            VALUES ($1, $2, $3)
+        ''', records)
 
     @staticmethod
     def _parse_timestamp(iso_string: Optional[str]) -> Optional[datetime]:

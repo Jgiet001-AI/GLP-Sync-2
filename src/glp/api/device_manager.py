@@ -425,6 +425,37 @@ class DeviceManager:
             params=params,
         )
 
+    async def remove_devices(
+        self,
+        device_ids: list[str],
+        *,
+        dry_run: bool = False,
+    ) -> AsyncOperationResult:
+        """Remove devices from GreenLake.
+
+        This permanently removes devices from the workspace. Devices must
+        be archived before they can be removed.
+
+        Args:
+            device_ids: List of device UUIDs (max 25)
+            dry_run: If True, validate without executing
+
+        Returns:
+            AsyncOperationResult with operation_url for status tracking
+        """
+        self._validate_device_ids(device_ids)
+
+        params = {"id": device_ids}
+        if dry_run:
+            params["dry-run"] = "true"
+
+        logger.info(f"Removing {len(device_ids)} device(s)")
+
+        return await self.client.delete_async(
+            self.ENDPOINT,
+            params=params,
+        )
+
     # ----------------------------------------
     # Subscription Operations (PATCH)
     # ----------------------------------------
@@ -525,13 +556,83 @@ class DeviceManager:
         else:
             endpoint = operation_url
 
+        logger.debug(f"Checking operation status at: {endpoint}")
         response = await self.client.get(endpoint)
+        logger.debug(f"Operation response: {response}")
 
         # Parse response into OperationStatus
         status = response.get("status", "PENDING")
         progress = response.get("progress")
         result = response.get("result")
-        error = response.get("error") or response.get("errorMessage")
+
+        # Try multiple error fields - GreenLake uses different formats
+        error = (
+            response.get("error")
+            or response.get("errorMessage")
+            or response.get("message")
+            or response.get("detail")
+        )
+
+        # Check for errors in nested structures
+        if not error and isinstance(response.get("errors"), list):
+            errors = response.get("errors", [])
+            if errors:
+                error = "; ".join(
+                    e.get("message") or e.get("error") or str(e)
+                    for e in errors
+                )
+
+        # Check result for errors (some APIs put errors in result)
+        if not error and result and isinstance(result, dict):
+            if result.get("errors"):
+                result_errors = result.get("errors", [])
+                if isinstance(result_errors, list):
+                    error = "; ".join(
+                        e.get("message") or e.get("error") or str(e)
+                        for e in result_errors
+                    )
+                else:
+                    error = str(result_errors)
+            elif result.get("failedDevices"):
+                failed = result.get("failedDevices", [])
+                error = f"{len(failed)} device(s) failed"
+                # Log all failed devices for debugging
+                logger.warning(f"Failed devices in operation: {failed}")
+                if failed and isinstance(failed[0], dict):
+                    # Try multiple possible error field names
+                    reasons = []
+                    for f in failed[:3]:
+                        # Log every field in the failed device object
+                        logger.warning(f"Failed device fields: {list(f.keys())}")
+                        # Try many possible error field names
+                        reason = (
+                            f.get("reason")
+                            or f.get("error")
+                            or f.get("message")
+                            or f.get("errorMessage")
+                            or f.get("failureReason")
+                            or f.get("errorDetails")
+                            or f.get("detail")
+                            or f.get("description")
+                        )
+                        device_id = f.get("deviceId") or f.get("id") or f.get("device_id")
+                        if reason:
+                            if device_id:
+                                reasons.append(f"{device_id}: {reason}")
+                            else:
+                                reasons.append(reason)
+                        else:
+                            # Log the full failed device object for debugging
+                            logger.warning(f"Failed device (no reason found): {f}")
+                    if reasons:
+                        error += f": {'; '.join(reasons)}"
+                    else:
+                        # Include first failed device raw data for debugging
+                        error += f" (sample: {str(failed[0])[:200]})"
+
+        # If still no error but status is FAILED, include raw response summary
+        if not error and status == "FAILED":
+            error = f"Operation failed (raw: {str(response)[:200]})"
 
         return OperationStatus(
             status=status,
@@ -546,7 +647,7 @@ class DeviceManager:
         operation_url: str,
         *,
         timeout: float = 300,
-        poll_interval: float = 2.0,
+        poll_interval: float = 5.0,  # Increased from 2.0 to avoid rate limits
     ) -> OperationStatus:
         """Wait for an async operation to complete.
 
