@@ -20,3 +20,4 @@ wheels/
 .pytest_cache/
 *.json
 !pyproject.toml
+node_modules/

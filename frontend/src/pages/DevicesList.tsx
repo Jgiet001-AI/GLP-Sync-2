@@ -1,0 +1,881 @@
+import { useState, useCallback, useEffect, memo } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
+import { dashboardApiClient, type DeviceListParams } from '../api/client'
+import type { DeviceListItem } from '../types'
+import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
+import { DropdownMenu } from '../components/ui/DropdownMenu'
+import {
+  Server,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Wifi,
+  Router,
+  HardDrive,
+  Filter,
+  X,
+  ArrowUpDown,
+  RefreshCw,
+  Check,
+  AlertCircle,
+  Copy,
+  Eye,
+  Calendar,
+  MapPin,
+  Shield,
+} from 'lucide-react'
+import toast from 'react-hot-toast'
+
+// Device type icon mapping
+const deviceIcons: Record<string, typeof Server> = {
+  AP: Wifi,
+  SWITCH: Router,
+  GATEWAY: Router,
+  IAP: Wifi,
+  COMPUTE: Server,
+  STORAGE: HardDrive,
+  UNKNOWN: Server,
+}
+
+// Format date
+function formatDate(dateStr: string | null): string {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr)
+  return date.toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
+}
+
+// Format full date with time
+function formatDateTime(dateStr: string | null): string {
+  if (!dateStr) return '-'
+  const date = new Date(dateStr)
+  return date.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+// Page size options
+const PAGE_SIZE_OPTIONS = [10, 100, 500, 1000]
+
+export function DevicesList() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [params, setParams] = useState<DeviceListParams>(() => ({
+    page: 1,
+    page_size: 100,
+    sort_by: 'updated_at',
+    sort_order: 'desc',
+    device_type: searchParams.get('device_type') || undefined,
+    region: searchParams.get('region') || undefined,
+    assigned_state: searchParams.get('assigned_state') || undefined,
+    search: searchParams.get('search') || undefined,
+  }))
+  const [searchInput, setSearchInput] = useState(searchParams.get('search') || '')
+  const [showFilters, setShowFilters] = useState(
+    !!(searchParams.get('device_type') || searchParams.get('region') || searchParams.get('assigned_state'))
+  )
+  const [selectedDevice, setSelectedDevice] = useState<DeviceListItem | null>(null)
+
+  // Sync URL params to state on mount and when URL changes
+  useEffect(() => {
+    const deviceType = searchParams.get('device_type')
+    const region = searchParams.get('region')
+    const assignedState = searchParams.get('assigned_state')
+    const search = searchParams.get('search')
+
+    setParams((prev) => ({
+      ...prev,
+      device_type: deviceType || undefined,
+      region: region || undefined,
+      assigned_state: assignedState || undefined,
+      search: search || undefined,
+      page: 1,
+    }))
+
+    if (search) {
+      setSearchInput(search)
+    }
+
+    if (deviceType || region || assignedState) {
+      setShowFilters(true)
+    }
+  }, [searchParams])
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setParams((prev) => ({ ...prev, search: searchInput || undefined, page: 1 }))
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [searchInput])
+
+  // Fetch devices
+  const { data, isLoading, error, refetch, isFetching } = useQuery({
+    queryKey: ['devices-list', params],
+    queryFn: () => dashboardApiClient.getDevices(params),
+    staleTime: 30000,
+  })
+
+  // Fetch filter options
+  const { data: filterOptions } = useQuery({
+    queryKey: ['filter-options'],
+    queryFn: () => dashboardApiClient.getFilterOptions(),
+    staleTime: 60000,
+  })
+
+  const handlePageChange = useCallback((newPage: number) => {
+    setParams((prev) => ({ ...prev, page: newPage }))
+  }, [])
+
+  const handlePageSizeChange = useCallback((newSize: number) => {
+    setParams((prev) => ({ ...prev, page_size: newSize, page: 1 }))
+  }, [])
+
+  const handleSort = useCallback((column: string) => {
+    setParams((prev) => ({
+      ...prev,
+      sort_by: column,
+      sort_order: prev.sort_by === column && prev.sort_order === 'asc' ? 'desc' : 'asc',
+    }))
+  }, [])
+
+  const handleFilterChange = useCallback((key: keyof DeviceListParams, value: string | undefined) => {
+    setParams((prev) => ({ ...prev, [key]: value || undefined, page: 1 }))
+  }, [])
+
+  const clearFilters = useCallback(() => {
+    setParams({
+      page: 1,
+      page_size: params.page_size,
+      sort_by: 'updated_at',
+      sort_order: 'desc',
+    })
+    setSearchInput('')
+    setSearchParams({})
+  }, [params.page_size, setSearchParams])
+
+  const copyToClipboard = useCallback((text: string, label: string) => {
+    navigator.clipboard.writeText(text)
+    toast.success(`${label} copied to clipboard`)
+  }, [])
+
+  const hasActiveFilters = params.device_type || params.region || params.assigned_state || params.search
+
+  if (error) {
+    return (
+      <div className="flex h-[calc(100vh-4rem)] items-center justify-center bg-slate-900">
+        <div className="max-w-md rounded-2xl border border-rose-500/30 bg-rose-500/10 p-8 text-center">
+          <AlertCircle className="mx-auto h-12 w-12 text-rose-400" />
+          <h2 className="mt-4 text-xl font-semibold text-white">Failed to Load Devices</h2>
+          <p className="mt-2 text-sm text-slate-400">
+            {error instanceof Error ? error.message : 'Unknown error occurred'}
+          </p>
+          <button
+            onClick={() => refetch()}
+            className="mt-6 rounded-lg bg-rose-500 px-6 py-2 font-medium text-white transition-colors hover:bg-rose-600"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-900">
+      {/* Background effects */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+        <div className="absolute -top-1/2 -right-1/2 h-[1000px] w-[1000px] rounded-full bg-hpe-green/5 blur-3xl" />
+        <div className="absolute -bottom-1/2 -left-1/2 h-[1000px] w-[1000px] rounded-full bg-emerald-500/5 blur-3xl" />
+        <div className="absolute inset-0 bg-grid-pattern opacity-50" />
+      </div>
+
+      <div className="relative">
+        {/* Header */}
+        <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur-xl">
+          <div className="mx-auto max-w-[1600px] px-6 py-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight text-white">
+                  <span className="bg-gradient-to-r from-sky-400 to-sky-600 bg-clip-text text-transparent">
+                    Devices
+                  </span>
+                </h1>
+                <p className="mt-1 text-sm text-slate-400">
+                  {data ? `${data.total.toLocaleString()} devices` : 'Loading...'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  toast.promise(refetch(), {
+                    loading: 'Refreshing...',
+                    success: 'Devices updated',
+                    error: 'Failed to refresh',
+                  })
+                }}
+                disabled={isFetching}
+                className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-slate-700 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <main className="mx-auto max-w-[1600px] px-6 py-6">
+          {/* Search and Filters Bar */}
+          <div className="mb-6 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            {/* Search */}
+            <div className="relative flex-1 max-w-md">
+              <label htmlFor="device-search" className="sr-only">Search devices</label>
+              <Search className="absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" aria-hidden="true" />
+              <input
+                id="device-search"
+                type="text"
+                placeholder="Search serial, MAC, name, model..."
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                className="w-full rounded-xl border border-slate-700 bg-slate-800/50 py-2.5 pl-10 pr-4 text-sm text-white placeholder-slate-400 transition-all focus:border-hpe-green focus:outline-none focus:ring-2 focus:ring-hpe-green/20"
+                data-testid="device-search-input"
+              />
+              {searchInput && (
+                <button
+                  onClick={() => setSearchInput('')}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  aria-label="Clear search"
+                  data-testid="clear-search-btn"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {/* Filter Toggle and Page Size */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setShowFilters(!showFilters)}
+                className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium transition-all ${
+                  hasActiveFilters
+                    ? 'border-sky-500/50 bg-sky-500/10 text-sky-400'
+                    : 'border-slate-700 bg-slate-800/50 text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                <Filter className="h-4 w-4" />
+                Filters
+                {hasActiveFilters && (
+                  <span className="ml-1 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-white">
+                    {[params.device_type, params.region, params.assigned_state, params.search].filter(Boolean).length}
+                  </span>
+                )}
+              </button>
+
+              {hasActiveFilters && (
+                <button
+                  onClick={clearFilters}
+                  className="flex items-center gap-1 text-sm text-slate-400 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                  Clear
+                </button>
+              )}
+
+              {/* Page Size Selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-slate-400">Show:</span>
+                <select
+                  value={params.page_size}
+                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Filter Panel */}
+          {showFilters && filterOptions && (
+            <div
+              className="mb-6 rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 backdrop-blur-sm animate-fade-slide-down"
+              data-testid="filter-panel"
+            >
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                {/* Device Type Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Device Type
+                  </label>
+                  <select
+                    value={params.device_type || ''}
+                    onChange={(e) => handleFilterChange('device_type', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="">All Types</option>
+                    {filterOptions.device_types.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Region Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Region
+                  </label>
+                  <select
+                    value={params.region || ''}
+                    onChange={(e) => handleFilterChange('region', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="">All Regions</option>
+                    {filterOptions.regions.map((region) => (
+                      <option key={region} value={region}>
+                        {region}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Assignment State Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Assignment State
+                  </label>
+                  <select
+                    value={params.assigned_state || ''}
+                    onChange={(e) => handleFilterChange('assigned_state', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="">All States</option>
+                    <option value="ASSIGNED_TO_SERVICE">Assigned</option>
+                    <option value="UNASSIGNED">Unassigned</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div className="rounded-2xl border border-slate-700/50 bg-slate-800/30 backdrop-blur-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-slate-700/50">
+                    <SortableHeader
+                      column="serial_number"
+                      label="Serial Number"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      MAC Address
+                    </th>
+                    <SortableHeader
+                      column="device_type"
+                      label="Type"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      column="model"
+                      label="Model"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      column="region"
+                      label="Region"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      Location
+                    </th>
+                    <SortableHeader
+                      column="assigned_state"
+                      label="Status"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      Subscription
+                    </th>
+                    <SortableHeader
+                      column="updated_at"
+                      label="Updated"
+                      currentSort={params.sort_by}
+                      sortOrder={params.sort_order}
+                      onSort={handleSort}
+                    />
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      Actions
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-700/30">
+                  {isLoading ? (
+                    <tr>
+                      <td colSpan={10} className="py-20 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                          <RefreshCw className="h-8 w-8 animate-spin text-sky-500" />
+                          <span className="text-sm text-slate-400">Loading devices...</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : data?.items.length === 0 ? (
+                    <tr>
+                      <td colSpan={10} className="py-20 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                          <Server className="h-12 w-12 text-slate-600" />
+                          <span className="text-sm text-slate-400">No devices found</span>
+                          {hasActiveFilters && (
+                            <button
+                              onClick={clearFilters}
+                              className="text-sm text-sky-400 hover:text-sky-300"
+                            >
+                              Clear filters
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    data?.items.map((device) => (
+                      <DeviceRow
+                        key={device.id}
+                        device={device}
+                        onViewDetails={() => setSelectedDevice(device)}
+                        onCopySerial={() => copyToClipboard(device.serial_number, 'Serial number')}
+                        onCopyMac={() => device.mac_address && copyToClipboard(device.mac_address, 'MAC address')}
+                      />
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {data && data.total_pages > 1 && (
+              <div className="border-t border-slate-700/50 px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-400">
+                    Showing {((data.page - 1) * data.page_size) + 1} to{' '}
+                    {Math.min(data.page * data.page_size, data.total)} of {data.total.toLocaleString()} devices
+                  </p>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handlePageChange(1)}
+                      disabled={data.page === 1}
+                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+                      aria-label="First page"
+                    >
+                      <ChevronsLeft className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => handlePageChange(data.page - 1)}
+                      disabled={data.page === 1}
+                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+                      aria-label="Previous page"
+                    >
+                      <ChevronLeft className="h-4 w-4" aria-hidden="true" />
+                    </button>
+
+                    <div className="flex items-center gap-1 px-2">
+                      {generatePageNumbers(data.page, data.total_pages).map((pageNum, idx) =>
+                        pageNum === '...' ? (
+                          <span key={`ellipsis-${idx}`} className="px-2 text-slate-500">
+                            ...
+                          </span>
+                        ) : (
+                          <button
+                            key={pageNum}
+                            onClick={() => handlePageChange(pageNum as number)}
+                            className={`min-w-[2rem] rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
+                              data.page === pageNum
+                                ? 'bg-sky-500 text-white'
+                                : 'text-slate-400 hover:bg-slate-700 hover:text-white'
+                            }`}
+                          >
+                            {pageNum}
+                          </button>
+                        )
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => handlePageChange(data.page + 1)}
+                      disabled={data.page === data.total_pages}
+                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+                      aria-label="Next page"
+                    >
+                      <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                    <button
+                      onClick={() => handlePageChange(data.total_pages)}
+                      disabled={data.page === data.total_pages}
+                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
+                      aria-label="Last page"
+                    >
+                      <ChevronsRight className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+
+      {/* Device Detail Drawer */}
+      <Drawer
+        open={!!selectedDevice}
+        onClose={() => setSelectedDevice(null)}
+        title={selectedDevice?.serial_number || ''}
+        subtitle={selectedDevice?.device_type || 'Device'}
+        width="lg"
+      >
+        {selectedDevice && (
+          <DeviceDetailContent
+            device={selectedDevice}
+            onCopySerial={() => copyToClipboard(selectedDevice.serial_number, 'Serial number')}
+            onCopyMac={() => selectedDevice.mac_address && copyToClipboard(selectedDevice.mac_address, 'MAC address')}
+          />
+        )}
+      </Drawer>
+    </div>
+  )
+}
+
+// Device Detail Content for Drawer
+function DeviceDetailContent({
+  device,
+  onCopySerial,
+  onCopyMac,
+}: {
+  device: DeviceListItem
+  onCopySerial: () => void
+  onCopyMac: () => void
+}) {
+  const Icon = deviceIcons[device.device_type || 'UNKNOWN'] || Server
+  const isAssigned = device.assigned_state === 'ASSIGNED_TO_SERVICE'
+
+  return (
+    <div className="space-y-6">
+      {/* Header with icon and status */}
+      <div className="flex items-center gap-4">
+        <div className="rounded-xl bg-slate-700/50 p-4">
+          <Icon className="h-8 w-8 text-hpe-green" />
+        </div>
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
+                isAssigned
+                  ? 'bg-emerald-500/10 text-emerald-400'
+                  : 'bg-amber-500/10 text-amber-400'
+              }`}
+            >
+              {isAssigned ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
+              {isAssigned ? 'Assigned' : 'Unassigned'}
+            </span>
+          </div>
+          {device.device_name && (
+            <p className="mt-1 text-sm text-slate-400">{device.device_name}</p>
+          )}
+        </div>
+      </div>
+
+      {/* Quick actions */}
+      <div className="flex gap-2">
+        <button
+          onClick={onCopySerial}
+          className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-700"
+        >
+          <Copy className="h-4 w-4" />
+          Copy Serial
+        </button>
+        {device.mac_address && (
+          <button
+            onClick={onCopyMac}
+            className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-700"
+          >
+            <Copy className="h-4 w-4" />
+            Copy MAC
+          </button>
+        )}
+      </div>
+
+      {/* Device Information */}
+      <DetailSection title="Device Information">
+        <DetailRow label="Serial Number" value={device.serial_number} mono />
+        <DetailRow label="MAC Address" value={device.mac_address} mono />
+        <DetailRow label="Device Type" value={device.device_type} />
+        <DetailRow label="Model" value={device.model} />
+        <DetailRow label="Device Name" value={device.device_name} />
+      </DetailSection>
+
+      {/* Location */}
+      <DetailSection title="Location">
+        <DetailRow label="Region" value={device.region} />
+        <DetailRow
+          label="City"
+          value={
+            device.location_city || device.location_country ? (
+              <span className="flex items-center gap-1">
+                <MapPin className="h-3 w-3 text-slate-500" />
+                {[device.location_city, device.location_country].filter(Boolean).join(', ')}
+              </span>
+            ) : null
+          }
+        />
+      </DetailSection>
+
+      {/* Subscription */}
+      <DetailSection title="Subscription">
+        <DetailRow
+          label="Subscription Key"
+          value={
+            device.subscription_key ? (
+              <span className="flex items-center gap-1">
+                <Shield className="h-3 w-3 text-violet-400" />
+                {device.subscription_key}
+              </span>
+            ) : (
+              <span className="text-slate-500">Not assigned</span>
+            )
+          }
+          mono={!!device.subscription_key}
+        />
+        <DetailRow
+          label="Type"
+          value={device.subscription_type?.replace('CENTRAL_', '')}
+        />
+        <DetailRow
+          label="Expires"
+          value={
+            device.subscription_end ? (
+              <span className="flex items-center gap-1">
+                <Calendar className="h-3 w-3 text-slate-500" />
+                {formatDate(device.subscription_end)}
+              </span>
+            ) : null
+          }
+        />
+      </DetailSection>
+
+      {/* Metadata */}
+      <DetailSection title="Metadata">
+        <DetailRow
+          label="Last Updated"
+          value={formatDateTime(device.updated_at)}
+        />
+        <DetailRow label="Device ID" value={device.id} mono />
+      </DetailSection>
+    </div>
+  )
+}
+
+// Sortable Header Component
+const SortableHeader = memo(function SortableHeader({
+  column,
+  label,
+  currentSort,
+  sortOrder,
+  onSort,
+}: {
+  column: string
+  label: string
+  currentSort?: string
+  sortOrder?: string
+  onSort: (column: string) => void
+}) {
+  const isActive = currentSort === column
+
+  return (
+    <th
+      className="cursor-pointer px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400 transition-colors hover:text-white"
+      onClick={() => onSort(column)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onSort(column)
+        }
+      }}
+      tabIndex={0}
+      role="button"
+      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
+    >
+      <div className="flex items-center gap-1">
+        {label}
+        <ArrowUpDown
+          className={`h-3.5 w-3.5 ${isActive ? 'text-hpe-green' : 'text-slate-600'}`}
+          aria-hidden="true"
+        />
+        {isActive && (
+          <span className="text-hpe-green" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
+        )}
+      </div>
+    </th>
+  )
+})
+
+// Device Row Component with actions
+const DeviceRow = memo(function DeviceRow({
+  device,
+  onViewDetails,
+  onCopySerial,
+  onCopyMac,
+}: {
+  device: DeviceListItem
+  onViewDetails: () => void
+  onCopySerial: () => void
+  onCopyMac: () => void
+}) {
+  const Icon = deviceIcons[device.device_type || 'UNKNOWN'] || Server
+  const isAssigned = device.assigned_state === 'ASSIGNED_TO_SERVICE'
+
+  const menuItems = [
+    {
+      label: 'View Details',
+      icon: <Eye className="h-4 w-4" />,
+      onClick: onViewDetails,
+    },
+    {
+      label: 'Copy Serial',
+      icon: <Copy className="h-4 w-4" />,
+      onClick: onCopySerial,
+    },
+    ...(device.mac_address
+      ? [
+          {
+            label: 'Copy MAC',
+            icon: <Copy className="h-4 w-4" />,
+            onClick: onCopyMac,
+          },
+        ]
+      : []),
+  ]
+
+  return (
+    <tr
+      className="transition-colors hover:bg-slate-800/50 animate-fade-in cursor-pointer"
+      onClick={onViewDetails}
+      data-testid={`device-row-${device.serial_number}`}
+    >
+      <td className="whitespace-nowrap px-4 py-3">
+        <div className="flex items-center gap-3">
+          <div className="rounded-lg bg-slate-700/50 p-2">
+            <Icon className="h-4 w-4 text-hpe-green" aria-hidden="true" />
+          </div>
+          <div>
+            <p className="font-mono text-sm font-medium text-white">{device.serial_number}</p>
+            {device.device_name && (
+              <p className="text-xs text-slate-400">{device.device_name}</p>
+            )}
+          </div>
+        </div>
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 font-mono text-sm text-slate-300">
+        {device.mac_address || '-'}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3">
+        <span className="inline-flex items-center rounded-md bg-slate-700/50 px-2 py-1 text-xs font-medium text-slate-300">
+          {device.device_type || 'Unknown'}
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-300">
+        {device.model || '-'}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-300">
+        {device.region || '-'}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-400">
+        {device.location_city || device.location_country
+          ? `${device.location_city || ''}${device.location_city && device.location_country ? ', ' : ''}${device.location_country || ''}`
+          : '-'}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3">
+        <span
+          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${
+            isAssigned
+              ? 'bg-emerald-500/10 text-emerald-400'
+              : 'bg-amber-500/10 text-amber-400'
+          }`}
+        >
+          {isAssigned ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
+          {isAssigned ? 'Assigned' : 'Unassigned'}
+        </span>
+      </td>
+      <td className="whitespace-nowrap px-4 py-3">
+        {device.subscription_key ? (
+          <div>
+            <p className="font-mono text-xs text-slate-300">{device.subscription_key}</p>
+            <p className="text-xs text-slate-500">{device.subscription_type?.replace('CENTRAL_', '')}</p>
+          </div>
+        ) : (
+          <span className="text-sm text-slate-500">-</span>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-400">
+        {formatDate(device.updated_at)}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3" onClick={(e) => e.stopPropagation()}>
+        <DropdownMenu items={menuItems} />
+      </td>
+    </tr>
+  )
+})
+
+// Generate page numbers for pagination
+function generatePageNumbers(currentPage: number, totalPages: number): (number | string)[] {
+  const pages: (number | string)[] = []
+  const delta = 2
+
+  if (totalPages <= 7) {
+    for (let i = 1; i <= totalPages; i++) {
+      pages.push(i)
+    }
+  } else {
+    pages.push(1)
+
+    if (currentPage > delta + 2) {
+      pages.push('...')
+    }
+
+    const rangeStart = Math.max(2, currentPage - delta)
+    const rangeEnd = Math.min(totalPages - 1, currentPage + delta)
+
+    for (let i = rangeStart; i <= rangeEnd; i++) {
+      pages.push(i)
+    }
+
+    if (currentPage < totalPages - delta - 1) {
+      pages.push('...')
+    }
+
+    pages.push(totalPages)
+  }
+
+  return pages
+}
