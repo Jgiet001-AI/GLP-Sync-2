@@ -149,6 +149,49 @@ echo ""
 print_success "GreenLake credentials configured"
 
 # ============================================
+# Aruba Central Settings (Optional)
+# ============================================
+print_header "Step 1b: Aruba Central API (Optional)"
+
+echo "Aruba Central integration allows syncing devices and clients from Aruba."
+echo "Skip this step if you don't use Aruba Central."
+echo ""
+echo "  1) Configure Aruba Central credentials"
+echo "  2) Skip (configure later)"
+echo ""
+
+echo -ne "${CYAN}Select option (1-2)${NC} [${YELLOW}2${NC}]: "
+read aruba_choice
+
+# Default to skip
+if [ -z "$aruba_choice" ]; then
+    aruba_choice="2"
+fi
+
+ARUBA_CLIENT_ID=""
+ARUBA_CLIENT_SECRET=""
+ARUBA_TOKEN_URL=""
+ARUBA_BASE_URL=""
+
+case $aruba_choice in
+    1)
+        echo ""
+        prompt_required "Aruba Central Client ID" ARUBA_CLIENT_ID
+        prompt_required "Aruba Central Client Secret" ARUBA_CLIENT_SECRET "true"
+        prompt_with_default "Aruba Token URL" "https://sso.common.cloud.hpe.com/as/token.oauth2" ARUBA_TOKEN_URL
+        prompt_with_default "Aruba Base URL" "https://us2.api.central.arubanetworks.com" ARUBA_BASE_URL
+        echo ""
+        print_success "Aruba Central credentials configured"
+        ;;
+    2|*)
+        echo ""
+        print_warning "Skipping Aruba Central. You can configure it in .env later."
+        ;;
+esac
+
+echo ""
+
+# ============================================
 # PostgreSQL Settings (with defaults)
 # ============================================
 print_header "Step 2: PostgreSQL Database Settings"
@@ -303,6 +346,15 @@ echo "  Client Secret: ********"
 echo "  Token URL:     $GLP_TOKEN_URL"
 echo "  Base URL:      $GLP_BASE_URL"
 echo ""
+echo -e "${BOLD}Aruba Central:${NC}"
+if [ -n "$ARUBA_CLIENT_ID" ]; then
+    echo "  Client ID:     ${ARUBA_CLIENT_ID:0:8}..."
+    echo "  Client Secret: ********"
+    echo "  Base URL:      $ARUBA_BASE_URL"
+else
+    echo "  Status:        Not configured (optional)"
+fi
+echo ""
 echo -e "${BOLD}PostgreSQL:${NC}"
 echo "  User:          $POSTGRES_USER"
 echo "  Password:      ********"
@@ -362,6 +414,12 @@ GLP_CLIENT_ID=$GLP_CLIENT_ID
 GLP_CLIENT_SECRET=$GLP_CLIENT_SECRET
 GLP_TOKEN_URL=$GLP_TOKEN_URL
 GLP_BASE_URL=$GLP_BASE_URL
+
+# Aruba Central API (Optional)
+ARUBA_CLIENT_ID=$ARUBA_CLIENT_ID
+ARUBA_CLIENT_SECRET=$ARUBA_CLIENT_SECRET
+ARUBA_TOKEN_URL=$ARUBA_TOKEN_URL
+ARUBA_BASE_URL=$ARUBA_BASE_URL
 
 # PostgreSQL Settings
 POSTGRES_USER=$POSTGRES_USER
