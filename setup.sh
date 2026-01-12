@@ -178,10 +178,59 @@ case $aruba_choice in
         echo ""
         prompt_required "Aruba Central Client ID" ARUBA_CLIENT_ID
         prompt_required "Aruba Central Client Secret" ARUBA_CLIENT_SECRET "true"
-        prompt_with_default "Aruba Token URL" "https://sso.common.cloud.hpe.com/as/token.oauth2" ARUBA_TOKEN_URL
-        prompt_with_default "Aruba Base URL" "https://us2.api.central.arubanetworks.com" ARUBA_BASE_URL
+
+        # Token URL is always the same
+        ARUBA_TOKEN_URL="https://sso.common.cloud.hpe.com/as/token.oauth2"
+
+        # Region selection menu
         echo ""
-        print_success "Aruba Central credentials configured"
+        echo -e "${BOLD}Select your Aruba Central Region:${NC}"
+        echo ""
+        echo "  ${CYAN}Americas:${NC}"
+        echo "    1) US-1         (https://us1.api.central.arubanetworks.com)"
+        echo "    2) US-2         (https://us2.api.central.arubanetworks.com)"
+        echo "    3) US-West-4    (https://us4.api.central.arubanetworks.com)"
+        echo "    4) US-West-5    (https://us5.api.central.arubanetworks.com)"
+        echo "    5) US-East-1    (https://us6.api.central.arubanetworks.com)"
+        echo "    6) Canada-1     (https://cn1.api.central.arubanetworks.com)"
+        echo ""
+        echo "  ${CYAN}Europe:${NC}"
+        echo "    7) EU-1         (https://ge1.api.central.arubanetworks.com)"
+        echo "    8) EU-Central-2 (https://ge2.api.central.arubanetworks.com)"
+        echo "    9) EU-Central-3 (https://ge3.api.central.arubanetworks.com)"
+        echo ""
+        echo "  ${CYAN}Asia Pacific:${NC}"
+        echo "   10) APAC-1       (https://in.api.central.arubanetworks.com)"
+        echo "   11) APAC-East-1  (https://jp1.api.central.arubanetworks.com)"
+        echo "   12) APAC-South-1 (https://au1.api.central.arubanetworks.com)"
+        echo ""
+
+        echo -ne "${CYAN}Select region (1-12)${NC} [${YELLOW}2${NC}]: "
+        read region_choice
+
+        # Default to US-2
+        if [ -z "$region_choice" ]; then
+            region_choice="2"
+        fi
+
+        case $region_choice in
+            1)  ARUBA_BASE_URL="https://us1.api.central.arubanetworks.com"; ARUBA_REGION="US-1" ;;
+            2)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2" ;;
+            3)  ARUBA_BASE_URL="https://us4.api.central.arubanetworks.com"; ARUBA_REGION="US-West-4" ;;
+            4)  ARUBA_BASE_URL="https://us5.api.central.arubanetworks.com"; ARUBA_REGION="US-West-5" ;;
+            5)  ARUBA_BASE_URL="https://us6.api.central.arubanetworks.com"; ARUBA_REGION="US-East-1" ;;
+            6)  ARUBA_BASE_URL="https://cn1.api.central.arubanetworks.com"; ARUBA_REGION="Canada-1" ;;
+            7)  ARUBA_BASE_URL="https://ge1.api.central.arubanetworks.com"; ARUBA_REGION="EU-1" ;;
+            8)  ARUBA_BASE_URL="https://ge2.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-2" ;;
+            9)  ARUBA_BASE_URL="https://ge3.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-3" ;;
+            10) ARUBA_BASE_URL="https://in.api.central.arubanetworks.com"; ARUBA_REGION="APAC-1" ;;
+            11) ARUBA_BASE_URL="https://jp1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-East-1" ;;
+            12) ARUBA_BASE_URL="https://au1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-South-1" ;;
+            *)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2" ;;
+        esac
+
+        echo ""
+        print_success "Aruba Central configured: $ARUBA_REGION"
         ;;
     2|*)
         echo ""
@@ -348,6 +397,7 @@ echo "  Base URL:      $GLP_BASE_URL"
 echo ""
 echo -e "${BOLD}Aruba Central:${NC}"
 if [ -n "$ARUBA_CLIENT_ID" ]; then
+    echo "  Region:        $ARUBA_REGION"
     echo "  Client ID:     ${ARUBA_CLIENT_ID:0:8}..."
     echo "  Client Secret: ********"
     echo "  Base URL:      $ARUBA_BASE_URL"
