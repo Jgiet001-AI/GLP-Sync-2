@@ -31,18 +31,37 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
 
 ## Quick Start
 
-### Option 1: Docker Compose (Recommended)
+### Option 1: Interactive Setup Wizard (Recommended)
 
 ```bash
 # Clone the repository
 git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
 cd GLP-Sync-2
 
-# Create .env file
-cp .env.example .env
-# Edit .env with your credentials
+# Make setup script executable and run it
+chmod +x setup.sh
+./setup.sh
+```
 
-# Start all services
+The wizard will guide you through:
+- GreenLake API credentials
+- PostgreSQL configuration
+- API security settings (dev/production mode)
+- AI chatbot provider selection
+- Deployment mode (local build vs Docker Hub images)
+
+### Option 2: Manual Docker Compose
+
+```bash
+# Clone the repository
+git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
+cd GLP-Sync-2
+
+# Create .env file from template
+cp .env.example .env
+nano .env  # Edit with your credentials
+
+# Start all services (development mode - builds locally)
 docker compose up -d
 
 # View logs
@@ -52,17 +71,22 @@ docker compose logs -f
 open http://localhost
 ```
 
-### Option 2: Production Deployment
+### Option 3: Production Deployment (Docker Hub Images)
 
 ```bash
-# Use pre-built images from Docker Hub
-export DOCKERHUB_USERNAME=yourorg
+# Clone the repository
+git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
+cd GLP-Sync-2
 
-# Start with production compose
+# Create .env file
+cp .env.example .env
+nano .env  # Edit with your credentials
+
+# Start with pre-built images from Docker Hub (jgiet001/glp-sync, jgiet001/glp-frontend)
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-### Option 3: Security-Hardened Deployment
+### Option 4: Security-Hardened Deployment
 
 ```bash
 # Start with security features enabled
