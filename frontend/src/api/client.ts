@@ -173,7 +173,9 @@ export interface SyncResponse {
 // Clients API
 const clientsApi = axios.create({
   baseURL: '/api/clients',
-  headers: createHeaders(),
+  headers: {
+    'Content-Type': 'application/json',
+  },
 })
 
 // Apply error interceptor to clients API
