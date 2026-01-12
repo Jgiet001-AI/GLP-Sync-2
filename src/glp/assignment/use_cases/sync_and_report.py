@@ -128,6 +128,8 @@ class SyncAndReportUseCase:
         operations: list[OperationResult],
         sync_after: bool = True,
         apply_result: Optional[ApplyResult] = None,
+        sync_devices: bool = True,
+        sync_subscriptions: bool = True,
     ) -> Report:
         """Execute the use case.
 
@@ -135,6 +137,8 @@ class SyncAndReportUseCase:
             operations: List of operation results from apply step
             sync_after: Whether to sync with GreenLake after operations
             apply_result: Optional ApplyResult with phase information
+            sync_devices: Whether to sync devices (default True)
+            sync_subscriptions: Whether to sync subscriptions (default True)
 
         Returns:
             Report with all details
@@ -174,8 +178,13 @@ class SyncAndReportUseCase:
 
         # 3. Optionally sync with GreenLake
         if sync_after:
-            logger.info("Syncing with GreenLake...")
-            sync_result = await self._sync()
+            logger.info(
+                f"Syncing with GreenLake (devices={sync_devices}, subscriptions={sync_subscriptions})..."
+            )
+            sync_result = await self._sync(
+                sync_devices=sync_devices,
+                sync_subscriptions=sync_subscriptions,
+            )
             report.sync_success = sync_result.success
             report.devices_synced = sync_result.devices_synced
             report.subscriptions_synced = sync_result.subscriptions_synced
@@ -191,16 +200,30 @@ class SyncAndReportUseCase:
 
         return report
 
-    async def _sync(self) -> SyncResult:
-        """Perform sync with GreenLake."""
-        try:
-            # Sync devices
-            device_result = await self.sync.sync_devices()
-            devices_synced = device_result.get("records_fetched", device_result.get("total", 0))
+    async def _sync(
+        self,
+        sync_devices: bool = True,
+        sync_subscriptions: bool = True,
+    ) -> SyncResult:
+        """Perform sync with GreenLake.
 
-            # Sync subscriptions
-            sub_result = await self.sync.sync_subscriptions()
-            subs_synced = sub_result.get("records_fetched", sub_result.get("total", 0))
+        Args:
+            sync_devices: Whether to sync devices
+            sync_subscriptions: Whether to sync subscriptions
+        """
+        try:
+            devices_synced = 0
+            subs_synced = 0
+
+            # Sync devices (if enabled)
+            if sync_devices:
+                device_result = await self.sync.sync_devices()
+                devices_synced = device_result.get("records_fetched", device_result.get("total", 0))
+
+            # Sync subscriptions (if enabled)
+            if sync_subscriptions:
+                sub_result = await self.sync.sync_subscriptions()
+                subs_synced = sub_result.get("records_fetched", sub_result.get("total", 0))
 
             return SyncResult(
                 success=True,

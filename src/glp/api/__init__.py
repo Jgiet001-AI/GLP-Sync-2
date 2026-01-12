@@ -1,14 +1,18 @@
 """GreenLake API modules.
 
 This package provides the core API client and resource-specific syncers
-for interacting with the HPE GreenLake Platform.
+for interacting with the HPE GreenLake Platform and Aruba Central.
 
 Classes:
     GLPClient: Generic HTTP client with pagination, retry, and circuit breaker
-    TokenManager: OAuth2 token management with caching
+    TokenManager: OAuth2 token management with caching (GreenLake)
     DeviceSyncer: Device inventory synchronization (read operations)
     DeviceManager: Device management operations (write operations)
     SubscriptionSyncer: Subscription synchronization
+
+    ArubaCentralClient: HTTP client for Aruba Central APIs (cursor-based pagination)
+    ArubaTokenManager: OAuth2 token management for Aruba Central
+    ArubaCentralSyncer: Aruba Central device synchronization
 
 Exceptions:
     GLPError: Base exception for all GLP errors
@@ -28,6 +32,16 @@ Resilience:
     retry: Decorator for retry with exponential backoff
 """
 from .auth import TokenError, TokenManager, get_token
+from .aruba_auth import ArubaTokenManager, get_aruba_token
+from .aruba_client import (
+    ARUBA_DEVICES_PAGINATION,
+    ArubaCentralClient,
+    ArubaPaginationConfig,
+    RateLimitInfo,
+)
+from .aruba_clients import ArubaClientsSyncer
+from .aruba_devices import ArubaCentralSyncer
+from .aruba_firmware import ArubaFirmwareSyncer
 from .client import (
     DEVICES_PAGINATION,
     SUBSCRIPTIONS_PAGINATION,
@@ -87,20 +101,28 @@ from .resilience import (
 from .subscriptions import SubscriptionSyncer
 
 __all__ = [
-    # Auth
+    # Auth - GreenLake
     "TokenManager",
     "TokenError",
     "TokenFetchError",
     "TokenExpiredError",
     "InvalidCredentialsError",
     "get_token",
-    # Client
+    # Auth - Aruba Central
+    "ArubaTokenManager",
+    "get_aruba_token",
+    # Client - GreenLake
     "GLPClient",
     "GLPClientError",
     "PaginationConfig",
     "AsyncOperationResult",
     "DEVICES_PAGINATION",
     "SUBSCRIPTIONS_PAGINATION",
+    # Client - Aruba Central
+    "ArubaCentralClient",
+    "ArubaPaginationConfig",
+    "RateLimitInfo",
+    "ARUBA_DEVICES_PAGINATION",
     # Exceptions - Base
     "GLPError",
     "ConfigurationError",
@@ -148,9 +170,13 @@ __all__ = [
     "create_pool",
     "close_pool",
     "check_database_health",
-    # Syncers (read operations)
+    # Syncers - GreenLake (read operations)
     "DeviceSyncer",
     "SubscriptionSyncer",
+    # Syncers - Aruba Central
+    "ArubaCentralSyncer",
+    "ArubaClientsSyncer",
+    "ArubaFirmwareSyncer",
     # Device Management (write operations)
     "DeviceManager",
     "DeviceType",

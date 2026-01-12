@@ -273,6 +273,8 @@ class CircuitBreaker:
         self._success_count = 0
         self._last_failure_time: Optional[datetime] = None
         self._lock = asyncio.Lock()
+        # Flag to ensure only one probe request runs in HALF_OPEN state
+        self._half_open_probe_in_progress = False
 
     @property
     def state(self) -> CircuitState:
@@ -290,7 +292,13 @@ class CircuitBreaker:
         return self._failure_count
 
     def _should_attempt(self) -> bool:
-        """Check if request should be attempted based on current state."""
+        """Check if request should be attempted based on current state.
+
+        Note: For OPEN state with timeout passed, this returns True but the
+        actual transition to HALF_OPEN and probe execution should be atomic.
+        Use should_allow_request() for external checks which accounts for
+        the half-open probe flag.
+        """
         if self._state == CircuitState.CLOSED:
             return True
 
@@ -302,8 +310,17 @@ class CircuitBreaker:
                     return True
             return False
 
-        # HALF_OPEN - allow request
+        # HALF_OPEN - allow request (probe in progress check is done elsewhere)
         return True
+
+    def _is_timeout_expired(self) -> bool:
+        """Check if the OPEN state timeout has expired."""
+        if self._state != CircuitState.OPEN:
+            return False
+        if not self._last_failure_time:
+            return False
+        elapsed = (datetime.utcnow() - self._last_failure_time).total_seconds()
+        return elapsed >= self.timeout
 
     async def call(
         self,
@@ -322,26 +339,53 @@ class CircuitBreaker:
             Result from func
 
         Raises:
-            CircuitOpenError: If circuit is open and timeout hasn't passed
+            CircuitOpenError: If circuit is open and timeout hasn't passed,
+                            or if a probe is already in progress
             Any exception from func (after updating circuit state)
         """
+        is_probe_request = False
+
         async with self._lock:
-            if not self._should_attempt():
-                reset_at = None
-                if self._last_failure_time:
-                    reset_at = self._last_failure_time + timedelta(seconds=self.timeout)
+            if self._state == CircuitState.CLOSED:
+                # Normal operation - allow request
+                pass
+            elif self._state == CircuitState.OPEN:
+                if not self._is_timeout_expired():
+                    # Circuit is open and timeout hasn't passed
+                    reset_at = None
+                    if self._last_failure_time:
+                        reset_at = self._last_failure_time + timedelta(seconds=self.timeout)
+                    raise CircuitOpenError(
+                        f"Circuit breaker '{self.name}' is open",
+                        reset_at=reset_at,
+                        failure_count=self._failure_count,
+                    )
 
-                raise CircuitOpenError(
-                    f"Circuit breaker '{self.name}' is open",
-                    reset_at=reset_at,
-                    failure_count=self._failure_count,
-                )
+                # Timeout expired - check if we can start a probe
+                if self._half_open_probe_in_progress:
+                    # Another probe is already running, reject this request
+                    raise CircuitOpenError(
+                        f"Circuit breaker '{self.name}' is testing recovery (probe in progress)",
+                        failure_count=self._failure_count,
+                    )
 
-            # Transition to HALF_OPEN if coming from OPEN
-            if self._state == CircuitState.OPEN:
-                logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
+                # We're the first - transition to HALF_OPEN and mark probe in progress
+                logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN (starting probe)")
                 self._state = CircuitState.HALF_OPEN
                 self._success_count = 0
+                self._half_open_probe_in_progress = True
+                is_probe_request = True
+
+            elif self._state == CircuitState.HALF_OPEN:
+                if self._half_open_probe_in_progress:
+                    # A probe is already running, reject additional requests
+                    raise CircuitOpenError(
+                        f"Circuit breaker '{self.name}' is testing recovery (probe in progress)",
+                        failure_count=self._failure_count,
+                    )
+                # No probe in progress but we're HALF_OPEN - allow the request
+                # (This happens after a successful probe incremented success_count
+                # but threshold not yet reached)
 
         # Execute the function (outside the lock)
         try:
@@ -352,6 +396,12 @@ class CircuitBreaker:
         except Exception as e:
             await self._on_failure(e)
             raise
+
+        finally:
+            # Clear the probe flag if this was a probe request
+            if is_probe_request:
+                async with self._lock:
+                    self._half_open_probe_in_progress = False
 
     async def _on_success(self):
         """Handle successful request."""
@@ -395,6 +445,7 @@ class CircuitBreaker:
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time = None
+        self._half_open_probe_in_progress = False
         logger.info(f"Circuit '{self.name}' manually reset")
 
     def get_status(self) -> dict[str, Any]:
@@ -411,7 +462,96 @@ class CircuitBreaker:
                 if self._last_failure_time
                 else None
             ),
+            "probe_in_progress": self._half_open_probe_in_progress,
         }
+
+    # ----------------------------------------
+    # Public Methods for External Use
+    # ----------------------------------------
+    # These methods handle state transitions properly and should be used
+    # instead of calling private methods directly.
+
+    def should_allow_request(self) -> bool:
+        """Check if a request should be allowed based on circuit state.
+
+        Returns True if:
+        - Circuit is CLOSED (normal operation)
+        - Circuit is HALF_OPEN and no probe in progress
+        - Circuit is OPEN, timeout has passed, and no probe in progress
+
+        Returns:
+            True if request should be attempted, False otherwise
+        """
+        if self._state == CircuitState.CLOSED:
+            return True
+
+        if self._state == CircuitState.OPEN:
+            if not self._is_timeout_expired():
+                return False
+            # Timeout expired - only allow if no probe is in progress
+            return not self._half_open_probe_in_progress
+
+        # HALF_OPEN - only allow if no probe is in progress
+        return not self._half_open_probe_in_progress
+
+    async def record_success(self) -> None:
+        """Record a successful request with proper state transitions.
+
+        This is the public API for recording success. It handles the
+        OPEN -> HALF_OPEN transition that occurs when timeout passes,
+        then delegates to _on_success() for the actual state updates.
+
+        Use this instead of calling _on_success() directly.
+
+        Note: When using this method directly (not via call()), the caller
+        is responsible for the probe lifecycle. The probe flag is cleared
+        after state transitions complete.
+        """
+        async with self._lock:
+            # Handle OPEN -> HALF_OPEN transition if timeout has passed
+            if self._state == CircuitState.OPEN and self._is_timeout_expired():
+                if not self._half_open_probe_in_progress:
+                    logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
+                    self._state = CircuitState.HALF_OPEN
+                    self._success_count = 0
+
+        await self._on_success()
+
+        # Clear probe flag after successful completion
+        async with self._lock:
+            if self._half_open_probe_in_progress:
+                self._half_open_probe_in_progress = False
+
+    async def record_failure(self, exception: Exception) -> None:
+        """Record a failed request with proper state transitions.
+
+        This is the public API for recording failure. It handles the
+        OPEN -> HALF_OPEN transition that occurs when timeout passes,
+        then delegates to _on_failure() for the actual state updates.
+
+        Use this instead of calling _on_failure() directly.
+
+        Note: When using this method directly (not via call()), the caller
+        is responsible for the probe lifecycle. The probe flag is cleared
+        after state transitions complete.
+
+        Args:
+            exception: The exception that caused the failure
+        """
+        async with self._lock:
+            # Handle OPEN -> HALF_OPEN transition if timeout has passed
+            if self._state == CircuitState.OPEN and self._is_timeout_expired():
+                if not self._half_open_probe_in_progress:
+                    logger.info(f"Circuit '{self.name}' transitioning to HALF_OPEN")
+                    self._state = CircuitState.HALF_OPEN
+                    self._success_count = 0
+
+        await self._on_failure(exception)
+
+        # Clear probe flag after failure
+        async with self._lock:
+            if self._half_open_probe_in_progress:
+                self._half_open_probe_in_progress = False
 
 
 # ============================================
@@ -828,6 +968,115 @@ class ConcurrentBatcher:
 
 
 # ============================================
+# Sequential Rate Limiter
+# ============================================
+
+
+class SequentialRateLimiter:
+    """Sequential rate limiter that GUARANTEES we never hit rate limits.
+
+    The PERFECT algorithm for APIs with strict rate limits:
+    - Process requests SEQUENTIALLY (not in parallel)
+    - Wait a fixed interval BEFORE each request (except the first)
+    - Use a generous safety margin to account for clock drift
+
+    For a 20 requests/minute limit:
+    - Theoretical minimum interval: 60/20 = 3.0 seconds
+    - With 17% safety margin: 3.0 * 1.17 = 3.5 seconds
+    - At 3.5s interval: max 17 requests/min (well under 20/min limit)
+
+    For a 25 requests/minute limit:
+    - Theoretical minimum interval: 60/25 = 2.4 seconds
+    - With 8% safety margin: 2.4 * 1.08 = 2.6 seconds
+    - At 2.6s interval: max 23 requests/min (well under 25/min limit)
+
+    Example:
+        limiter = SequentialRateLimiter(operation_type="patch")
+
+        for i, batch in enumerate(batches):
+            await limiter.wait_before_call(i)
+            await api.patch(batch)
+
+        print(f"Processed {limiter.call_count} batches")
+        print(f"Total wait time: {limiter.total_wait_time:.1f}s")
+    """
+
+    # Default intervals with safety margins
+    PATCH_INTERVAL = 3.5  # For 20 req/min limits (yields ~17 req/min)
+    POST_INTERVAL = 2.6   # For 25 req/min limits (yields ~23 req/min)
+    GET_INTERVAL = 1.0    # For higher limits (60 req/min)
+
+    def __init__(
+        self,
+        operation_type: str = "patch",
+        custom_interval: float | None = None,
+    ):
+        """Initialize rate limiter.
+
+        Args:
+            operation_type: "patch" (20/min), "post" (25/min), or "get" (60/min)
+            custom_interval: Override the default interval for this operation type
+        """
+        self.operation_type = operation_type
+
+        if custom_interval is not None:
+            self.interval = custom_interval
+        elif operation_type == "patch":
+            self.interval = self.PATCH_INTERVAL
+        elif operation_type == "post":
+            self.interval = self.POST_INTERVAL
+        else:
+            self.interval = self.GET_INTERVAL
+
+        self._call_count = 0
+        self._total_wait_time = 0.0
+
+    async def wait_before_call(self, batch_index: int) -> None:
+        """Wait the required interval before making an API call.
+
+        Args:
+            batch_index: The index of this batch (0-based).
+                        First batch (index 0) doesn't wait.
+        """
+        if batch_index > 0:
+            logger.debug(
+                f"Rate limiter: waiting {self.interval:.1f}s before batch {batch_index + 1} "
+                f"({self.operation_type.upper()} rate limit protection)"
+            )
+            await asyncio.sleep(self.interval)
+            self._total_wait_time += self.interval
+        self._call_count += 1
+
+    @property
+    def call_count(self) -> int:
+        """Number of calls made through this limiter."""
+        return self._call_count
+
+    @property
+    def total_wait_time(self) -> float:
+        """Total time spent waiting (seconds)."""
+        return self._total_wait_time
+
+    def estimate_time(self, num_batches: int) -> float:
+        """Estimate total wait time for processing N batches.
+
+        Args:
+            num_batches: Number of batches to process
+
+        Returns:
+            Estimated wait time in seconds (excludes API call time)
+        """
+        if num_batches <= 1:
+            return 0.0
+        return (num_batches - 1) * self.interval
+
+    def reset(self) -> None:
+        """Reset counters for a new operation sequence."""
+        self._call_count = 0
+        self._total_wait_time = 0.0
+
+
+# ============================================
 # Exports
 # ============================================
 
@@ -849,4 +1098,6 @@ __all__ = [
     "gather_with_errors",
     "run_concurrent_tasks",
     "ConcurrentBatcher",
+    # Rate Limiting
+    "SequentialRateLimiter",
 ]

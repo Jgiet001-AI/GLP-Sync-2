@@ -594,7 +594,7 @@ function SubscriptionDetailContent({
           Copy Key
         </button>
         <Link
-          to={`/devices?subscription_key=${subscription.key}`}
+          to={`/devices?subscription_key=${encodeURIComponent(subscription.key)}`}
           className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-700"
         >
           <Server className="h-4 w-4" />
@@ -652,7 +652,7 @@ function SubscriptionDetailContent({
             Devices using this subscription
           </span>
           <Link
-            to={`/devices?subscription_key=${subscription.key}`}
+            to={`/devices?subscription_key=${encodeURIComponent(subscription.key)}`}
             className="flex items-center gap-1 font-mono text-sm font-medium text-violet-400 hover:text-violet-300"
           >
             {subscription.device_count.toLocaleString()} devices
@@ -851,7 +851,7 @@ const SubscriptionRow = memo(function SubscriptionRow({
       </td>
       <td className="whitespace-nowrap px-4 py-3" onClick={(e) => e.stopPropagation()}>
         <Link
-          to={`/devices?subscription_key=${subscription.key}`}
+          to={`/devices?subscription_key=${encodeURIComponent(subscription.key)}`}
           className="flex items-center gap-1.5 text-sm text-violet-400 hover:text-violet-300"
         >
           <Server className="h-3.5 w-3.5" />

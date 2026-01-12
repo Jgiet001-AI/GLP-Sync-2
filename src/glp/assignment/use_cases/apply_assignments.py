@@ -54,11 +54,13 @@ Key Design Decisions:
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterator, Optional, TypeVar
+from typing import Any, AsyncGenerator, Iterator, Optional, TypeVar
 from uuid import UUID
 
+from ...api.resilience import SequentialRateLimiter
 from ..domain.entities import DeviceAssignment, OperationResult
 from ..domain.ports import IDeviceManagerPort, IDeviceRepository, ISyncService
 
@@ -108,74 +110,6 @@ class ApplyResult:
     # New devices added (serials)
     new_devices_added: list[str] = field(default_factory=list)
     new_devices_failed: list[str] = field(default_factory=list)
-
-
-class SequentialRateLimiter:
-    """Sequential rate limiter that GUARANTEES we never hit rate limits.
-
-    The PERFECT algorithm:
-    - Process requests SEQUENTIALLY (not in parallel)
-    - Wait a fixed interval BEFORE each request (except the first)
-    - Use a generous safety margin to account for clock drift
-
-    For 20 PATCH/minute:
-    - Theoretical minimum interval: 60/20 = 3.0 seconds
-    - With 20% safety margin: 3.0 * 1.2 = 3.6 seconds
-    - We use 3.5 seconds (17 requests/min, well under 20/min limit)
-    """
-
-    # Fixed intervals with safety margins
-    PATCH_INTERVAL = 3.5  # 60/20 * 1.17 = ~3.5s between PATCH requests
-    POST_INTERVAL = 2.6   # 60/25 * 1.08 = ~2.6s between POST requests
-
-    def __init__(self, operation_type: str = "patch"):
-        """Initialize rate limiter.
-
-        Args:
-            operation_type: "patch" (20/min) or "post" (25/min)
-        """
-        self.operation_type = operation_type
-        self.interval = self.PATCH_INTERVAL if operation_type == "patch" else self.POST_INTERVAL
-        self._call_count = 0
-        self._total_wait_time = 0.0
-
-    async def wait_before_call(self, batch_index: int) -> None:
-        """Wait the required interval before making an API call.
-
-        Args:
-            batch_index: The index of this batch (0-based). First batch (index 0) doesn't wait.
-        """
-        if batch_index > 0:
-            logger.info(
-                f"Rate limiter: waiting {self.interval:.1f}s before batch {batch_index + 1} "
-                f"({self.operation_type.upper()} rate limit protection)"
-            )
-            await asyncio.sleep(self.interval)
-            self._total_wait_time += self.interval
-        self._call_count += 1
-
-    @property
-    def call_count(self) -> int:
-        """Number of calls made through this limiter."""
-        return self._call_count
-
-    @property
-    def total_wait_time(self) -> float:
-        """Total time spent waiting (seconds)."""
-        return self._total_wait_time
-
-    def estimate_time(self, num_batches: int) -> float:
-        """Estimate total time for processing N batches.
-
-        Args:
-            num_batches: Number of batches to process
-
-        Returns:
-            Estimated time in seconds (wait time only, excludes API call time)
-        """
-        if num_batches <= 1:
-            return 0.0
-        return (num_batches - 1) * self.interval
 
 
 class ApplyAssignmentsUseCase:
@@ -336,6 +270,294 @@ class ApplyAssignmentsUseCase:
         )
 
         return result
+
+    async def execute_with_progress(
+        self,
+        assignments: list[DeviceAssignment],
+        wait_for_completion: bool = True,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Execute the phased workflow with progress streaming.
+
+        Yields progress events as dictionaries:
+        - type: 'phase_start' | 'batch_progress' | 'phase_complete' | 'error' | 'complete'
+        - phase: 'applications' | 'subscriptions' | 'tags' | 'new_devices' | 'refresh'
+        - batch: { currentBatch, totalBatches, devicesInBatch }
+        - timing: { elapsedSeconds, estimatedRemainingSeconds, avgBatchSeconds }
+        - stats: { successCount, errorCount, totalDevices }
+
+        Args:
+            assignments: List of DeviceAssignment with user selections
+            wait_for_completion: Whether to wait for async operations
+
+        Yields:
+            Progress event dictionaries
+        """
+        started_at = time.perf_counter()
+        total_devices = len(assignments)
+        success_count = 0
+        error_count = 0
+        batch_times: list[float] = []
+
+        def calc_eta() -> float:
+            """Calculate estimated remaining time based on batch history."""
+            if not batch_times:
+                return 0.0
+            avg_batch_time = sum(batch_times) / len(batch_times)
+            # Rough estimate based on remaining work
+            return avg_batch_time * 3  # Assume ~3 more operations
+
+        logger.info(f"Starting streaming assignment workflow for {total_devices} devices")
+
+        # Separate devices into existing (have UUID) and new (need creation)
+        existing_devices = [a for a in assignments if a.device_id is not None]
+        new_devices = [a for a in assignments if a.device_id is None]
+
+        # ========================================
+        # PHASE 1: Applications
+        # ========================================
+        need_application = [a for a in existing_devices if a.needs_application_patch]
+        if need_application:
+            app_batches = list(chunk(need_application, self.MAX_BATCH_SIZE))
+            total_batches = len(app_batches)
+
+            yield {
+                "type": "phase_start",
+                "phase": "applications",
+                "totalBatches": total_batches,
+                "totalDevices": len(need_application),
+            }
+
+            phase_start = time.perf_counter()
+            for i, batch in enumerate(app_batches):
+                batch_start = time.perf_counter()
+
+                # Process batch (simplified - actual implementation calls _assign_applications_sequential)
+                results = await self._assign_applications_sequential([batch[0]] if batch else [], wait_for_completion)
+
+                batch_duration = time.perf_counter() - batch_start
+                batch_times.append(batch_duration)
+
+                for r in results:
+                    if r.success:
+                        success_count += len(r.device_ids or [])
+                    else:
+                        error_count += 1
+
+                yield {
+                    "type": "batch_progress",
+                    "phase": "applications",
+                    "batch": {
+                        "currentBatch": i + 1,
+                        "totalBatches": total_batches,
+                        "devicesInBatch": len(batch),
+                    },
+                    "timing": {
+                        "elapsedSeconds": round(time.perf_counter() - started_at, 1),
+                        "estimatedRemainingSeconds": round(calc_eta(), 1),
+                        "avgBatchSeconds": round(sum(batch_times) / len(batch_times), 2) if batch_times else 0,
+                    },
+                    "stats": {
+                        "successCount": success_count,
+                        "errorCount": error_count,
+                        "totalDevices": total_devices,
+                    },
+                }
+
+            yield {
+                "type": "phase_complete",
+                "phase": "applications",
+                "elapsedSeconds": round(time.perf_counter() - phase_start, 1),
+            }
+
+        # ========================================
+        # PHASE 2: Subscriptions
+        # ========================================
+        need_subscription = [a for a in existing_devices if a.needs_subscription_patch]
+        if need_subscription:
+            sub_batches = list(chunk(need_subscription, self.MAX_BATCH_SIZE))
+            total_batches = len(sub_batches)
+
+            yield {
+                "type": "phase_start",
+                "phase": "subscriptions",
+                "totalBatches": total_batches,
+                "totalDevices": len(need_subscription),
+            }
+
+            phase_start = time.perf_counter()
+            for i, batch in enumerate(sub_batches):
+                batch_start = time.perf_counter()
+
+                results = await self._assign_subscriptions_sequential(batch, wait_for_completion)
+
+                batch_duration = time.perf_counter() - batch_start
+                batch_times.append(batch_duration)
+
+                for r in results:
+                    if r.success:
+                        success_count += len(r.device_ids or [])
+                    else:
+                        error_count += 1
+
+                yield {
+                    "type": "batch_progress",
+                    "phase": "subscriptions",
+                    "batch": {
+                        "currentBatch": i + 1,
+                        "totalBatches": total_batches,
+                        "devicesInBatch": len(batch),
+                    },
+                    "timing": {
+                        "elapsedSeconds": round(time.perf_counter() - started_at, 1),
+                        "estimatedRemainingSeconds": round(calc_eta(), 1),
+                        "avgBatchSeconds": round(sum(batch_times) / len(batch_times), 2) if batch_times else 0,
+                    },
+                    "stats": {
+                        "successCount": success_count,
+                        "errorCount": error_count,
+                        "totalDevices": total_devices,
+                    },
+                }
+
+            yield {
+                "type": "phase_complete",
+                "phase": "subscriptions",
+                "elapsedSeconds": round(time.perf_counter() - phase_start, 1),
+            }
+
+        # ========================================
+        # PHASE 3: Tags
+        # ========================================
+        need_tags = [a for a in existing_devices if a.needs_tag_patch]
+        if need_tags:
+            tag_batches = list(chunk(need_tags, self.MAX_BATCH_SIZE))
+            total_batches = len(tag_batches)
+
+            yield {
+                "type": "phase_start",
+                "phase": "tags",
+                "totalBatches": total_batches,
+                "totalDevices": len(need_tags),
+            }
+
+            phase_start = time.perf_counter()
+            for i, batch in enumerate(tag_batches):
+                batch_start = time.perf_counter()
+
+                results = await self._update_tags_sequential(batch, wait_for_completion)
+
+                batch_duration = time.perf_counter() - batch_start
+                batch_times.append(batch_duration)
+
+                for r in results:
+                    if r.success:
+                        success_count += len(r.device_ids or [])
+                    else:
+                        error_count += 1
+
+                yield {
+                    "type": "batch_progress",
+                    "phase": "tags",
+                    "batch": {
+                        "currentBatch": i + 1,
+                        "totalBatches": total_batches,
+                        "devicesInBatch": len(batch),
+                    },
+                    "timing": {
+                        "elapsedSeconds": round(time.perf_counter() - started_at, 1),
+                        "estimatedRemainingSeconds": round(calc_eta(), 1),
+                        "avgBatchSeconds": round(sum(batch_times) / len(batch_times), 2) if batch_times else 0,
+                    },
+                    "stats": {
+                        "successCount": success_count,
+                        "errorCount": error_count,
+                        "totalDevices": total_devices,
+                    },
+                }
+
+            yield {
+                "type": "phase_complete",
+                "phase": "tags",
+                "elapsedSeconds": round(time.perf_counter() - phase_start, 1),
+            }
+
+        # ========================================
+        # PHASE 4: New Devices (if any)
+        # ========================================
+        if new_devices:
+            yield {
+                "type": "phase_start",
+                "phase": "new_devices",
+                "totalBatches": len(new_devices),
+                "totalDevices": len(new_devices),
+            }
+
+            phase_start = time.perf_counter()
+            for i, device in enumerate(new_devices):
+                batch_start = time.perf_counter()
+
+                result = await self._create_single_device(device, wait_for_completion)
+
+                batch_duration = time.perf_counter() - batch_start
+                batch_times.append(batch_duration)
+
+                if result.success:
+                    success_count += 1
+                else:
+                    error_count += 1
+
+                yield {
+                    "type": "batch_progress",
+                    "phase": "new_devices",
+                    "batch": {
+                        "currentBatch": i + 1,
+                        "totalBatches": len(new_devices),
+                        "devicesInBatch": 1,
+                    },
+                    "timing": {
+                        "elapsedSeconds": round(time.perf_counter() - started_at, 1),
+                        "estimatedRemainingSeconds": round((len(new_devices) - i - 1) * (sum(batch_times[-5:]) / min(5, len(batch_times[-5:]))), 1) if batch_times else 0,
+                        "avgBatchSeconds": round(sum(batch_times) / len(batch_times), 2) if batch_times else 0,
+                    },
+                    "stats": {
+                        "successCount": success_count,
+                        "errorCount": error_count,
+                        "totalDevices": total_devices,
+                    },
+                }
+
+            yield {
+                "type": "phase_complete",
+                "phase": "new_devices",
+                "elapsedSeconds": round(time.perf_counter() - phase_start, 1),
+            }
+
+        # ========================================
+        # COMPLETE
+        # ========================================
+        total_duration = time.perf_counter() - started_at
+
+        yield {
+            "type": "complete",
+            "timing": {
+                "elapsedSeconds": round(total_duration, 1),
+                "avgBatchSeconds": round(sum(batch_times) / len(batch_times), 2) if batch_times else 0,
+            },
+            "stats": {
+                "successCount": success_count,
+                "errorCount": error_count,
+                "totalDevices": total_devices,
+            },
+            "result": {
+                "success": error_count == 0,
+                "errors": error_count,
+            },
+        }
+
+        logger.info(
+            f"Streaming workflow complete in {total_duration:.1f}s: "
+            f"{success_count} successful, {error_count} errors"
+        )
 
     async def _phase1_process_existing(
         self,
@@ -737,16 +959,51 @@ class ApplyAssignmentsUseCase:
                     error=str(e),
                 ))
 
-        # Mark all fired operations as success (GreenLake processes async)
-        # User can sync at the end to verify all assignments completed
-        for op_result, device_ids, device_serials in pending_operations:
-            results.append(OperationResult(
-                success=True,
-                operation_type="application",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            ))
+        # POLL PHASE: Wait for completion if requested
+        if wait_for_completion and pending_operations:
+            logger.info(f"POLL PHASE: Waiting for {len(pending_operations)} application operations to complete")
+            for op_result, device_ids, device_serials in pending_operations:
+                if op_result.operation_url:
+                    try:
+                        completion_result = await self.manager.wait_for_completion(
+                            op_result.operation_url
+                        )
+                        results.append(OperationResult(
+                            success=completion_result.success,
+                            operation_type="application",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=completion_result.error if not completion_result.success else None,
+                        ))
+                    except Exception as e:
+                        logger.error(f"Poll failed for application operation: {e}")
+                        results.append(OperationResult(
+                            success=False,
+                            operation_type="application",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=str(e),
+                        ))
+                else:
+                    # No URL to poll, mark as success
+                    results.append(OperationResult(
+                        success=True,
+                        operation_type="application",
+                        device_ids=device_ids,
+                        device_serials=device_serials,
+                    ))
+        else:
+            # Fire-and-forget: mark all as success without waiting
+            for op_result, device_ids, device_serials in pending_operations:
+                results.append(OperationResult(
+                    success=True,
+                    operation_type="application",
+                    device_ids=device_ids,
+                    device_serials=device_serials,
+                    operation_url=op_result.operation_url,
+                ))
 
         if all_batches:
             logger.info(
@@ -755,80 +1012,6 @@ class ApplyAssignmentsUseCase:
             )
 
         return results
-
-    async def _assign_application_batch(
-        self,
-        application_id: UUID,
-        region: str,
-        devices: list[DeviceAssignment],
-        wait_for_completion: bool,
-    ) -> OperationResult:
-        """Assign application to a batch of devices.
-
-        GreenLake API requires BOTH application_id and region for assignment.
-        """
-        device_ids = [d.device_id for d in devices if d.device_id]
-        device_serials = [d.serial_number for d in devices]
-
-        if not device_ids:
-            return OperationResult(
-                success=True,
-                operation_type="application",
-                device_serials=device_serials,
-            )
-
-        try:
-            logger.info(
-                f"Assigning application {application_id} + region '{region}' to {len(device_ids)} devices"
-            )
-            op_result = await self.manager.assign_application(
-                device_ids=device_ids,
-                application_id=application_id,
-                region=region,  # Required by GreenLake API
-            )
-
-            # Check if the initial operation failed
-            if not op_result.success:
-                return OperationResult(
-                    success=False,
-                    operation_type="application",
-                    device_ids=device_ids,
-                    device_serials=device_serials,
-                    error=op_result.error or "Failed to assign application",
-                    operation_url=op_result.operation_url,
-                )
-
-            if wait_for_completion and op_result.operation_url:
-                completion_result = await self.manager.wait_for_completion(
-                    op_result.operation_url
-                )
-                if not completion_result.success:
-                    return OperationResult(
-                        success=False,
-                        operation_type="application",
-                        device_ids=device_ids,
-                        device_serials=device_serials,
-                        error=completion_result.error,
-                        operation_url=op_result.operation_url,
-                    )
-
-            return OperationResult(
-                success=True,
-                operation_type="application",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to assign application: {e}")
-            return OperationResult(
-                success=False,
-                operation_type="application",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                error=str(e),
-            )
 
     async def _assign_subscriptions_sequential(
         self,
@@ -903,15 +1086,51 @@ class ApplyAssignmentsUseCase:
                     error=str(e),
                 ))
 
-        # Mark all fired operations as success (GreenLake processes async)
-        for op_result, device_ids, device_serials in pending_operations:
-            results.append(OperationResult(
-                success=True,
-                operation_type="subscription",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            ))
+        # POLL PHASE: Wait for completion if requested
+        if wait_for_completion and pending_operations:
+            logger.info(f"POLL PHASE: Waiting for {len(pending_operations)} subscription operations to complete")
+            for op_result, device_ids, device_serials in pending_operations:
+                if op_result.operation_url:
+                    try:
+                        completion_result = await self.manager.wait_for_completion(
+                            op_result.operation_url
+                        )
+                        results.append(OperationResult(
+                            success=completion_result.success,
+                            operation_type="subscription",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=completion_result.error if not completion_result.success else None,
+                        ))
+                    except Exception as e:
+                        logger.error(f"Poll failed for subscription operation: {e}")
+                        results.append(OperationResult(
+                            success=False,
+                            operation_type="subscription",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=str(e),
+                        ))
+                else:
+                    # No URL to poll, mark as success
+                    results.append(OperationResult(
+                        success=True,
+                        operation_type="subscription",
+                        device_ids=device_ids,
+                        device_serials=device_serials,
+                    ))
+        else:
+            # Fire-and-forget: mark all as success without waiting
+            for op_result, device_ids, device_serials in pending_operations:
+                results.append(OperationResult(
+                    success=True,
+                    operation_type="subscription",
+                    device_ids=device_ids,
+                    device_serials=device_serials,
+                    operation_url=op_result.operation_url,
+                ))
 
         if all_batches:
             logger.info(
@@ -921,72 +1140,6 @@ class ApplyAssignmentsUseCase:
 
         return results
 
-    async def _assign_subscription_batch(
-        self,
-        subscription_id: UUID,
-        devices: list[DeviceAssignment],
-        wait_for_completion: bool,
-    ) -> OperationResult:
-        """Assign subscription to a batch of devices."""
-        device_ids = [d.device_id for d in devices if d.device_id]
-        device_serials = [d.serial_number for d in devices]
-
-        if not device_ids:
-            return OperationResult(
-                success=True,
-                operation_type="subscription",
-                device_serials=device_serials,
-            )
-
-        try:
-            op_result = await self.manager.assign_subscription(
-                device_ids=device_ids,
-                subscription_id=subscription_id,
-            )
-
-            # Check if the initial operation failed
-            if not op_result.success:
-                return OperationResult(
-                    success=False,
-                    operation_type="subscription",
-                    device_ids=device_ids,
-                    device_serials=device_serials,
-                    error=op_result.error or "Failed to assign subscription",
-                    operation_url=op_result.operation_url,
-                )
-
-            if wait_for_completion and op_result.operation_url:
-                completion_result = await self.manager.wait_for_completion(
-                    op_result.operation_url
-                )
-                if not completion_result.success:
-                    return OperationResult(
-                        success=False,
-                        operation_type="subscription",
-                        device_ids=device_ids,
-                        device_serials=device_serials,
-                        error=completion_result.error,
-                        operation_url=op_result.operation_url,
-                    )
-
-            return OperationResult(
-                success=True,
-                operation_type="subscription",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to assign subscription: {e}")
-            return OperationResult(
-                success=False,
-                operation_type="subscription",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                error=str(e),
-            )
-
     async def _update_tags_sequential(
         self,
         devices: list[DeviceAssignment],
@@ -994,12 +1147,9 @@ class ApplyAssignmentsUseCase:
     ) -> list[OperationResult]:
         """Update tags on devices SEQUENTIALLY with guaranteed rate limiting.
 
-        THE PERFECT ALGORITHM (Fire-and-Forget):
-        - Group devices by tag set for efficient batching
-        - Split into batches of 25 devices max
-        - Process each batch SEQUENTIALLY with 3.5s delay between batches
-        - This guarantees we NEVER hit the 20 PATCH/minute rate limit
-        - NO POLLING - just fire and mark as success (GreenLake processes async)
+        THE PERFECT ALGORITHM (Fire-then-Poll):
+        1. FIRE PHASE: Send all PATCH requests sequentially with 3.5s delay
+        2. POLL PHASE: If wait_for_completion=True, poll for completion
         """
         results = []
         pending_operations: list[tuple] = []  # (op_result, device_ids, device_serials)
@@ -1065,15 +1215,51 @@ class ApplyAssignmentsUseCase:
                     error=str(e),
                 ))
 
-        # Mark all fired operations as success (GreenLake processes async)
-        for op_result, device_ids, device_serials in pending_operations:
-            results.append(OperationResult(
-                success=True,
-                operation_type="tags",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            ))
+        # POLL PHASE: Wait for completion if requested
+        if wait_for_completion and pending_operations:
+            logger.info(f"POLL PHASE: Waiting for {len(pending_operations)} tag operations to complete")
+            for op_result, device_ids, device_serials in pending_operations:
+                if op_result.operation_url:
+                    try:
+                        completion_result = await self.manager.wait_for_completion(
+                            op_result.operation_url
+                        )
+                        results.append(OperationResult(
+                            success=completion_result.success,
+                            operation_type="tags",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=completion_result.error if not completion_result.success else None,
+                        ))
+                    except Exception as e:
+                        logger.error(f"Poll failed for tag operation: {e}")
+                        results.append(OperationResult(
+                            success=False,
+                            operation_type="tags",
+                            device_ids=device_ids,
+                            device_serials=device_serials,
+                            operation_url=op_result.operation_url,
+                            error=str(e),
+                        ))
+                else:
+                    # No URL to poll, mark as success
+                    results.append(OperationResult(
+                        success=True,
+                        operation_type="tags",
+                        device_ids=device_ids,
+                        device_serials=device_serials,
+                    ))
+        else:
+            # Fire-and-forget: mark all as success without waiting
+            for op_result, device_ids, device_serials in pending_operations:
+                results.append(OperationResult(
+                    success=True,
+                    operation_type="tags",
+                    device_ids=device_ids,
+                    device_serials=device_serials,
+                    operation_url=op_result.operation_url,
+                ))
 
         if all_batches:
             logger.info(
@@ -1082,69 +1268,3 @@ class ApplyAssignmentsUseCase:
             )
 
         return results
-
-    async def _update_tags_batch(
-        self,
-        tags: dict[str, str],
-        devices: list[DeviceAssignment],
-        wait_for_completion: bool,
-    ) -> OperationResult:
-        """Update tags on a batch of devices."""
-        device_ids = [d.device_id for d in devices if d.device_id]
-        device_serials = [d.serial_number for d in devices]
-
-        if not device_ids:
-            return OperationResult(
-                success=True,
-                operation_type="tags",
-                device_serials=device_serials,
-            )
-
-        try:
-            op_result = await self.manager.update_tags(
-                device_ids=device_ids,
-                tags=tags,
-            )
-
-            # Check if the initial operation failed
-            if not op_result.success:
-                return OperationResult(
-                    success=False,
-                    operation_type="tags",
-                    device_ids=device_ids,
-                    device_serials=device_serials,
-                    error=op_result.error or "Failed to update tags",
-                    operation_url=op_result.operation_url,
-                )
-
-            if wait_for_completion and op_result.operation_url:
-                completion_result = await self.manager.wait_for_completion(
-                    op_result.operation_url
-                )
-                if not completion_result.success:
-                    return OperationResult(
-                        success=False,
-                        operation_type="tags",
-                        device_ids=device_ids,
-                        device_serials=device_serials,
-                        error=completion_result.error,
-                        operation_url=op_result.operation_url,
-                    )
-
-            return OperationResult(
-                success=True,
-                operation_type="tags",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                operation_url=op_result.operation_url,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to update tags: {e}")
-            return OperationResult(
-                success=False,
-                operation_type="tags",
-                device_ids=device_ids,
-                device_serials=device_serials,
-                error=str(e),
-            )

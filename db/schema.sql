@@ -128,20 +128,36 @@ CREATE INDEX IF NOT EXISTS idx_device_subscriptions_sub ON device_subscriptions(
 -- Then add constraint:
 DO $$
 BEGIN
-    IF NOT EXISTS (
+    -- Skip if constraint already exists
+    IF EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'fk_device_subscriptions_sub'
     ) THEN
-        ALTER TABLE device_subscriptions
-        ADD CONSTRAINT fk_device_subscriptions_sub
-        FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE;
+        RAISE NOTICE 'FK constraint fk_device_subscriptions_sub already exists';
+        RETURN;
     END IF;
-EXCEPTION
-    WHEN undefined_table THEN
-        -- subscriptions table doesn't exist yet, skip constraint
-        NULL;
-    WHEN foreign_key_violation THEN
-        -- orphaned records exist, skip constraint (clean them first)
-        RAISE NOTICE 'Orphaned subscription_id records exist. Run cleanup before adding FK constraint.';
+
+    -- Check if subscriptions table exists
+    IF NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'subscriptions') THEN
+        RAISE NOTICE 'Subscriptions table does not exist. Load subscriptions_schema.sql first, then re-run schema.sql to add FK constraint.';
+        RETURN;
+    END IF;
+
+    -- Check for orphaned records that would violate FK constraint
+    IF EXISTS (
+        SELECT 1 FROM device_subscriptions ds
+        WHERE NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.id = ds.subscription_id)
+        LIMIT 1
+    ) THEN
+        RAISE WARNING 'Orphaned subscription_id records exist. Clean them before adding FK constraint:';
+        RAISE WARNING 'DELETE FROM device_subscriptions ds WHERE NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.id = ds.subscription_id);';
+        RETURN;
+    END IF;
+
+    -- All checks passed, add the constraint
+    ALTER TABLE device_subscriptions
+    ADD CONSTRAINT fk_device_subscriptions_sub
+    FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE;
+    RAISE NOTICE 'FK constraint fk_device_subscriptions_sub added successfully';
 END;
 $$;
 

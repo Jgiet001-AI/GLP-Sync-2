@@ -1,15 +1,14 @@
 """FastAPI router for dashboard analytics endpoints."""
 
-import asyncio
+import json as json_module
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .dependencies import get_db_pool
+from .dependencies import get_db_pool, verify_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +123,7 @@ async def get_dashboard(
     expiring_days: int = Query(default=90, ge=1, le=365, description="Days to look ahead for expiring items"),
     sync_history_limit: int = Query(default=10, ge=1, le=50, description="Number of sync history records to return"),
     pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Get dashboard analytics data.
 
@@ -377,6 +377,7 @@ async def search_devices(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(default=20, ge=1, le=100),
     pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Search devices using full-text search."""
     async with pool.acquire() as conn:
@@ -403,6 +404,7 @@ class SyncResponse(BaseModel):
     started_at: Optional[datetime] = None
     devices: Optional[dict] = None
     subscriptions: Optional[dict] = None
+    central: Optional[dict] = None
 
 
 class SyncStatusResponse(BaseModel):
@@ -413,35 +415,133 @@ class SyncStatusResponse(BaseModel):
     error: Optional[str] = None
 
 
-async def run_greenlake_sync(pool) -> dict:
-    """Run the GreenLake sync operation.
+async def _record_sync_history(
+    pool,
+    resource_type: str,
+    started_at: datetime,
+    result: dict,
+    status: str,
+    duration_ms: int,
+    error_message: Optional[str] = None,
+) -> None:
+    """Record sync history in database."""
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO sync_history (
+                    resource_type, started_at, completed_at, status,
+                    records_fetched, records_inserted, records_updated,
+                    records_errors, duration_ms, error_message
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                resource_type,
+                started_at,
+                datetime.now(timezone.utc),
+                status,
+                result.get("total", 0),
+                result.get("inserted", 0),
+                result.get("updated", 0),
+                result.get("errors", 0),
+                duration_ms,
+                error_message,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to record sync history: {e}")
 
-    Returns sync statistics for devices and subscriptions.
+
+async def run_greenlake_sync(pool) -> dict:
+    """Run the GreenLake and Aruba Central sync operation.
+
+    Returns sync statistics for devices, subscriptions, and Central devices.
     """
     global _sync_status
+    import time
 
     try:
-        from src.glp.api import GLPClient, TokenManager, DeviceSyncer, SubscriptionSyncer
+        from src.glp.api import (
+            ArubaCentralClient,
+            ArubaCentralSyncer,
+            ArubaTokenManager,
+            DeviceSyncer,
+            GLPClient,
+            SubscriptionSyncer,
+            TokenManager,
+        )
 
         _sync_status["progress"] = "Initializing..."
 
-        # Initialize token manager
-        token_manager = TokenManager()
+        results = {"devices": None, "subscriptions": None, "central": None}
 
-        results = {"devices": None, "subscriptions": None}
+        # GreenLake sync
+        try:
+            token_manager = TokenManager()
 
-        async with GLPClient(token_manager) as client:
-            # Sync devices
-            _sync_status["progress"] = "Syncing devices from GreenLake..."
-            device_syncer = DeviceSyncer(client=client, db_pool=pool)
-            results["devices"] = await device_syncer.sync()
-            logger.info(f"Device sync complete: {results['devices']}")
+            async with GLPClient(token_manager) as client:
+                # Sync devices
+                _sync_status["progress"] = "Syncing devices from GreenLake..."
+                device_started = datetime.now(timezone.utc)
+                device_start_time = time.time()
+                device_syncer = DeviceSyncer(client=client, db_pool=pool)
+                results["devices"] = await device_syncer.sync()
+                device_duration_ms = int((time.time() - device_start_time) * 1000)
+                logger.info(f"Device sync complete: {results['devices']}")
 
-            # Sync subscriptions
-            _sync_status["progress"] = "Syncing subscriptions from GreenLake..."
-            sub_syncer = SubscriptionSyncer(client=client, db_pool=pool)
-            results["subscriptions"] = await sub_syncer.sync()
-            logger.info(f"Subscription sync complete: {results['subscriptions']}")
+                # Record device sync history
+                await _record_sync_history(
+                    pool, "devices", device_started, results["devices"],
+                    "success", device_duration_ms
+                )
+
+                # Sync subscriptions
+                _sync_status["progress"] = "Syncing subscriptions from GreenLake..."
+                sub_started = datetime.now(timezone.utc)
+                sub_start_time = time.time()
+                sub_syncer = SubscriptionSyncer(client=client, db_pool=pool)
+                results["subscriptions"] = await sub_syncer.sync()
+                sub_duration_ms = int((time.time() - sub_start_time) * 1000)
+                logger.info(f"Subscription sync complete: {results['subscriptions']}")
+
+                # Record subscription sync history
+                await _record_sync_history(
+                    pool, "subscriptions", sub_started, results["subscriptions"],
+                    "success", sub_duration_ms
+                )
+        except ValueError as e:
+            logger.warning(f"GreenLake sync skipped (missing credentials): {e}")
+            results["devices"] = {"skipped": True, "reason": str(e)}
+            results["subscriptions"] = {"skipped": True, "reason": str(e)}
+
+        # Aruba Central sync (enriches existing GreenLake devices)
+        try:
+            _sync_status["progress"] = "Syncing devices from Aruba Central..."
+            central_started = datetime.now(timezone.utc)
+            central_start_time = time.time()
+            aruba_token_manager = ArubaTokenManager()
+
+            async with ArubaCentralClient(aruba_token_manager) as central_client:
+                central_syncer = ArubaCentralSyncer(client=central_client, db_pool=pool)
+                results["central"] = await central_syncer.sync()
+                central_duration_ms = int((time.time() - central_start_time) * 1000)
+                logger.info(f"Aruba Central sync complete: {results['central']}")
+
+                # Record central sync history
+                await _record_sync_history(
+                    pool, "central", central_started, results["central"],
+                    "success", central_duration_ms
+                )
+        except ValueError as e:
+            logger.warning(f"Aruba Central sync skipped (missing credentials): {e}")
+            results["central"] = {"skipped": True, "reason": str(e)}
+        except Exception as e:
+            central_duration_ms = int((time.time() - central_start_time) * 1000) if 'central_start_time' in dir() else 0
+            logger.warning(f"Aruba Central sync failed: {e}")
+            results["central"] = {"error": str(e)}
+            # Record failed sync
+            await _record_sync_history(
+                pool, "central", central_started if 'central_started' in dir() else datetime.now(timezone.utc),
+                {}, "failed", central_duration_ms, str(e)
+            )
 
         _sync_status["progress"] = "Sync complete!"
         return results
@@ -453,7 +553,10 @@ async def run_greenlake_sync(pool) -> dict:
 
 
 @router.post("/sync", response_model=SyncResponse)
-async def trigger_sync(pool=Depends(get_db_pool)):
+async def trigger_sync(
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
     """Trigger a full sync with GreenLake API.
 
     This fetches fresh device and subscription data from the
@@ -481,6 +584,7 @@ async def trigger_sync(pool=Depends(get_db_pool)):
             started_at=_sync_status["started_at"],
             devices=results["devices"],
             subscriptions=results["subscriptions"],
+            central=results.get("central"),
         )
 
     except ValueError as e:
@@ -500,7 +604,7 @@ async def trigger_sync(pool=Depends(get_db_pool)):
 
 
 @router.get("/sync/status", response_model=SyncStatusResponse)
-async def get_sync_status():
+async def get_sync_status(_auth: bool = Depends(verify_api_key)):
     """Get the current sync status."""
     return SyncStatusResponse(
         is_running=_sync_status["is_running"],
@@ -529,6 +633,35 @@ class DeviceListItem(BaseModel):
     subscription_type: Optional[str] = None
     subscription_end: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # GreenLake tags
+    tags: dict[str, str] = {}
+
+    # Aruba Central fields - Core
+    central_status: Optional[str] = None
+    central_device_name: Optional[str] = None
+    central_device_type: Optional[str] = None
+    # Aruba Central fields - Hardware
+    central_model: Optional[str] = None
+    central_part_number: Optional[str] = None
+    # Aruba Central fields - Connectivity
+    central_ipv4: Optional[str] = None
+    central_ipv6: Optional[str] = None
+    central_software_version: Optional[str] = None
+    central_uptime_millis: Optional[int] = None
+    central_last_seen_at: Optional[datetime] = None
+    # Aruba Central fields - Deployment
+    central_deployment: Optional[str] = None
+    central_device_role: Optional[str] = None
+    central_device_function: Optional[str] = None
+    # Aruba Central fields - Location
+    central_site_name: Optional[str] = None
+    central_cluster_name: Optional[str] = None
+    # Aruba Central fields - Config
+    central_config_status: Optional[str] = None
+    central_config_last_modified_at: Optional[datetime] = None
+    # Platform presence flags
+    in_central: bool = False
+    in_greenlake: bool = True
 
 
 class DeviceListResponse(BaseModel):
@@ -551,6 +684,7 @@ async def list_devices(
     sort_by: str = Query(default="updated_at", description="Sort field"),
     sort_order: str = Query(default="desc", description="Sort order (asc/desc)"),
     pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Get paginated list of devices with optional filtering and search."""
     async with pool.acquire() as conn:
@@ -596,7 +730,7 @@ async def list_devices(
         offset = (page - 1) * page_size
         total_pages = max(1, (total + page_size - 1) // page_size)
 
-        # Fetch items with subscription info
+        # Fetch items with subscription info and Central data
         query_sql = f"""
             SELECT
                 d.id::text,
@@ -612,7 +746,35 @@ async def list_devices(
                 d.updated_at,
                 s.key as subscription_key,
                 s.subscription_type,
-                s.end_time as subscription_end
+                s.end_time as subscription_end,
+                -- GreenLake tags
+                d.raw_data->'tags' as tags,
+                -- Aruba Central fields - Core
+                d.central_status,
+                d.central_device_name,
+                d.central_device_type,
+                -- Aruba Central fields - Hardware
+                d.central_model,
+                d.central_part_number,
+                -- Aruba Central fields - Connectivity
+                d.central_ipv4,
+                d.central_ipv6,
+                d.central_software_version,
+                d.central_uptime_millis,
+                d.central_last_seen_at,
+                -- Aruba Central fields - Deployment
+                d.central_deployment,
+                d.central_device_role,
+                d.central_device_function,
+                -- Aruba Central fields - Location
+                d.central_site_name,
+                d.central_cluster_name,
+                -- Aruba Central fields - Config
+                d.central_config_status,
+                d.central_config_last_modified_at,
+                -- Platform presence flags
+                COALESCE(d.in_central, FALSE) as in_central,
+                COALESCE(d.in_greenlake, TRUE) as in_greenlake
             FROM devices d
             LEFT JOIN device_subscriptions ds ON d.id = ds.device_id
             LEFT JOIN subscriptions s ON ds.subscription_id = s.id
@@ -640,6 +802,34 @@ async def list_devices(
                 subscription_type=row['subscription_type'],
                 subscription_end=row['subscription_end'],
                 updated_at=row['updated_at'],
+                # GreenLake tags (parse from JSON string if needed, default to empty dict)
+                tags=(row['tags'] if isinstance(row['tags'], dict) else (json_module.loads(row['tags']) if row['tags'] else {})) or {},
+                # Aruba Central fields - Core
+                central_status=row['central_status'],
+                central_device_name=row['central_device_name'],
+                central_device_type=row['central_device_type'],
+                # Aruba Central fields - Hardware
+                central_model=row['central_model'],
+                central_part_number=row['central_part_number'],
+                # Aruba Central fields - Connectivity
+                central_ipv4=row['central_ipv4'],
+                central_ipv6=row['central_ipv6'],
+                central_software_version=row['central_software_version'],
+                central_uptime_millis=row['central_uptime_millis'],
+                central_last_seen_at=row['central_last_seen_at'],
+                # Aruba Central fields - Deployment
+                central_deployment=row['central_deployment'],
+                central_device_role=row['central_device_role'],
+                central_device_function=row['central_device_function'],
+                # Aruba Central fields - Location
+                central_site_name=row['central_site_name'],
+                central_cluster_name=row['central_cluster_name'],
+                # Aruba Central fields - Config
+                central_config_status=row['central_config_status'],
+                central_config_last_modified_at=row['central_config_last_modified_at'],
+                # Platform presence flags
+                in_central=row['in_central'],
+                in_greenlake=row['in_greenlake'],
             )
             for row in rows
         ]
@@ -690,6 +880,7 @@ async def list_subscriptions(
     sort_by: str = Query(default="end_time", description="Sort field"),
     sort_order: str = Query(default="asc", description="Sort order (asc/desc)"),
     pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Get paginated list of subscriptions with device counts."""
     async with pool.acquire() as conn:
@@ -801,7 +992,10 @@ class FilterOptions(BaseModel):
 
 
 @router.get("/filters", response_model=FilterOptions)
-async def get_filter_options(pool=Depends(get_db_pool)):
+async def get_filter_options(
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
     """Get available filter options for devices and subscriptions."""
     async with pool.acquire() as conn:
         device_types = await conn.fetch("""

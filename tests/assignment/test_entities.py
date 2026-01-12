@@ -45,6 +45,7 @@ class TestDeviceAssignment:
             device_id=uuid4(),
             current_subscription_id=uuid4(),
             current_application_id=uuid4(),
+            current_tags={"env": "production"},  # Tags required for FULLY_ASSIGNED
         )
         assert assignment.status == AssignmentStatus.FULLY_ASSIGNED
         assert assignment.needs_creation is False

@@ -1,0 +1,196 @@
+# =============================================================================
+# Docker Scout Policy Configuration
+# HPE GreenLake Sync Project
+# =============================================================================
+# This policy file enforces the 7 Docker Scout policy scores:
+# 1. No high-profile vulnerabilities
+# 2. No fixable critical/high vulnerabilities
+# 3. Only approved base images
+# 4. Supply chain attestations required
+# 5. No outdated base images
+# 6. No AGPL v3 licenses
+# 7. Default non-root user
+# =============================================================================
+
+version: "1.0"
+name: "glp-sync-security-policy"
+description: "Security policy for HPE GreenLake Sync containers"
+
+# -----------------------------------------------------------------------------
+# Policy 1 & 2: Vulnerability Policies
+# -----------------------------------------------------------------------------
+vulnerabilities:
+  # Block any critical vulnerabilities
+  critical:
+    action: deny
+    message: "Critical vulnerabilities are not allowed"
+
+  # Block high vulnerabilities that have fixes available
+  high:
+    action: deny
+    only_fixed: true
+    message: "High vulnerabilities with available fixes must be remediated"
+
+  # Warn on medium vulnerabilities
+  medium:
+    action: warn
+    message: "Medium vulnerabilities detected - consider remediation"
+
+  # Allow low vulnerabilities with warning
+  low:
+    action: allow
+
+  # High-profile CVEs - explicit blocklist
+  high_profile:
+    action: deny
+    message: "High-profile vulnerabilities are blocked"
+
+# -----------------------------------------------------------------------------
+# Policy 3: Approved Base Images (Allowlist)
+# -----------------------------------------------------------------------------
+base_images:
+  action: deny
+  message: "Only approved base images are allowed"
+  allowed:
+    # Python official images (for application)
+    - pattern: "docker.io/library/python:3.11-slim*"
+      pinned_digests:
+        - "sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36"
+
+    - pattern: "docker.io/library/python:3.12-slim*"
+      comment: "Allow Python 3.12 for future upgrades"
+
+    # PostgreSQL official images (for database)
+    - pattern: "docker.io/library/postgres:16-alpine*"
+      pinned_digests:
+        - "sha256:8d32048ee4d8d41201412687a485bf2da8b11aab309369cca3fbdf30f8ceab76"
+
+    - pattern: "docker.io/library/postgres:17-alpine*"
+      comment: "Allow PostgreSQL 17 for future upgrades"
+
+    # UV package manager (build dependency)
+    - pattern: "ghcr.io/astral-sh/uv:*"
+      comment: "Astral UV for Python dependency management"
+
+    # Alpine base (used by postgres)
+    - pattern: "docker.io/library/alpine:3*"
+      comment: "Alpine Linux base"
+
+    # Debian base (used by python-slim)
+    - pattern: "docker.io/library/debian:*-slim"
+      comment: "Debian slim base"
+
+# -----------------------------------------------------------------------------
+# Policy 4: Supply Chain Attestations
+# -----------------------------------------------------------------------------
+attestations:
+  provenance:
+    action: deny
+    message: "Images must have SLSA provenance attestation"
+    required: true
+    min_level: "slsa-level-2"
+
+  sbom:
+    action: deny
+    message: "Images must have SBOM attestation"
+    required: true
+    formats:
+      - "spdx-json"
+      - "cyclonedx-json"
+
+# -----------------------------------------------------------------------------
+# Policy 5: No Outdated Base Images
+# -----------------------------------------------------------------------------
+freshness:
+  action: warn
+  max_age_days: 90
+  message: "Base image is older than 90 days - consider updating"
+
+  # Check for available updates
+  check_updates: true
+  update_action: warn
+
+# -----------------------------------------------------------------------------
+# Policy 6: License Restrictions
+# -----------------------------------------------------------------------------
+licenses:
+  # Deny AGPL licenses
+  denied:
+    - "AGPL-3.0-only"
+    - "AGPL-3.0-or-later"
+    - "AGPL-3.0"
+    - "AGPL-1.0"
+    - "AGPL-1.0-only"
+    - "AGPL-1.0-or-later"
+
+  action: deny
+  message: "AGPL licenses are not permitted in this project"
+
+  # Allowed licenses (permissive)
+  allowed:
+    - "MIT"
+    - "Apache-2.0"
+    - "BSD-2-Clause"
+    - "BSD-3-Clause"
+    - "ISC"
+    - "MPL-2.0"
+    - "PostgreSQL"
+    - "Python-2.0"
+    - "PSF-2.0"
+    - "Unlicense"
+    - "CC0-1.0"
+    - "0BSD"
+
+# -----------------------------------------------------------------------------
+# Policy 7: Non-Root User Requirement
+# -----------------------------------------------------------------------------
+runtime:
+  non_root_user:
+    action: deny
+    message: "Containers must run as non-root user"
+    required: true
+
+    # Allowed UIDs (non-root)
+    allowed_uids:
+      min: 1000
+      max: 65534
+
+    # Exception for postgres (runs as uid 70)
+    exceptions:
+      - image_pattern: "postgres:*"
+        allowed_uids: [70]
+        reason: "PostgreSQL requires specific postgres user (uid 70)"
+
+# -----------------------------------------------------------------------------
+# Exception Handling
+# -----------------------------------------------------------------------------
+exceptions:
+  # Temporary exception for zlib CVE in postgres:16-alpine
+  - id: "CVE-2026-22184-exception"
+    type: "vulnerability"
+    cve: "CVE-2026-22184"
+    images:
+      - "postgres:16-alpine"
+    expires: "2026-04-01"
+    reason: "No fix available - monitoring for upstream patch"
+    compensating_controls:
+      - "Network isolation for database container"
+      - "Regular security monitoring"
+    approved_by: "security-team"
+    ticket: "SEC-2026-001"
+
+# -----------------------------------------------------------------------------
+# Reporting
+# -----------------------------------------------------------------------------
+reporting:
+  format: "json"
+  output: "scout-policy-report.json"
+
+  # Include details in report
+  include:
+    - vulnerabilities
+    - licenses
+    - base_images
+    - attestations
+    - freshness
+    - runtime

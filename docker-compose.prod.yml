@@ -1,0 +1,202 @@
+# =============================================================================
+# HPE GreenLake Sync - Production Docker Compose
+# =============================================================================
+# Uses pre-built images from Docker Hub instead of local builds.
+#
+# Usage:
+#   # Set your Docker Hub username
+#   export DOCKERHUB_USERNAME=yourorg
+#
+#   # Start the stack
+#   docker compose -f docker-compose.prod.yml up -d
+#
+#   # View logs
+#   docker compose -f docker-compose.prod.yml logs -f
+#
+#   # Stop
+#   docker compose -f docker-compose.prod.yml down
+# =============================================================================
+
+services:
+  # --------------------------------------------------------------------------
+  # PostgreSQL Database with pgvector
+  # --------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: glp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-glp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-greenlake}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-devices.sql:ro
+      - ./db/subscriptions_schema.sql:/docker-entrypoint-initdb.d/02-subscriptions.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"  # Bind to localhost only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-glp} -d ${POSTGRES_DB:-greenlake}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # Redis (WebSocket Ticket Auth)
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: glp-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # GLP Sync Scheduler
+  # --------------------------------------------------------------------------
+  scheduler:
+    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    container_name: glp-scheduler
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID:?GLP_CLIENT_ID is required}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET:?GLP_CLIENT_SECRET is required}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL:?GLP_TOKEN_URL is required}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-greenlake}
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-60}
+      SYNC_DEVICES: ${SYNC_DEVICES:-true}
+      SYNC_SUBSCRIPTIONS: ${SYNC_SUBSCRIPTIONS:-true}
+      SYNC_ON_STARTUP: ${SYNC_ON_STARTUP:-true}
+      HEALTH_CHECK_PORT: 8080
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # FastAPI Server (Dashboard & Assignment APIs)
+  # --------------------------------------------------------------------------
+  api-server:
+    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    container_name: glp-api-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID:?GLP_CLIENT_ID is required}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET:?GLP_CLIENT_SECRET is required}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL:?GLP_TOKEN_URL is required}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-greenlake}
+      API_KEY: ${API_KEY:?API_KEY is required for production}
+      DISABLE_AUTH: "false"
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://your-domain.com}
+    command: ["python", "-m", "uvicorn", "src.glp.assignment.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # MCP Server (FastMCP)
+  # --------------------------------------------------------------------------
+  mcp-server:
+    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    container_name: glp-mcp-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-greenlake}
+      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
+      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-10}
+    command: ["python", "server.py", "--transport", "http", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # Frontend (React + Nginx)
+  # --------------------------------------------------------------------------
+  frontend:
+    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-frontend:${IMAGE_TAG:-latest}
+    container_name: glp-frontend
+    restart: unless-stopped
+    depends_on:
+      - api-server
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-80}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    networks:
+      - glp-internal
+
+networks:
+  glp-internal:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# =============================================================================
+# Required Environment Variables (.env)
+# =============================================================================
+# POSTGRES_PASSWORD=your_secure_password
+# GLP_CLIENT_ID=your_client_id
+# GLP_CLIENT_SECRET=your_client_secret
+# GLP_TOKEN_URL=https://sso.common.cloud.hpe.com/as/token.oauth2
+# API_KEY=your_api_key
+# DOCKERHUB_USERNAME=yourorg
+#
+# Optional:
+# IMAGE_TAG=v1.0.0
+# CORS_ORIGINS=https://your-domain.com
+# JWT_SECRET=your_jwt_secret
+# ANTHROPIC_API_KEY=your_key
+# =============================================================================

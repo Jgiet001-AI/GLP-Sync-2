@@ -222,11 +222,13 @@ class DeviceActionsUseCase:
         results: list[OperationResult] = []
 
         # Process in batches of MAX_BATCH_SIZE
+        # IMPORTANT: Filter BOTH lists consistently to ensure alignment
+        valid_devices = [(d.device_id, d.serial_number) for d in devices if d.device_id]
         device_id_batches = list(
-            chunk([d.device_id for d in devices if d.device_id], self.MAX_BATCH_SIZE)
+            chunk([d[0] for d in valid_devices], self.MAX_BATCH_SIZE)
         )
         serial_batches = list(
-            chunk([d.serial_number for d in devices], self.MAX_BATCH_SIZE)
+            chunk([d[1] for d in valid_devices], self.MAX_BATCH_SIZE)
         )
 
         for i, (id_batch, serial_batch) in enumerate(

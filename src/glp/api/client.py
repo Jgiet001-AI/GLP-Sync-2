@@ -295,6 +295,7 @@ class GLPClient:
                         method=method,
                         endpoint=endpoint,
                         response_body=error_text,
+                        headers=dict(response.headers),
                     )
 
                 # Success - parse JSON response
@@ -338,14 +339,123 @@ class GLPClient:
                 result.append((key, str(value)))
         return result
 
+    @staticmethod
+    def _sanitize_error_body(response_body: str, max_length: int = 500) -> str:
+        """Sanitize error response body to prevent sensitive data leakage.
+
+        Args:
+            response_body: Raw response body text
+            max_length: Maximum length of sanitized output
+
+        Returns:
+            Sanitized error message safe for logging/exceptions
+        """
+        import json
+        import re
+
+        if not response_body:
+            return ""
+
+        # Sensitive field patterns to redact
+        sensitive_patterns = [
+            r'"(access_token|token|password|secret|key|authorization|bearer|api_key|apikey)":\s*"[^"]*"',
+            r'"(credit_card|ssn|social_security)":\s*"[^"]*"',
+        ]
+
+        sanitized = response_body
+
+        # Redact sensitive fields in JSON
+        for pattern in sensitive_patterns:
+            sanitized = re.sub(
+                pattern,
+                lambda m: f'"{m.group(1)}":"[REDACTED]"',
+                sanitized,
+                flags=re.IGNORECASE,
+            )
+
+        # Try to parse as JSON and extract just the error message
+        try:
+            data = json.loads(sanitized)
+            if isinstance(data, dict):
+                # Extract common error message fields
+                error_msg = (
+                    data.get("error", {}).get("message")
+                    or data.get("message")
+                    or data.get("error")
+                    or data.get("detail")
+                )
+                if error_msg and isinstance(error_msg, str):
+                    sanitized = error_msg
+                else:
+                    # Re-serialize without indentation
+                    sanitized = json.dumps(data, separators=(",", ":"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Truncate if too long
+        if len(sanitized) > max_length:
+            sanitized = sanitized[:max_length] + "... [truncated]"
+
+        return sanitized
+
+    @staticmethod
+    def _parse_retry_after(header_value: str) -> int:
+        """Parse Retry-After header value (seconds or HTTP-date).
+
+        The Retry-After header can be either:
+        - Integer seconds: "60"
+        - HTTP-date: "Sun, 06 Nov 1994 08:49:37 GMT"
+
+        Args:
+            header_value: The Retry-After header value
+
+        Returns:
+            Number of seconds to wait (minimum 1, maximum 3600)
+        """
+        from email.utils import parsedate_to_datetime
+        from datetime import datetime, timezone
+
+        # Try parsing as integer seconds first
+        try:
+            seconds = int(header_value)
+            return max(1, min(seconds, 3600))  # Clamp between 1-3600
+        except ValueError:
+            pass
+
+        # Try parsing as HTTP-date (RFC 7231 format)
+        try:
+            retry_at = parsedate_to_datetime(header_value)
+            now = datetime.now(timezone.utc)
+            delta = (retry_at - now).total_seconds()
+            # Return at least 1 second, at most 1 hour
+            return max(1, min(int(delta), 3600))
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback to default
+        logger.warning(f"Could not parse Retry-After header: {header_value}, using default 60s")
+        return 60
+
     def _create_api_error(
         self,
         status: int,
         method: str,
         endpoint: str,
         response_body: str,
+        headers: dict[str, str] | None = None,
     ) -> APIError:
-        """Create appropriate APIError subclass based on status code."""
+        """Create appropriate APIError subclass based on status code.
+
+        Args:
+            status: HTTP status code
+            method: HTTP method (GET, POST, etc.)
+            endpoint: API endpoint path
+            response_body: Response body text
+            headers: Response headers (used for Retry-After parsing)
+        """
+        # Sanitize error body to prevent sensitive data leakage
+        sanitized_body = self._sanitize_error_body(response_body)
+
         if status == 401:
             return TokenExpiredError(
                 "Access token expired or invalid",
@@ -357,17 +467,21 @@ class GLPClient:
                 resource_type="Resource",
                 resource_id=endpoint,
                 endpoint=endpoint,
-                response_body=response_body,
+                response_body=sanitized_body,
             )
 
         if status == 429:
-            # Try to extract Retry-After header value from response
-            retry_after = 60  # Default
+            # Parse Retry-After header (seconds or HTTP-date format)
+            retry_after = 60  # Default fallback
+            if headers:
+                retry_after_header = headers.get("Retry-After") or headers.get("retry-after")
+                if retry_after_header:
+                    retry_after = self._parse_retry_after(retry_after_header)
             return RateLimitError(
                 f"Rate limit exceeded for {endpoint}",
                 retry_after=retry_after,
                 endpoint=endpoint,
-                response_body=response_body,
+                response_body=sanitized_body,
             )
 
         if status == 400 or status == 422:
@@ -375,7 +489,7 @@ class GLPClient:
                 f"Validation failed for {method} {endpoint}",
                 status_code=status,
                 endpoint=endpoint,
-                response_body=response_body,
+                response_body=sanitized_body,
             )
 
         if status >= 500:
@@ -383,7 +497,7 @@ class GLPClient:
                 f"Server error ({status}) for {method} {endpoint}",
                 status_code=status,
                 endpoint=endpoint,
-                response_body=response_body,
+                response_body=sanitized_body,
             )
 
         # Generic API error for other status codes
@@ -392,7 +506,7 @@ class GLPClient:
             status_code=status,
             endpoint=endpoint,
             method=method,
-            response_body=response_body,
+            response_body=sanitized_body,
         )
 
     async def _request_with_retry(
@@ -435,7 +549,7 @@ class GLPClient:
         # Check circuit breaker first
         if self._circuit_breaker and self._circuit_breaker.is_open:
             # Check if we should attempt (timeout may have passed)
-            if not self._circuit_breaker._should_attempt():
+            if not self._circuit_breaker.should_allow_request():
                 raise CircuitOpenError(
                     "Circuit breaker is open for GLP API",
                     failure_count=self._circuit_breaker.failure_count,
@@ -450,9 +564,9 @@ class GLPClient:
                     method, endpoint, params, json_body, extra_headers, accept_202
                 )
 
-                # Success - reset circuit breaker
+                # Success - record with circuit breaker (handles state transitions)
                 if self._circuit_breaker:
-                    await self._circuit_breaker._on_success()
+                    await self._circuit_breaker.record_success()
 
                 return result
 
@@ -486,7 +600,7 @@ class GLPClient:
 
                 # Update circuit breaker on final failure
                 if self._circuit_breaker:
-                    await self._circuit_breaker._on_failure(e)
+                    await self._circuit_breaker.record_failure(e)
                 raise
 
             except (NetworkError, ConnectionError, TimeoutError) as e:
@@ -503,7 +617,7 @@ class GLPClient:
 
                 # Update circuit breaker on final failure
                 if self._circuit_breaker:
-                    await self._circuit_breaker._on_failure(e)
+                    await self._circuit_breaker.record_failure(e)
                 raise
 
             except (NotFoundError, ValidationError):
@@ -523,12 +637,12 @@ class GLPClient:
 
                 # Update circuit breaker and re-raise
                 if self._circuit_breaker:
-                    await self._circuit_breaker._on_failure(e)
+                    await self._circuit_breaker.record_failure(e)
                 raise
 
         # Exhausted retries
         if self._circuit_breaker and last_error:
-            await self._circuit_breaker._on_failure(last_error)
+            await self._circuit_breaker.record_failure(last_error)
 
         if last_error:
             raise last_error

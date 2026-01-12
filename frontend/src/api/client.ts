@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { AxiosError } from 'axios'
 import type {
   AddDevicesRequest,
   AddDevicesResponse,
@@ -12,20 +12,58 @@ import type {
   ReportResponse,
   SubscriptionListResponse,
 } from '../types'
+import { ApiError, ApiErrorResponse } from '../types'
+
+// Get API key from environment (Vite uses VITE_ prefix)
+const API_KEY = import.meta.env.VITE_API_KEY || ''
+
+// Create base headers with optional API key
+const createHeaders = () => {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (API_KEY) {
+    headers['X-API-Key'] = API_KEY
+  }
+  return headers
+}
 
 const api = axios.create({
   baseURL: '/api/assignment',
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: createHeaders(),
 })
 
 const dashboardApi = axios.create({
   baseURL: '/api/dashboard',
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: createHeaders(),
 })
+
+// Error interceptor factory - converts axios errors to structured ApiError
+const createErrorInterceptor = () => {
+  return (error: AxiosError<ApiErrorResponse>) => {
+    if (error.response) {
+      // Server responded with an error status
+      const data = error.response.data || { detail: 'An unknown error occurred' }
+      throw new ApiError(data, error.response.status)
+    } else if (error.request) {
+      // Request was made but no response received (network error)
+      throw new ApiError(
+        { detail: 'Network error: Unable to reach server' },
+        0
+      )
+    } else {
+      // Error in request setup
+      throw new ApiError(
+        { detail: error.message || 'Request configuration error' },
+        0
+      )
+    }
+  }
+}
+
+// Apply error interceptors to all API instances
+api.interceptors.response.use((response) => response, createErrorInterceptor())
+dashboardApi.interceptors.response.use((response) => response, createErrorInterceptor())
 
 export const assignmentApi = {
   /**
@@ -137,6 +175,207 @@ export interface SyncResponse {
     fetched?: number
     synced_at?: string
   }
+}
+
+// Clients API
+const clientsApi = axios.create({
+  baseURL: '/api/clients',
+  headers: createHeaders(),
+})
+
+// Apply error interceptor to clients API
+clientsApi.interceptors.response.use((response) => response, createErrorInterceptor())
+
+// Types for Clients API
+export interface ClientItem {
+  id: number
+  site_id: string
+  site_name?: string
+  mac: string
+  name?: string
+  health?: string
+  status?: string
+  status_reason?: string
+  type?: string
+  ipv4?: string
+  ipv6?: string
+  network?: string  // WiFi network name (SSID)
+  vlan_id?: string
+  port?: string
+  role?: string
+  connected_device_serial?: string
+  connected_to?: string
+  connected_since?: string
+  last_seen_at?: string
+  tunnel?: string
+  tunnel_id?: number
+  key_management?: string
+  authentication?: string
+  updated_at?: string
+}
+
+export interface ClientListResponse {
+  items: ClientItem[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
+export interface SiteStats {
+  site_id: string
+  site_name?: string
+  client_count: number
+  connected_count: number
+  wired_count: number
+  wireless_count: number
+  good_health_count: number
+  fair_health_count: number
+  poor_health_count: number
+  device_count: number
+  last_synced_at?: string
+}
+
+export interface SiteListResponse {
+  items: SiteStats[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
+}
+
+export interface ClientsSummary {
+  total_clients: number
+  connected: number
+  disconnected: number
+  failed: number
+  blocked: number
+  wired: number
+  wireless: number
+  health_good: number
+  health_fair: number
+  health_poor: number
+  health_unknown: number
+  total_sites: number
+  last_sync_at?: string
+}
+
+export interface SiteClientsParams {
+  page?: number
+  page_size?: number
+  status?: string
+  health?: string
+  type?: string
+  search?: string
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}
+
+export interface FilteredClientsParams {
+  page?: number
+  page_size?: number
+  type?: string  // Comma-delimited for multiple values
+  status?: string  // Comma-delimited for multiple values
+  health?: string  // Comma-delimited for multiple values
+  site_id?: string  // Comma-delimited for multiple values
+  network?: string  // Comma-delimited for multiple values
+  vlan?: string  // Comma-delimited for multiple values
+  role?: string  // Comma-delimited for multiple values
+  tunnel?: string  // Comma-delimited for multiple values
+  auth?: string  // Comma-delimited for multiple values
+  key_mgmt?: string  // Comma-delimited for multiple values
+  connected_to?: string  // Comma-delimited for multiple values
+  subnet?: string  // IP subnet prefix
+  search?: string
+  sort_by?: string
+  sort_order?: 'asc' | 'desc'
+}
+
+export interface ClientFilterOptions {
+  sites: Array<{ id: string; name: string }>
+  networks: string[]
+  vlans: string[]
+  roles: string[]
+  tunnels: string[]
+  authentications: string[]
+  key_managements: string[]
+  connected_devices: string[]
+  subnets: string[]
+}
+
+export const clientsApiClient = {
+  /**
+   * Get clients summary statistics
+   */
+  async getSummary(): Promise<ClientsSummary> {
+    const response = await clientsApi.get<ClientsSummary>('/summary')
+    return response.data
+  },
+
+  /**
+   * Get available filter options (distinct values for each filter field)
+   */
+  async getFilterOptions(): Promise<ClientFilterOptions> {
+    const response = await clientsApi.get<ClientFilterOptions>('/filter-options')
+    return response.data
+  },
+
+  /**
+   * Get filtered clients across all sites
+   */
+  async getFilteredClients(params: FilteredClientsParams = {}): Promise<ClientListResponse> {
+    const response = await clientsApi.get<ClientListResponse>('/filtered', { params })
+    return response.data
+  },
+
+  /**
+   * Get list of sites with statistics
+   */
+  async getSites(params: {
+    page?: number
+    page_size?: number
+    search?: string
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  } = {}): Promise<SiteListResponse> {
+    const response = await clientsApi.get<SiteListResponse>('/sites', { params })
+    return response.data
+  },
+
+  /**
+   * Get clients for a specific site
+   */
+  async getSiteClients(siteId: string, params: SiteClientsParams = {}): Promise<ClientListResponse> {
+    const response = await clientsApi.get<ClientListResponse>(`/sites/${encodeURIComponent(siteId)}`, { params })
+    return response.data
+  },
+
+  /**
+   * Search clients across all sites
+   */
+  async searchClients(query: string, params: {
+    page?: number
+    page_size?: number
+  } = {}): Promise<ClientListResponse> {
+    const response = await clientsApi.get<ClientListResponse>('/search', {
+      params: { q: query, ...params },
+    })
+    return response.data
+  },
+
+  /**
+   * Trigger clients and firmware sync
+   */
+  async triggerSync(): Promise<{
+    status: string
+    message: string
+    started_at?: string
+    clients?: Record<string, unknown>
+    firmware?: Record<string, unknown>
+  }> {
+    const response = await clientsApi.post('/sync')
+    return response.data
+  },
 }
 
 export const dashboardApiClient = {

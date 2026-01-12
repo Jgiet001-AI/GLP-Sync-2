@@ -10,9 +10,38 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.clients_router import router as clients_router
 from .api.dashboard_router import router as dashboard_router
-from .api.dependencies import close_db_pool, init_db_pool
+from .api.dependencies import (
+    close_db_pool,
+    close_glp_client,
+    init_db_pool,
+    init_glp_client,
+)
 from .api.router import router
+
+# Import agent router and components (optional - only if agent module exists)
+try:
+    from ..agent import (
+        AgentConfig,
+        AgentOrchestrator,
+        AnthropicProvider,
+        OpenAIProvider,
+        ToolRegistry,
+    )
+    from ..agent.api import create_agent_dependencies
+    from ..agent.api import router as agent_router
+    from ..agent.providers.base import LLMProviderConfig
+    from ..agent.security import TicketAuth
+    AGENT_AVAILABLE = True
+except ImportError:
+    AGENT_AVAILABLE = False
+    agent_router = None
+    create_agent_dependencies = None
+    TicketAuth = None
+
+# Redis client (for WebSocket ticket auth)
+_redis_client = None
 
 # Configure logging
 logging.basicConfig(
@@ -22,12 +51,91 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _init_agent_orchestrator(redis_client=None) -> None:
+    """Initialize the agent orchestrator with LLM provider and tools.
+
+    Args:
+        redis_client: Optional Redis client for WebSocket ticket auth
+    """
+    if not AGENT_AVAILABLE or not create_agent_dependencies:
+        logger.info("Agent module not available, skipping orchestrator init")
+        return
+
+    # Check for API keys
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    if not anthropic_key and not openai_key:
+        logger.warning("No LLM API keys configured (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+        return
+
+    llm_provider = None
+
+    # Try Anthropic first
+    if anthropic_key:
+        try:
+            config = LLMProviderConfig(
+                api_key=anthropic_key,
+                model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+            )
+            llm_provider = AnthropicProvider(config)
+            logger.info(f"Using Anthropic provider with model: {config.model}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Anthropic provider: {e}")
+
+    # Fall back to OpenAI if Anthropic failed
+    if not llm_provider and openai_key:
+        try:
+            config = LLMProviderConfig(
+                api_key=openai_key,
+                model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            )
+            llm_provider = OpenAIProvider(config)
+            logger.info(f"Using OpenAI provider with model: {config.model}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize OpenAI provider: {e}")
+
+    if not llm_provider:
+        logger.warning("No LLM provider could be initialized - chatbot will be unavailable")
+        return
+
+    try:
+        # Create tool registry (empty for now - can add MCP/WriteExecutor later)
+        tool_registry = ToolRegistry()
+
+        # Create orchestrator
+        orchestrator = AgentOrchestrator(
+            llm_provider=llm_provider,
+            tool_registry=tool_registry,
+            config=AgentConfig(),
+        )
+
+        # Initialize ticket auth if Redis is available
+        ticket_auth = None
+        if redis_client and TicketAuth:
+            ticket_auth = TicketAuth(redis_client)
+            logger.info("WebSocket ticket auth initialized with Redis")
+        else:
+            logger.warning("Redis not available - WebSocket ticket auth disabled")
+
+        # Register with router
+        create_agent_dependencies(orchestrator, ticket_auth)
+        logger.info("Agent orchestrator initialized successfully")
+
+    except Exception as e:
+        logger.error(f"Failed to initialize agent orchestrator: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager.
 
-    Handles startup and shutdown events.
+    Handles startup and shutdown events:
+    - Startup: Initialize database pool, GLP client, and Redis
+    - Shutdown: Close Redis, GLP client, and database pool
     """
+    global _redis_client
+
     # Startup
     logger.info("Starting Device Assignment API...")
 
@@ -38,10 +146,45 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to initialize database pool: {e}")
         raise
 
+    try:
+        await init_glp_client()
+        logger.info("GLP client initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize GLP client: {e}")
+        # Don't fail startup - some endpoints work without GLP client
+        # (e.g., upload, get_options from DB)
+
+    # Initialize Redis for WebSocket ticket auth
+    redis_url = os.getenv("REDIS_URL")
+    if redis_url:
+        try:
+            import redis.asyncio as redis
+            _redis_client = redis.from_url(redis_url, decode_responses=True)
+            # Test connection
+            await _redis_client.ping()
+            logger.info(f"Redis connected: {redis_url}")
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis: {e}")
+            _redis_client = None
+    else:
+        logger.warning("REDIS_URL not configured - WebSocket ticket auth will be unavailable")
+
+    # Initialize agent orchestrator with Redis
+    _init_agent_orchestrator(_redis_client)
+
     yield
 
-    # Shutdown
+    # Shutdown (reverse order of initialization)
     logger.info("Shutting down Device Assignment API...")
+
+    # Close Redis
+    if _redis_client:
+        await _redis_client.aclose()
+        logger.info("Redis connection closed")
+
+    await close_glp_client()
+    logger.info("GLP client closed")
+
     await close_db_pool()
     logger.info("Database pool closed")
 
@@ -85,6 +228,12 @@ app.add_middleware(
 # Include routers
 app.include_router(router)
 app.include_router(dashboard_router)
+app.include_router(clients_router)
+
+# Include agent router if available
+if AGENT_AVAILABLE and agent_router:
+    app.include_router(agent_router)
+    logger.info("Agent chatbot router mounted at /api/agent")
 
 
 @app.get("/")

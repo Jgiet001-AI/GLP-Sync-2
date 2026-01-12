@@ -548,11 +548,13 @@ class DeviceManager:
             OperationStatus with current status and any results/errors
         """
         # The operation_url is typically a full URL, but we need just the path
-        # for our client
+        # for our client. Important: preserve query string for async polling.
         if operation_url.startswith("http"):
-            # Extract path from full URL
+            # Extract path and query from full URL
             parsed = urlparse(operation_url)
             endpoint = parsed.path
+            if parsed.query:
+                endpoint = f"{endpoint}?{parsed.query}"
         else:
             endpoint = operation_url
 

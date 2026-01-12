@@ -10,6 +10,27 @@ import type {
   ReportResponse,
   WorkflowStep,
 } from '../types'
+import { ApiError } from '../types'
+
+// Helper to format error messages from ApiError
+function formatError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.isValidationError && error.errors?.length) {
+      return `Validation failed: ${error.errors.length} error(s)`
+    }
+    if (error.isAuthError) {
+      return 'Authentication required. Please refresh and try again.'
+    }
+    if (error.isServerError) {
+      return `Server error (${error.status}): ${error.detail}`
+    }
+    return `${error.status ? `Error ${error.status}: ` : ''}${error.detail}`
+  }
+  if (error instanceof Error) {
+    return error.message
+  }
+  return 'An unknown error occurred'
+}
 
 export function useAssignment() {
   const queryClient = useQueryClient()
@@ -34,8 +55,8 @@ export function useAssignment() {
         toast.error(`Validation failed: ${data.errors.length} errors`)
       }
     },
-    onError: (error: Error) => {
-      toast.error(`Upload failed: ${error.message}`)
+    onError: (error: unknown) => {
+      toast.error(`Upload failed: ${formatError(error)}`)
     },
   })
 
@@ -59,8 +80,8 @@ export function useAssignment() {
         toast.error(`Some operations failed: ${data.errors} errors`)
       }
     },
-    onError: (error: Error) => {
-      toast.error(`Apply failed: ${error.message}`)
+    onError: (error: unknown) => {
+      toast.error(`Apply failed: ${formatError(error)}`)
     },
   })
 
@@ -72,8 +93,8 @@ export function useAssignment() {
       toast.success('Sync completed')
       queryClient.invalidateQueries({ queryKey: ['options'] })
     },
-    onError: (error: Error) => {
-      toast.error(`Sync failed: ${error.message}`)
+    onError: (error: unknown) => {
+      toast.error(`Sync failed: ${formatError(error)}`)
     },
   })
 

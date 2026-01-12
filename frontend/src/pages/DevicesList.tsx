@@ -1,10 +1,11 @@
-import { useState, useCallback, useEffect, memo } from 'react'
+import { useState, useCallback, useEffect, memo, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { dashboardApiClient, type DeviceListParams } from '../api/client'
 import type { DeviceListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
 import { DropdownMenu } from '../components/ui/DropdownMenu'
+import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import {
   Server,
   Search,
@@ -26,6 +27,10 @@ import {
   Calendar,
   MapPin,
   Shield,
+  Cloud,
+  Globe,
+  Activity,
+  Tag,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -62,6 +67,27 @@ function formatDateTime(dateStr: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+// Format uptime from milliseconds to human readable
+function formatUptime(millis: number | null): string {
+  if (!millis) return '-'
+  const seconds = Math.floor(millis / 1000)
+  const minutes = Math.floor(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+
+  if (days > 0) {
+    const remainingHours = hours % 24
+    return `${days}d ${remainingHours}h`
+  } else if (hours > 0) {
+    const remainingMinutes = minutes % 60
+    return `${hours}h ${remainingMinutes}m`
+  } else if (minutes > 0) {
+    return `${minutes}m`
+  } else {
+    return `${seconds}s`
+  }
 }
 
 // Page size options
@@ -169,6 +195,57 @@ export function DevicesList() {
   }, [])
 
   const hasActiveFilters = params.device_type || params.region || params.assigned_state || params.search
+
+  // Generate filter chips from active params
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = []
+    if (params.device_type) {
+      chips.push({
+        key: 'device_type',
+        label: 'Type',
+        value: params.device_type,
+        color: 'sky',
+      })
+    }
+    if (params.region) {
+      chips.push({
+        key: 'region',
+        label: 'Region',
+        value: params.region,
+        color: 'violet',
+      })
+    }
+    if (params.assigned_state) {
+      chips.push({
+        key: 'assigned_state',
+        label: 'Status',
+        value: params.assigned_state,
+        displayValue: params.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'Assigned' : params.assigned_state === 'UNASSIGNED' ? 'Unassigned' : params.assigned_state,
+        color: params.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'emerald' : 'amber',
+      })
+    }
+    if (params.search) {
+      chips.push({
+        key: 'search',
+        label: 'Search',
+        value: params.search,
+        color: 'slate',
+      })
+    }
+    return chips
+  }, [params.device_type, params.region, params.assigned_state, params.search])
+
+  // Remove a specific filter
+  const removeFilter = useCallback((key: string) => {
+    setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
+    if (key === 'search') setSearchInput('')
+    // Update URL params
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(key)
+      return next
+    })
+  }, [setSearchParams])
 
   if (error) {
     return (
@@ -371,6 +448,16 @@ export function DevicesList() {
             </div>
           )}
 
+          {/* Active Filter Chips */}
+          {filterChips.length > 0 && (
+            <FilterChips
+              filters={filterChips}
+              onRemove={removeFilter}
+              onClear={clearFilters}
+              className="mb-6"
+            />
+          )}
+
           {/* Table */}
           <div className="rounded-2xl border border-slate-700/50 bg-slate-800/30 backdrop-blur-sm overflow-hidden">
             <div className="overflow-x-auto">
@@ -419,6 +506,18 @@ export function DevicesList() {
                       onSort={handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      <div className="flex items-center gap-1">
+                        <Tag className="h-3.5 w-3.5" />
+                        Tags
+                      </div>
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
+                      <div className="flex items-center gap-1">
+                        <Cloud className="h-3.5 w-3.5" />
+                        Central
+                      </div>
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Subscription
                     </th>
                     <SortableHeader
@@ -436,7 +535,7 @@ export function DevicesList() {
                 <tbody className="divide-y divide-slate-700/30">
                   {isLoading ? (
                     <tr>
-                      <td colSpan={10} className="py-20 text-center">
+                      <td colSpan={12} className="py-20 text-center">
                         <div className="flex flex-col items-center gap-3">
                           <RefreshCw className="h-8 w-8 animate-spin text-sky-500" />
                           <span className="text-sm text-slate-400">Loading devices...</span>
@@ -445,7 +544,7 @@ export function DevicesList() {
                     </tr>
                   ) : data?.items.length === 0 ? (
                     <tr>
-                      <td colSpan={10} className="py-20 text-center">
+                      <td colSpan={12} className="py-20 text-center">
                         <div className="flex flex-col items-center gap-3">
                           <Server className="h-12 w-12 text-slate-600" />
                           <span className="text-sm text-slate-400">No devices found</span>
@@ -684,6 +783,109 @@ function DeviceDetailContent({
         />
       </DetailSection>
 
+      {/* GreenLake Tags */}
+      <DetailSection title="GreenLake Tags">
+        {Object.keys(device.tags || {}).length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {Object.entries(device.tags).map(([key, value]) => (
+              <span
+                key={key}
+                className="inline-flex items-center gap-1 rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-sm"
+              >
+                <Tag className="h-3.5 w-3.5 text-violet-400" />
+                <span className="text-slate-400">{key}:</span>
+                <span className="text-white">{value}</span>
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-slate-500">No tags assigned</p>
+        )}
+      </DetailSection>
+
+      {/* Aruba Central */}
+      <DetailSection title="Aruba Central">
+        <DetailRow
+          label="Platform Status"
+          value={
+            <div className="flex items-center gap-2">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                  device.in_greenlake
+                    ? 'bg-hpe-green/10 text-hpe-green'
+                    : 'bg-slate-500/10 text-slate-400'
+                }`}
+              >
+                <Globe className="h-3 w-3" />
+                GreenLake
+              </span>
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                  device.in_central
+                    ? 'bg-sky-500/10 text-sky-400'
+                    : 'bg-slate-500/10 text-slate-400'
+                }`}
+              >
+                <Cloud className="h-3 w-3" />
+                Central
+              </span>
+            </div>
+          }
+        />
+        {device.in_central && (
+          <>
+            <DetailRow
+              label="Central Status"
+              value={
+                <span
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                    device.central_status === 'ONLINE'
+                      ? 'bg-emerald-500/10 text-emerald-400'
+                      : device.central_status === 'OFFLINE'
+                      ? 'bg-rose-500/10 text-rose-400'
+                      : 'bg-slate-500/10 text-slate-400'
+                  }`}
+                >
+                  <Activity className="h-3 w-3" />
+                  {device.central_status || 'Unknown'}
+                </span>
+              }
+            />
+            <DetailRow label="Central Name" value={device.central_device_name} />
+            <DetailRow label="Central Type" value={device.central_device_type} />
+            <DetailRow label="Model" value={device.central_model} />
+            <DetailRow label="Part Number" value={device.central_part_number} mono />
+            <DetailRow label="Software Version" value={device.central_software_version} />
+            <DetailRow label="IPv4" value={device.central_ipv4} mono />
+            <DetailRow label="IPv6" value={device.central_ipv6} mono />
+            <DetailRow label="Uptime" value={formatUptime(device.central_uptime_millis)} />
+            <DetailRow label="Last Seen" value={formatDateTime(device.central_last_seen_at)} />
+            <DetailRow label="Deployment" value={device.central_deployment} />
+            <DetailRow label="Role" value={device.central_device_role} />
+            <DetailRow label="Function" value={device.central_device_function} />
+            <DetailRow label="Site" value={device.central_site_name} />
+            <DetailRow label="Cluster" value={device.central_cluster_name} />
+            <DetailRow
+              label="Config Status"
+              value={
+                device.central_config_status ? (
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                      device.central_config_status === 'SYNCED' || device.central_config_status === 'IN_SYNC'
+                        ? 'bg-emerald-500/10 text-emerald-400'
+                        : 'bg-amber-500/10 text-amber-400'
+                    }`}
+                  >
+                    {device.central_config_status}
+                  </span>
+                ) : null
+              }
+            />
+            <DetailRow label="Config Modified" value={formatDateTime(device.central_config_last_modified_at)} />
+          </>
+        )}
+      </DetailSection>
+
       {/* Metadata */}
       <DetailSection title="Metadata">
         <DetailRow
@@ -826,6 +1028,66 @@ const DeviceRow = memo(function DeviceRow({
           {isAssigned ? <Check className="h-3 w-3" /> : <AlertCircle className="h-3 w-3" />}
           {isAssigned ? 'Assigned' : 'Unassigned'}
         </span>
+      </td>
+      <td className="px-4 py-3">
+        {Object.keys(device.tags || {}).length > 0 ? (
+          <div className="flex flex-wrap gap-1 max-w-[200px]">
+            {Object.entries(device.tags).slice(0, 3).map(([key, value]) => (
+              <span
+                key={key}
+                className="inline-flex items-center rounded bg-violet-500/10 px-1.5 py-0.5 text-xs text-violet-400"
+                title={`${key}: ${value}`}
+              >
+                {value || key}
+              </span>
+            ))}
+            {Object.keys(device.tags).length > 3 && (
+              <span className="text-xs text-slate-500">
+                +{Object.keys(device.tags).length - 3}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs text-slate-500">-</span>
+        )}
+      </td>
+      <td className="whitespace-nowrap px-4 py-3">
+        {device.in_central ? (
+          <div className="flex flex-col gap-0.5">
+            <span
+              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium ${
+                device.central_status === 'ONLINE'
+                  ? 'bg-emerald-500/10 text-emerald-400'
+                  : device.central_status === 'OFFLINE'
+                  ? 'bg-rose-500/10 text-rose-400'
+                  : 'bg-slate-500/10 text-slate-400'
+              }`}
+            >
+              <Activity className="h-3 w-3" />
+              {device.central_status || 'Unknown'}
+            </span>
+            {device.central_device_name && (
+              <span className="text-xs text-white font-medium truncate max-w-[180px]" title={device.central_device_name}>
+                {device.central_device_name}
+              </span>
+            )}
+            <span className="text-xs text-slate-400">
+              {device.central_model || device.central_device_type || '-'}
+              {device.central_part_number && ` (${device.central_part_number})`}
+            </span>
+            {device.central_software_version && (
+              <span className="text-xs text-slate-500">v{device.central_software_version}</span>
+            )}
+            {device.central_ipv4 && (
+              <span className="font-mono text-xs text-slate-400">{device.central_ipv4}</span>
+            )}
+            {device.central_site_name && (
+              <span className="text-xs text-sky-400">{device.central_site_name}</span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs text-slate-500">Not in Central</span>
+        )}
       </td>
       <td className="whitespace-nowrap px-4 py-3">
         {device.subscription_key ? (

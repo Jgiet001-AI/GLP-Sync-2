@@ -180,11 +180,22 @@ class TokenManager:
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
+
+                            # Validate access_token is present
+                            access_token = data.get("access_token")
+                            if not access_token:
+                                raise TokenFetchError(
+                                    "Token response missing access_token",
+                                    status_code=200,
+                                    attempts=attempt,
+                                    details={"response_keys": list(data.keys())},
+                                )
+
                             expires_in = data.get("expires_in", 7200)
                             expires_at = time.time() + expires_in
 
                             token = CachedToken(
-                                access_token=data.get("access_token"),
+                                access_token=access_token,
                                 expires_at=expires_at,
                                 token_type=data.get("token_type", "Bearer"),
                             )
@@ -299,7 +310,27 @@ _default_manager: Optional[TokenManager] = None
 
 
 async def get_token() -> str:
-    """Get a valid access token, fetching or refreshing as needed."""
+    """Get a valid access token using global singleton.
+
+    .. deprecated::
+        This function uses a global singleton and should only be used
+        in single-tenant scenarios. For multi-tenant applications,
+        create separate TokenManager instances instead.
+
+    Returns:
+        Access token string
+
+    Warning:
+        Using this function in multi-tenant environments may cause
+        authentication issues as all tenants would share the same token.
+    """
+    import warnings
+    warnings.warn(
+        "get_token() uses a global singleton. "
+        "For multi-tenant support, create TokenManager instances directly.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     global _default_manager
     if _default_manager is None:
         _default_manager = TokenManager()

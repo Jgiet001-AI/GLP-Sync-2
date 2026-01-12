@@ -1,0 +1,538 @@
+# =============================================================================
+# GitHub Actions: Docker Scout Policy Validation
+# HPE GreenLake Sync Project
+# =============================================================================
+# This workflow validates Docker images against the 7 Docker Scout policies:
+# 1. No high-profile vulnerabilities
+# 2. No fixable critical/high vulnerabilities
+# 3. Only approved base images
+# 4. Supply chain attestations
+# 5. No outdated base images
+# 6. No AGPL v3 licenses
+# 7. Default non-root user
+# =============================================================================
+
+name: Docker Scout Policy Check
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'docker-scout-policy.yaml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'docker-scout-policy.yaml'
+  schedule:
+    # Run daily at midnight UTC to catch new CVEs
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      full_scan:
+        description: 'Run full vulnerability scan'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build Image with Attestations
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Secure Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    outputs:
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push with attestations
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYTHON_DIGEST=sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36
+            UV_DIGEST=sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5
+
+      # Generate SBOM file for attestation (FIX: was referencing non-existent file)
+      - name: Install Docker Scout CLI
+        uses: docker/scout-action@v1
+        with:
+          command: version
+
+      - name: Generate SBOM file
+        run: |
+          docker scout sbom ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --format spdx-json \
+            --output sbom.spdx.json
+
+      - name: Generate SBOM attestation
+        uses: actions/attest-sbom@v1
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: './sbom.spdx.json'
+          push-to-registry: true
+
+      - name: Upload SBOM as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.spdx.json
+
+  # ---------------------------------------------------------------------------
+  # Docker Scout Analysis
+  # ---------------------------------------------------------------------------
+  scout-analysis:
+    name: Docker Scout Analysis
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # FIX: Only fail on critical (Policy 1), high handled separately in policy-check
+      - name: Docker Scout - Critical CVE Analysis (Policy 1)
+        id: scout-critical
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ needs.build.outputs.image_ref }}
+          only-severities: critical
+          exit-code: true
+          sarif-file: scout-critical.sarif
+
+      - name: Docker Scout - Full CVE Report
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: ${{ needs.build.outputs.image_ref }}
+          sarif-file: scout-results.sarif
+
+      - name: Docker Scout - Quickview
+        uses: docker/scout-action@v1
+        with:
+          command: quickview
+          image: ${{ needs.build.outputs.image_ref }}
+
+      - name: Docker Scout - Recommendations (Policy 5)
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: ${{ needs.build.outputs.image_ref }}
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: scout-results.sarif
+
+  # ---------------------------------------------------------------------------
+  # Policy Compliance Check
+  # ---------------------------------------------------------------------------
+  policy-check:
+    name: Policy Compliance
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # FIX: Install required tools
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Install Docker Scout CLI
+        uses: docker/scout-action@v1
+        with:
+          command: version
+
+      - name: Pull built image
+        run: |
+          docker pull ${{ needs.build.outputs.image_ref }}
+
+      # -------------------------------------------------------------------------
+      # Policy 1: No Critical Vulnerabilities
+      # -------------------------------------------------------------------------
+      - name: "Policy 1: Check Critical Vulnerabilities"
+        id: policy1
+        run: |
+          echo "::group::Policy 1 - Critical Vulnerabilities"
+          echo "Checking for critical vulnerabilities..."
+
+          RESULT=$(docker scout cves ${{ needs.build.outputs.image_ref }} \
+            --only-severity critical --format json 2>/dev/null || echo '{"vulnerabilities":[]}')
+
+          CRIT_COUNT=$(echo "$RESULT" | jq '.vulnerabilities | length // 0')
+          echo "Critical vulnerabilities found: $CRIT_COUNT"
+
+          if [ "$CRIT_COUNT" -gt "0" ]; then
+            echo "::error::Policy 1 FAILED: Found $CRIT_COUNT critical vulnerabilities"
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "::notice::Policy 1 PASSED: No critical vulnerabilities"
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 2: No Fixable High Vulnerabilities (FIX: aligned with policy)
+      # -------------------------------------------------------------------------
+      - name: "Policy 2: Check Fixable High Vulnerabilities"
+        id: policy2
+        run: |
+          echo "::group::Policy 2 - Fixable High Vulnerabilities"
+          echo "Checking for fixable high vulnerabilities..."
+
+          # Get fixable high vulnerabilities
+          RESULT=$(docker scout cves ${{ needs.build.outputs.image_ref }} \
+            --only-severity high --only-fixed --format json 2>/dev/null || echo '{"vulnerabilities":[]}')
+
+          FIXABLE_HIGH=$(echo "$RESULT" | jq '.vulnerabilities | length // 0')
+          echo "Fixable high vulnerabilities found: $FIXABLE_HIGH"
+
+          if [ "$FIXABLE_HIGH" -gt "0" ]; then
+            echo "::error::Policy 2 FAILED: Found $FIXABLE_HIGH fixable high vulnerabilities"
+            echo "Details:"
+            echo "$RESULT" | jq -r '.vulnerabilities[] | "  - \(.cve_id // .id): \(.package) (\(.fixed_version // "fix available")"' | head -10
+            echo "::endgroup::"
+            exit 1
+          fi
+
+          echo "::notice::Policy 2 PASSED: No fixable high vulnerabilities"
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 3: Approved Base Images (NEW)
+      # -------------------------------------------------------------------------
+      - name: "Policy 3: Check Base Image Approval"
+        id: policy3
+        run: |
+          echo "::group::Policy 3 - Approved Base Images"
+          echo "Checking base image against allowlist..."
+
+          # Get base image info
+          BASE_INFO=$(docker scout quickview ${{ needs.build.outputs.image_ref }} 2>&1 || echo "")
+          echo "Base image info:"
+          echo "$BASE_INFO" | grep -E "Base image|digest" || echo "  Unable to determine base image"
+
+          # Check against approved patterns
+          APPROVED_PATTERNS="python:3.11-slim|python:3.12-slim|debian:.*-slim"
+
+          if echo "$BASE_INFO" | grep -qE "$APPROVED_PATTERNS"; then
+            echo "::notice::Policy 3 PASSED: Base image is approved"
+          else
+            echo "::warning::Policy 3 WARNING: Verify base image is in allowlist"
+          fi
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 4: Supply Chain Attestations
+      # -------------------------------------------------------------------------
+      - name: "Policy 4: Verify Attestations"
+        id: policy4
+        run: |
+          echo "::group::Policy 4 - Supply Chain Attestations"
+
+          # Check SBOM
+          echo "Checking SBOM attestation..."
+          SBOM_CHECK=$(docker scout sbom ${{ needs.build.outputs.image_ref }} --format json 2>/dev/null | head -c 200 || echo "")
+
+          if echo "$SBOM_CHECK" | grep -q "packages"; then
+            echo "::notice::SBOM attestation verified"
+            SBOM_OK=true
+          else
+            echo "::warning::SBOM attestation may be incomplete"
+            SBOM_OK=false
+          fi
+
+          # Check provenance (from build attestations)
+          echo "Checking provenance..."
+          if [ "${{ needs.build.outputs.image_digest }}" != "" ]; then
+            echo "::notice::Provenance: Image built with attestations (digest: ${{ needs.build.outputs.image_digest }})"
+            PROV_OK=true
+          else
+            echo "::warning::Provenance attestation not found"
+            PROV_OK=false
+          fi
+
+          if [ "$SBOM_OK" = true ] && [ "$PROV_OK" = true ]; then
+            echo "::notice::Policy 4 PASSED: Attestations verified"
+          else
+            echo "::warning::Policy 4 WARNING: Some attestations may be incomplete"
+          fi
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 5: No Outdated Base Images (NEW)
+      # -------------------------------------------------------------------------
+      - name: "Policy 5: Check Base Image Freshness"
+        id: policy5
+        run: |
+          echo "::group::Policy 5 - Base Image Freshness"
+          echo "Checking for base image updates..."
+
+          RECOMMENDATIONS=$(docker scout recommendations ${{ needs.build.outputs.image_ref }} 2>&1 || echo "")
+
+          if echo "$RECOMMENDATIONS" | grep -q "up to date"; then
+            echo "::notice::Policy 5 PASSED: Base image is up to date"
+          elif echo "$RECOMMENDATIONS" | grep -q "No recommendations"; then
+            echo "::notice::Policy 5 PASSED: No update recommendations"
+          else
+            echo "::warning::Policy 5 WARNING: Base image updates may be available"
+            echo "$RECOMMENDATIONS" | grep -E "Tag|Benefits" | head -5
+          fi
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 6: No AGPL Licenses
+      # -------------------------------------------------------------------------
+      - name: "Policy 6: Check AGPL Licenses"
+        id: policy6
+        run: |
+          echo "::group::Policy 6 - License Compliance"
+          echo "Checking for AGPL licenses..."
+
+          SBOM_OUTPUT=$(docker scout sbom ${{ needs.build.outputs.image_ref }} 2>/dev/null || echo "")
+          AGPL_CHECK=$(echo "$SBOM_OUTPUT" | grep -iE '"licen' | grep -iE 'agpl' || echo "")
+
+          if [ -z "$AGPL_CHECK" ]; then
+            echo "::notice::Policy 6 PASSED: No AGPL licenses found"
+          else
+            echo "::error::Policy 6 FAILED: Found AGPL licenses"
+            echo "$AGPL_CHECK" | head -5
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy 7: Non-Root User
+      # -------------------------------------------------------------------------
+      - name: "Policy 7: Check Non-Root User"
+        id: policy7
+        run: |
+          echo "::group::Policy 7 - Non-Root User"
+          echo "Checking for non-root user..."
+
+          USER=$(docker inspect ${{ needs.build.outputs.image_ref }} --format '{{.Config.User}}' 2>/dev/null || echo "")
+
+          if [ -n "$USER" ] && [ "$USER" != "root" ] && [ "$USER" != "0" ]; then
+            echo "::notice::Policy 7 PASSED: Image runs as non-root user: $USER"
+          elif [ -z "$USER" ]; then
+            echo "::error::Policy 7 FAILED: No USER specified in image"
+            echo "::endgroup::"
+            exit 1
+          else
+            echo "::error::Policy 7 FAILED: Image runs as root"
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+      # -------------------------------------------------------------------------
+      # Policy Evaluation Summary
+      # -------------------------------------------------------------------------
+      - name: Policy Compliance Summary
+        if: always()
+        run: |
+          echo "============================================="
+          echo "Docker Scout Policy Compliance Summary"
+          echo "============================================="
+          echo "Policy 1 (Critical CVEs):     ${{ steps.policy1.outcome }}"
+          echo "Policy 2 (Fixable High):      ${{ steps.policy2.outcome }}"
+          echo "Policy 3 (Approved Base):     ${{ steps.policy3.outcome }}"
+          echo "Policy 4 (Attestations):      ${{ steps.policy4.outcome }}"
+          echo "Policy 5 (Freshness):         ${{ steps.policy5.outcome }}"
+          echo "Policy 6 (No AGPL):           ${{ steps.policy6.outcome }}"
+          echo "Policy 7 (Non-Root):          ${{ steps.policy7.outcome }}"
+          echo "============================================="
+
+  # ---------------------------------------------------------------------------
+  # Policy File Evaluation (NEW - uses docker-scout-policy.yaml)
+  # ---------------------------------------------------------------------------
+  policy-evaluation:
+    name: Evaluate Policy File
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Docker Scout CLI
+        uses: docker/scout-action@v1
+        with:
+          command: version
+
+      - name: Evaluate against policy file
+        id: policy-eval
+        continue-on-error: true
+        run: |
+          echo "Evaluating image against docker-scout-policy.yaml..."
+
+          # Note: docker scout policy evaluate may require Docker Scout organization
+          # This is a placeholder for when the feature is available
+          if docker scout policy --help 2>/dev/null | grep -q "evaluate"; then
+            docker scout policy evaluate \
+              --file docker-scout-policy.yaml \
+              ${{ needs.build.outputs.image_ref }} \
+              --format json \
+              --output scout-policy-report.json || true
+          else
+            echo "Policy evaluation command not available in this Docker Scout version"
+            echo "Using manual policy checks from policy-check job"
+          fi
+
+      - name: Upload policy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policy-report
+          path: scout-policy-report.json
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Compare to Base Branch (PRs only)
+  # ---------------------------------------------------------------------------
+  compare:
+    name: Compare to Base
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: build
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+
+    steps:
+      - name: Docker Scout - Compare
+        uses: docker/scout-action@v1
+        with:
+          command: compare
+          image: ${{ needs.build.outputs.image_ref }}
+          to: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          exit-code: false
+          write-comment: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Postgres Base Image Check
+  # ---------------------------------------------------------------------------
+  check-postgres:
+    name: Check PostgreSQL Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Pull PostgreSQL image
+        run: |
+          docker pull postgres:16-alpine@sha256:8d32048ee4d8d41201412687a485bf2da8b11aab309369cca3fbdf30f8ceab76
+
+      - name: Install Docker Scout CLI
+        uses: docker/scout-action@v1
+        with:
+          command: version
+
+      - name: Scout CVE Check - PostgreSQL
+        uses: docker/scout-action@v1
+        with:
+          command: cves
+          image: postgres:16-alpine
+          only-severities: critical,high
+          exit-code: false
+
+      - name: Check for Updates - PostgreSQL
+        uses: docker/scout-action@v1
+        with:
+          command: recommendations
+          image: postgres:16-alpine

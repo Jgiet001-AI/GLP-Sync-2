@@ -1,5 +1,56 @@
 // API Types
 
+// API Error Response from backend
+// Handles both FastAPI standard errors (detail) and GLPError.to_dict() (message)
+export interface ApiErrorResponse {
+  detail?: string        // FastAPI standard error field
+  message?: string       // GLPError.to_dict() field
+  status_code?: number
+  errors?: ValidationError[]
+  recoverable?: boolean
+  error_type?: string
+  code?: string          // GLPError error code
+}
+
+// Custom Error class for structured API error handling
+export class ApiError extends Error {
+  status: number
+  detail: string
+  errors?: ValidationError[]
+  recoverable: boolean
+  errorType?: string
+  code?: string
+
+  constructor(response: ApiErrorResponse, status: number) {
+    // Handle both FastAPI 'detail' and GLPError 'message' fields
+    const errorMessage = response.detail || response.message || 'An error occurred'
+    super(errorMessage)
+    this.name = 'ApiError'
+    this.status = status
+    this.detail = errorMessage
+    this.errors = response.errors
+    this.recoverable = response.recoverable ?? false
+    this.errorType = response.error_type
+    this.code = response.code
+  }
+
+  get isValidationError(): boolean {
+    return this.status === 400 || this.status === 422
+  }
+
+  get isAuthError(): boolean {
+    return this.status === 401 || this.status === 403
+  }
+
+  get isNotFound(): boolean {
+    return this.status === 404
+  }
+
+  get isServerError(): boolean {
+    return this.status >= 500
+  }
+}
+
 export interface DeviceAssignment {
   serial_number: string
   mac_address: string | null
@@ -247,6 +298,34 @@ export interface DeviceListItem {
   subscription_type: string | null
   subscription_end: string | null
   updated_at: string | null
+  // GreenLake tags
+  tags: Record<string, string>
+  // Aruba Central fields - Core
+  central_status: string | null
+  central_device_name: string | null
+  central_device_type: string | null
+  // Aruba Central fields - Hardware
+  central_model: string | null
+  central_part_number: string | null
+  // Aruba Central fields - Connectivity
+  central_ipv4: string | null
+  central_ipv6: string | null
+  central_software_version: string | null
+  central_uptime_millis: number | null
+  central_last_seen_at: string | null
+  // Aruba Central fields - Deployment
+  central_deployment: string | null
+  central_device_role: string | null
+  central_device_function: string | null
+  // Aruba Central fields - Location
+  central_site_name: string | null
+  central_cluster_name: string | null
+  // Aruba Central fields - Config
+  central_config_status: string | null
+  central_config_last_modified_at: string | null
+  // Platform presence flags
+  in_central: boolean
+  in_greenlake: boolean
 }
 
 export interface DeviceListResponse {

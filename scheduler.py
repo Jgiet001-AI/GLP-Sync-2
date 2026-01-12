@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Automated Scheduler for HPE GreenLake Sync.
+"""Automated Scheduler for HPE GreenLake and Aruba Central Sync.
 
 This module provides a long-running scheduler that automatically syncs
 devices and/or subscriptions at configurable intervals. Designed to run
@@ -10,22 +10,34 @@ Architecture:
     - Graceful shutdown on SIGTERM/SIGINT
     - Configurable via environment variables
     - Health check endpoint via optional HTTP server
+    - Supports both GreenLake and Aruba Central as data sources
 
 Environment Variables:
     SYNC_INTERVAL_MINUTES: Minutes between sync runs (default: 60)
-    SYNC_DEVICES: Enable device sync (default: true)
+    SYNC_DEVICES: Enable GreenLake device sync (default: true)
     SYNC_SUBSCRIPTIONS: Enable subscription sync (default: true)
+    SYNC_CENTRAL: Enable Aruba Central device sync (default: true)
     SYNC_ON_STARTUP: Run sync immediately on startup (default: true)
     HEALTH_CHECK_PORT: Port for health check endpoint (default: 8080, 0 to disable)
 
-    Plus all the standard GLP_* and DATABASE_URL variables.
+    GreenLake credentials:
+        GLP_CLIENT_ID, GLP_CLIENT_SECRET, GLP_TOKEN_URL, GLP_BASE_URL
+
+    Aruba Central credentials:
+        ARUBA_CLIENT_ID, ARUBA_CLIENT_SECRET, ARUBA_BASE_URL
+
+    Database:
+        DATABASE_URL
 
 Example:
-    # Run every 30 minutes, sync both
+    # Run every 30 minutes, sync both platforms
     SYNC_INTERVAL_MINUTES=30 python scheduler.py
 
-    # Run every 6 hours, devices only
-    SYNC_INTERVAL_MINUTES=360 SYNC_SUBSCRIPTIONS=false python scheduler.py
+    # Run every 6 hours, GreenLake devices only
+    SYNC_INTERVAL_MINUTES=360 SYNC_SUBSCRIPTIONS=false SYNC_CENTRAL=false python scheduler.py
+
+    # Run Aruba Central only
+    SYNC_DEVICES=false SYNC_SUBSCRIPTIONS=false SYNC_CENTRAL=true python scheduler.py
 
 Docker Usage:
     docker run -e SYNC_INTERVAL_MINUTES=60 -e DATABASE_URL=... glp-sync
@@ -45,6 +57,9 @@ load_dotenv()
 
 # Local imports
 from src.glp.api import (
+    ArubaCentralClient,
+    ArubaCentralSyncer,
+    ArubaTokenManager,
     DeviceSyncer,
     GLPClient,
     SubscriptionSyncer,
@@ -62,6 +77,7 @@ class SchedulerConfig:
         self.interval_minutes = int(os.getenv("SYNC_INTERVAL_MINUTES", "60"))
         self.sync_devices = os.getenv("SYNC_DEVICES", "true").lower() == "true"
         self.sync_subscriptions = os.getenv("SYNC_SUBSCRIPTIONS", "true").lower() == "true"
+        self.sync_central = os.getenv("SYNC_CENTRAL", "true").lower() == "true"
         self.sync_on_startup = os.getenv("SYNC_ON_STARTUP", "true").lower() == "true"
         self.health_check_port = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
         self.max_retries = int(os.getenv("SYNC_MAX_RETRIES", "3"))
@@ -73,6 +89,7 @@ class SchedulerConfig:
             f"interval={self.interval_minutes}m, "
             f"devices={self.sync_devices}, "
             f"subscriptions={self.sync_subscriptions}, "
+            f"central={self.sync_central}, "
             f"startup={self.sync_on_startup}, "
             f"health_port={self.health_check_port})"
         )
@@ -123,13 +140,15 @@ async def run_sync(
     config: SchedulerConfig,
     token_manager: TokenManager,
     db_pool,
+    aruba_token_manager: Optional[ArubaTokenManager] = None,
 ) -> dict:
     """Run a single sync cycle.
 
     Args:
         config: Scheduler configuration
-        token_manager: TokenManager instance
+        token_manager: TokenManager instance for GreenLake
         db_pool: Database connection pool (can be None)
+        aruba_token_manager: ArubaTokenManager instance for Aruba Central (optional)
 
     Returns:
         Dict with sync results
@@ -139,15 +158,17 @@ async def run_sync(
         "started_at": start_time.isoformat(),
         "devices": None,
         "subscriptions": None,
+        "central": None,
         "success": False,
         "error": None,
     }
 
     try:
+        # GreenLake sync
         async with GLPClient(token_manager) as client:
             # Sync devices
             if config.sync_devices:
-                print("[Scheduler] Syncing devices...")
+                print("[Scheduler] Syncing GreenLake devices...")
                 syncer = DeviceSyncer(client=client, db_pool=db_pool)
 
                 if db_pool:
@@ -167,7 +188,22 @@ async def run_sync(
                     subs = await syncer.fetch_all_subscriptions()
                     results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
 
-            results["success"] = True
+        # Aruba Central sync (separate client/token)
+        if config.sync_central and aruba_token_manager:
+            print("[Scheduler] Syncing Aruba Central devices...")
+            async with ArubaCentralClient(aruba_token_manager) as central_client:
+                syncer = ArubaCentralSyncer(client=central_client, db_pool=db_pool)
+
+                if db_pool:
+                    results["central"] = await syncer.sync()
+                else:
+                    devices = await syncer.fetch_all_devices()
+                    results["central"] = {"fetched": len(devices), "mode": "fetch-only"}
+        elif config.sync_central and not aruba_token_manager:
+            print("[Scheduler] WARNING: SYNC_CENTRAL enabled but Aruba credentials not configured")
+            results["central"] = {"skipped": True, "reason": "credentials_missing"}
+
+        results["success"] = True
 
     except Exception as e:
         results["error"] = str(e)
@@ -184,13 +220,15 @@ async def run_sync_with_retry(
     config: SchedulerConfig,
     token_manager: TokenManager,
     db_pool,
+    aruba_token_manager: Optional[ArubaTokenManager] = None,
 ) -> dict:
     """Run sync with retry logic on failure.
 
     Args:
         config: Scheduler configuration
-        token_manager: TokenManager instance
+        token_manager: TokenManager instance for GreenLake
         db_pool: Database connection pool
+        aruba_token_manager: ArubaTokenManager instance for Aruba Central (optional)
 
     Returns:
         Dict with sync results
@@ -198,7 +236,7 @@ async def run_sync_with_retry(
     last_error = None
 
     for attempt in range(config.max_retries):
-        results = await run_sync(config, token_manager, db_pool)
+        results = await run_sync(config, token_manager, db_pool, aruba_token_manager)
 
         if results["success"]:
             if attempt > 0:
@@ -287,22 +325,24 @@ async def scheduler_loop(
     db_pool,
     health_state: HealthState,
     shutdown_event: asyncio.Event,
+    aruba_token_manager: Optional[ArubaTokenManager] = None,
 ):
     """Main scheduling loop.
 
     Args:
         config: Scheduler configuration
-        token_manager: TokenManager instance
+        token_manager: TokenManager instance for GreenLake
         db_pool: Database connection pool
         health_state: Shared health state
         shutdown_event: Event to signal shutdown
+        aruba_token_manager: ArubaTokenManager instance for Aruba Central (optional)
     """
     interval_seconds = config.interval_minutes * 60
 
     # Initial sync on startup
     if config.sync_on_startup:
         print("[Scheduler] Running initial sync on startup...")
-        results = await run_sync_with_retry(config, token_manager, db_pool)
+        results = await run_sync_with_retry(config, token_manager, db_pool, aruba_token_manager)
         health_state.total_syncs += 1
         health_state.last_sync_at = datetime.utcnow()
         health_state.last_sync_success = results["success"]
@@ -331,7 +371,7 @@ async def scheduler_loop(
         print("\n[Scheduler] ========== SCHEDULED SYNC ==========")
         print(f"[Scheduler] Time: {datetime.utcnow().isoformat()}")
 
-        results = await run_sync_with_retry(config, token_manager, db_pool)
+        results = await run_sync_with_retry(config, token_manager, db_pool, aruba_token_manager)
 
         health_state.total_syncs += 1
         health_state.last_sync_at = datetime.utcnow()
@@ -363,17 +403,33 @@ async def main():
     print(f"[Scheduler] Config: {config}")
 
     # Validate we have something to sync
-    if not config.sync_devices and not config.sync_subscriptions:
-        print("[Scheduler] ERROR: Nothing to sync (both SYNC_DEVICES and SYNC_SUBSCRIPTIONS are false)")
+    if not config.sync_devices and not config.sync_subscriptions and not config.sync_central:
+        print("[Scheduler] ERROR: Nothing to sync (SYNC_DEVICES, SYNC_SUBSCRIPTIONS, and SYNC_CENTRAL are all false)")
         sys.exit(1)
 
-    # Initialize token manager
-    try:
-        token_manager = TokenManager()
-        print("[Scheduler] TokenManager initialized")
-    except ValueError as e:
-        print(f"[Scheduler] ERROR: {e}")
-        sys.exit(1)
+    # Initialize GreenLake token manager (required for devices/subscriptions)
+    token_manager = None
+    if config.sync_devices or config.sync_subscriptions:
+        try:
+            token_manager = TokenManager()
+            print("[Scheduler] GreenLake TokenManager initialized")
+        except ValueError as e:
+            print(f"[Scheduler] ERROR: GreenLake credentials missing: {e}")
+            if not config.sync_central:
+                sys.exit(1)
+            print("[Scheduler] Continuing with Aruba Central only...")
+
+    # Initialize Aruba Central token manager (optional)
+    aruba_token_manager = None
+    if config.sync_central:
+        try:
+            aruba_token_manager = ArubaTokenManager()
+            print("[Scheduler] ArubaTokenManager initialized")
+        except ValueError as e:
+            print(f"[Scheduler] WARNING: Aruba Central credentials missing: {e}")
+            if not token_manager:
+                print("[Scheduler] ERROR: No valid credentials for any sync source")
+                sys.exit(1)
 
     # Create database pool
     db_pool = await create_db_pool()
@@ -403,6 +459,7 @@ async def main():
             db_pool=db_pool,
             health_state=health_state,
             shutdown_event=shutdown_event,
+            aruba_token_manager=aruba_token_manager,
         )
     finally:
         # Cleanup

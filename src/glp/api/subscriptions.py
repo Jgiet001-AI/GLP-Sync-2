@@ -46,6 +46,10 @@ from .exceptions import (
     ValidationError,
 )
 
+# Clean Architecture imports
+from ..sync.adapters import GLPSubscriptionAPI, PostgresSubscriptionRepository, SubscriptionFieldMapper
+from ..sync.use_cases import SyncSubscriptionsUseCase
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,15 +79,34 @@ class SubscriptionSyncer:
         self,
         client: GLPClient,
         db_pool=None,
+        *,
+        use_clean_architecture: bool = True,
+        use_streaming: bool = False,
     ):
         """Initialize SubscriptionSyncer.
 
         Args:
             client: Configured GLPClient instance
             db_pool: asyncpg connection pool (optional for JSON-only mode)
+            use_clean_architecture: If True, use the new Clean Architecture
+                                   use case internally (default: True)
+            use_streaming: If True, use streaming mode for memory-efficient
+                          sync. Processes page by page instead of loading
+                          all subscriptions into memory.
         """
         self.client = client
         self.db_pool = db_pool
+        self._use_clean_architecture = use_clean_architecture
+        self._use_streaming = use_streaming
+
+        # Create use case with adapters if db_pool is provided
+        self._use_case: SyncSubscriptionsUseCase | None = None
+        if db_pool and use_clean_architecture:
+            self._use_case = SyncSubscriptionsUseCase(
+                subscription_api=GLPSubscriptionAPI(client),
+                subscription_repo=PostgresSubscriptionRepository(db_pool),
+                field_mapper=SubscriptionFieldMapper(),
+            )
 
     # ----------------------------------------
     # Fetching: Basic
@@ -449,6 +472,12 @@ class SubscriptionSyncer:
     async def sync(self) -> dict:
         """Full sync: fetch all subscriptions and upsert to database.
 
+        When use_clean_architecture=True (default), delegates to SyncSubscriptionsUseCase.
+        Otherwise, uses the legacy implementation for backward compatibility.
+
+        When use_streaming=True, uses memory-efficient streaming mode that
+        processes subscriptions page by page.
+
         Returns:
             Sync statistics dictionary
 
@@ -456,6 +485,31 @@ class SubscriptionSyncer:
             GLPError: If API fetch fails
             PartialSyncError: If some subscriptions failed to sync
         """
+        # Use Clean Architecture use case if available
+        if self._use_case:
+            if self._use_streaming:
+                logger.info("Using Clean Architecture use case for subscription sync (streaming mode)")
+                result = await self._use_case.execute_streaming()
+            else:
+                logger.info("Using Clean Architecture use case for subscription sync")
+                result = await self._use_case.execute()
+
+            # Convert SyncResult to backward-compatible dict format
+            stats = result.to_dict()
+
+            # Raise PartialSyncError if there were errors (for backward compatibility)
+            if not result.success and result.error_details:
+                raise PartialSyncError(
+                    f"Subscription sync completed with {result.errors} errors",
+                    succeeded=result.upserted,
+                    failed=result.errors,
+                    errors=result.error_details,
+                    details=stats,
+                )
+
+            return stats
+
+        # Legacy implementation (when use_clean_architecture=False or no db_pool)
         logger.info(f"Starting subscription sync at {datetime.utcnow().isoformat()}")
 
         try:
@@ -493,10 +547,12 @@ class SubscriptionSyncer:
             GLPError: If API fetch fails
             IOError: If file cannot be written
         """
+        import aiofiles
+
         subscriptions = await self.fetch_all_subscriptions()
 
-        with open(filepath, "w") as f:
-            json.dump(subscriptions, f, indent=2)
+        async with aiofiles.open(filepath, "w") as f:
+            await f.write(json.dumps(subscriptions, indent=2))
 
         logger.info(f"Saved {len(subscriptions):,} subscriptions to {filepath}")
         return len(subscriptions)

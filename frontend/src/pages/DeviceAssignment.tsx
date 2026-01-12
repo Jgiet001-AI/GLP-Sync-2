@@ -1,4 +1,4 @@
-import { memo, useState, useMemo, useCallback, useEffect } from 'react'
+import { memo, useState, useMemo, useCallback, useEffect, useRef } from 'react'
 import { ArrowLeft, ArrowRight, Play, CheckCircle, ChevronDown, Filter } from 'lucide-react'
 import {
   AddDevicesPanel,
@@ -11,7 +11,8 @@ import {
 } from '../components'
 import { useAssignment } from '../hooks/useAssignment'
 import { usePerTypeAssignment } from '../hooks/usePerTypeAssignment'
-import type { DeviceAssignment as DeviceAssignmentType } from '../types'
+import { useAssignmentProgress } from '../hooks/useAssignmentProgress'
+import type { DeviceAssignment as DeviceAssignmentType, ApplyRequest } from '../types'
 
 export function DeviceAssignment() {
   const {
@@ -56,16 +57,19 @@ export function DeviceAssignment() {
     applyAllAssignments,
   } = usePerTypeAssignment(devices, selectedSerials, options, setDevices)
 
+  // SSE streaming progress hook
+  const { progress: sseProgress, error: sseError, startStream, stop: stopStream } = useAssignmentProgress()
+
   // Progress modal state
   const [showProgress, setShowProgress] = useState(false)
-  const [progressPhase, setProgressPhase] = useState(0)
   const [progressComplete, setProgressComplete] = useState(false)
   const [progressError, setProgressError] = useState(false)
   const [progressErrorMessage, setProgressErrorMessage] = useState<string | undefined>()
 
+  // Track whether we're using SSE or fallback
+  const useSSE = useRef(true)
+
   // Progress phases for the modal
-  // Rate limits: PATCH=16/min effective (20/min with 20% buffer), POST=20/min effective
-  // Each batch of 25 devices = ~4 seconds per PATCH operation
   const batchCount = Math.ceil(selectedCount / 25)
   const newDeviceCount = devices.filter(d => !d.device_id && selectedSerials.has(d.serial_number)).length
 
@@ -77,15 +81,15 @@ export function DeviceAssignment() {
       estimatedSeconds: 2,
     },
     {
-      id: 'subscriptions',
-      name: 'Assigning Subscriptions',
-      description: `Assigning licenses to ${selectedCount} devices (${batchCount} batches, rate-limited)`,
-      estimatedSeconds: batchCount * 5, // ~5 seconds per batch with rate limiting
-    },
-    {
       id: 'applications',
       name: 'Assigning Regions',
       description: 'Setting application/region for devices (rate-limited)',
+      estimatedSeconds: batchCount * 5,
+    },
+    {
+      id: 'subscriptions',
+      name: 'Assigning Subscriptions',
+      description: `Assigning licenses to ${selectedCount} devices (${batchCount} batches, rate-limited)`,
       estimatedSeconds: batchCount * 5,
     },
     {
@@ -98,7 +102,7 @@ export function DeviceAssignment() {
       id: 'new_devices',
       name: 'Adding New Devices',
       description: `Registering ${newDeviceCount} new devices (rate-limited)`,
-      estimatedSeconds: newDeviceCount * 4, // ~4 seconds per device with rate limiting
+      estimatedSeconds: newDeviceCount * 4,
     },
     {
       id: 'complete',
@@ -108,53 +112,120 @@ export function DeviceAssignment() {
     },
   ], [selectedCount, batchCount, newDeviceCount])
 
-  // Simulate progress advancement while applying
+  // Get current phase index from SSE progress
+  const currentPhaseIndex = useMemo(() => {
+    if (!sseProgress?.phase) return 0
+    const phaseMap: Record<string, number> = {
+      'applications': 1,
+      'subscriptions': 2,
+      'tags': 3,
+      'new_devices': 4,
+    }
+    return phaseMap[sseProgress.phase] ?? 0
+  }, [sseProgress?.phase])
+
+  // Convert SSE progress to batch progress format
+  const batchProgress = useMemo(() => {
+    if (!sseProgress?.batch) return undefined
+    return {
+      currentBatch: sseProgress.batch.currentBatch,
+      totalBatches: sseProgress.batch.totalBatches,
+      devicesInBatch: sseProgress.batch.devicesInBatch,
+    }
+  }, [sseProgress?.batch])
+
+  // Convert SSE timing to timing format
+  const timing = useMemo(() => {
+    if (!sseProgress?.timing) return undefined
+    return {
+      elapsedSeconds: sseProgress.timing.elapsedSeconds,
+      estimatedRemainingSeconds: sseProgress.timing.estimatedRemainingSeconds,
+      avgBatchSeconds: sseProgress.timing.avgBatchSeconds,
+    }
+  }, [sseProgress?.timing])
+
+  // Convert SSE stats
+  const stats = useMemo(() => {
+    if (!sseProgress?.stats) return undefined
+    return {
+      successCount: sseProgress.stats.successCount,
+      errorCount: sseProgress.stats.errorCount,
+      totalDevices: sseProgress.stats.totalDevices,
+    }
+  }, [sseProgress?.stats])
+
+  // Handle SSE completion/error
   useEffect(() => {
-    if (!isApplying || progressComplete || progressError) return
+    if (!showProgress || !useSSE.current) return
 
-    // Advance phase every few seconds to simulate progress
-    const phaseInterval = setInterval(() => {
-      setProgressPhase(prev => {
-        if (prev < progressPhases.length - 1) {
-          return prev + 1
-        }
-        return prev
-      })
-    }, 4000) // Advance every 4 seconds
+    if (sseProgress?.type === 'complete') {
+      setProgressComplete(true)
+    } else if (sseProgress?.type === 'error' || sseError) {
+      setProgressError(true)
+      setProgressErrorMessage(sseError || sseProgress?.error || 'Assignment failed')
+    }
+  }, [sseProgress, sseError, showProgress])
 
-    return () => clearInterval(phaseInterval)
-  }, [isApplying, progressComplete, progressError, progressPhases.length])
-
-  // Handle apply completion/error
+  // Fallback: Handle non-SSE apply completion/error
   useEffect(() => {
-    if (!showProgress) return
+    if (!showProgress || useSSE.current) return
 
     if (!isApplying && applyResult) {
       if (applyResult.success) {
-        setProgressPhase(progressPhases.length - 1)
         setProgressComplete(true)
       } else {
         setProgressError(true)
         setProgressErrorMessage(`${applyResult.errors} operation(s) failed`)
       }
     }
-  }, [isApplying, applyResult, showProgress, progressPhases.length])
+  }, [isApplying, applyResult, showProgress])
 
-  // Combined handler: apply selections to devices THEN trigger API call
-  const handleApplyAll = useCallback(() => {
+  // Combined handler: apply selections to devices THEN trigger API call via SSE
+  const handleApplyAll = useCallback(async () => {
     // Reset progress state
     setShowProgress(true)
-    setProgressPhase(0)
     setProgressComplete(false)
     setProgressError(false)
     setProgressErrorMessage(undefined)
 
     // First, apply the per-type selections to the device objects
-    // applyAllAssignments returns the updated devices
     const updatedDevices = applyAllAssignments()
-    // Then trigger the API call with the updated devices
-    applyAssignments(updatedDevices)
-  }, [applyAllAssignments, applyAssignments])
+
+    // Build the request for SSE streaming
+    const selectedDevices = updatedDevices.filter(d => selectedSerials.has(d.serial_number))
+    const request: ApplyRequest = {
+      devices: selectedDevices.map(d => ({
+        serial_number: d.serial_number,
+        mac_address: d.mac_address,
+        device_id: d.device_id,
+        device_type: d.device_type,
+        current_subscription_id: d.current_subscription_id,
+        current_application_id: d.current_application_id,
+        current_tags: d.current_tags,
+        selected_subscription_id: d.selected_subscription_id,
+        selected_application_id: d.selected_application_id,
+        selected_region: d.selected_region,
+        selected_tags: d.selected_tags,
+      })),
+      wait_for_completion: true,
+    }
+
+    // Try SSE streaming first
+    useSSE.current = true
+    try {
+      await startStream(request)
+    } catch {
+      // If SSE fails, fall back to regular API
+      useSSE.current = false
+      applyAssignments(updatedDevices)
+    }
+  }, [applyAllAssignments, applyAssignments, selectedSerials, startStream])
+
+  // Cancel handler
+  const handleCancel = useCallback(() => {
+    stopStream()
+    setShowProgress(false)
+  }, [stopStream])
 
   // Close progress modal and go to results
   const handleProgressClose = useCallback(() => {
@@ -417,12 +488,17 @@ export function DeviceAssignment() {
         isOpen={showProgress}
         title="Applying Assignments"
         phases={progressPhases}
-        currentPhaseIndex={progressPhase}
+        currentPhaseIndex={currentPhaseIndex}
+        currentPhaseName={sseProgress?.phase}
         totalDevices={selectedCount}
         isComplete={progressComplete}
         isError={progressError}
         errorMessage={progressErrorMessage}
         onClose={handleProgressClose}
+        onCancel={handleCancel}
+        batchProgress={batchProgress}
+        timing={timing}
+        stats={stats}
       />
     </div>
   )

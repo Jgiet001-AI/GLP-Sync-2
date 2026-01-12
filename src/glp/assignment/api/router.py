@@ -1,9 +1,13 @@
 """FastAPI router for device assignment endpoints."""
 
+import asyncio
+import contextlib
+import json
 import logging
+import time
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from ..domain.entities import DeviceAssignment
@@ -28,6 +32,7 @@ from .dependencies import (
     get_report_generator,
     get_subscription_repo,
     get_sync_service,
+    verify_api_key,
 )
 from .schemas import (
     AddDeviceResultDTO,
@@ -52,6 +57,10 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
+# File upload limits
+MAX_UPLOAD_SIZE_MB = 10
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024  # 10 MB
+
 router = APIRouter(prefix="/api/assignment", tags=["Device Assignment"])
 
 
@@ -60,6 +69,7 @@ async def upload_excel(
     file: UploadFile = File(...),
     excel_parser: IExcelParser = Depends(get_excel_parser),
     device_repo: IDeviceRepository = Depends(get_device_repo),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Upload an Excel file with device serial numbers and MAC addresses.
 
@@ -68,6 +78,8 @@ async def upload_excel(
     - MAC Address (optional)
 
     Returns parsed devices with their current assignment status.
+
+    Max file size: 10 MB
     """
     # Validate file type
     if not file.filename:
@@ -79,10 +91,23 @@ async def upload_excel(
             detail="File must be an Excel (.xlsx, .xls) or CSV (.csv) file",
         )
 
-    # Read file content
+    # Check content-length header if available (early rejection)
+    if file.size and file.size > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB",
+        )
+
+    # Read file content with size limit
     content = await file.read()
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="File is empty")
+
+    if len(content) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB",
+        )
 
     # Process the Excel file
     use_case = ProcessExcelUseCase(
@@ -146,6 +171,7 @@ async def get_options(
     ] = None,
     subscription_repo: ISubscriptionRepository = Depends(get_subscription_repo),
     device_repo: IDeviceRepository = Depends(get_device_repo),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Get available options for device assignment.
 
@@ -201,6 +227,7 @@ async def get_options(
 async def apply_assignments(
     request: ApplyRequest,
     device_manager: IDeviceManagerPort = Depends(get_device_manager),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Apply selected assignments to devices.
 
@@ -283,11 +310,127 @@ async def apply_assignments(
     )
 
 
+@router.post("/apply-stream")
+async def apply_assignments_stream(
+    request: Request,
+    body: ApplyRequest,
+    device_manager: IDeviceManagerPort = Depends(get_device_manager),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Apply assignments to devices with real-time progress streaming via SSE.
+
+    This endpoint streams progress events as Server-Sent Events (SSE):
+    - phase_start: When a new phase begins
+    - batch_progress: After each batch completes
+    - phase_complete: When a phase finishes
+    - error: If an error occurs
+    - complete: When all operations finish
+
+    Use this instead of /apply when you need real-time progress updates.
+    """
+    # Create queue for event communication between producer and consumer
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    stop_event = asyncio.Event()
+
+    async def publish(evt: dict):
+        """Publish an SSE event to the queue."""
+        event_type = evt.get("type", "message")
+        data = json.dumps(evt)
+        await queue.put(f"event: {event_type}\ndata: {data}\n\n")
+
+    async def run_assignments():
+        """Run the assignment workflow and publish progress events."""
+        try:
+            # Log what we received
+            logger.info(f"=== APPLY-STREAM REQUEST: {len(body.devices)} devices ===")
+
+            # Convert request DTOs to domain entities
+            assignments = [
+                DeviceAssignment(
+                    serial_number=d.serial_number,
+                    mac_address=d.mac_address,
+                    device_id=d.device_id,
+                    device_type=d.device_type,
+                    current_subscription_id=d.current_subscription_id,
+                    current_application_id=d.current_application_id,
+                    current_tags=d.current_tags or {},
+                    selected_subscription_id=d.selected_subscription_id,
+                    selected_application_id=d.selected_application_id,
+                    selected_region=d.selected_region,
+                    selected_tags=d.selected_tags,
+                    keep_current_subscription=d.keep_current_subscription,
+                    keep_current_application=d.keep_current_application,
+                    keep_current_tags=d.keep_current_tags,
+                )
+                for d in body.devices
+            ]
+
+            use_case = ApplyAssignmentsUseCase(device_manager=device_manager)
+
+            # Execute with progress callback
+            async for event in use_case.execute_with_progress(
+                assignments=assignments,
+                wait_for_completion=body.wait_for_completion,
+            ):
+                await publish(event)
+
+            # Final complete event is sent by execute_with_progress
+
+        except Exception as e:
+            logger.exception("Error in apply-stream")
+            await publish({
+                "type": "error",
+                "error": str(e),
+            })
+        finally:
+            stop_event.set()
+
+    async def event_generator():
+        """Generate SSE events from the queue."""
+        task = asyncio.create_task(run_assignments())
+
+        try:
+            while not stop_event.is_set():
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    logger.info("Client disconnected from SSE stream")
+                    break
+
+                try:
+                    # Wait for next event with timeout (for keep-alive)
+                    chunk = await asyncio.wait_for(queue.get(), timeout=10.0)
+                    yield chunk
+                except asyncio.TimeoutError:
+                    # Send keep-alive comment
+                    yield ": keep-alive\n\n"
+
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Cancel the task if still running
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",  # Disable Nginx buffering
+    }
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
 @router.post("/sync", response_model=ReportResponse)
 async def sync_and_report(
     request: SyncRequest,
     sync_service: ISyncService = Depends(get_sync_service),
     report_generator: IReportGenerator = Depends(get_report_generator),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Trigger a resync with GreenLake and generate a report.
 
@@ -305,8 +448,13 @@ async def sync_and_report(
     )
 
     # We don't have operations to report on from this endpoint
-    # This is just for triggering a sync
-    result = await use_case.execute(operations=[], sync_after=True)
+    # This is just for triggering a sync with user-specified flags
+    result = await use_case.execute(
+        operations=[],
+        sync_after=True,
+        sync_devices=request.sync_devices,
+        sync_subscriptions=request.sync_subscriptions,
+    )
 
     return ReportResponse(
         generated_at=result.generated_at,
@@ -334,6 +482,7 @@ async def sync_and_report(
 @router.get("/report/download")
 async def download_report(
     report_generator: IReportGenerator = Depends(get_report_generator),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Download the latest report as an Excel file.
 
@@ -365,6 +514,7 @@ async def health_check():
 async def add_devices_to_greenlake(
     request: AddDevicesRequest,
     device_manager: IDeviceManagerPort = Depends(get_device_manager),
+    _auth: bool = Depends(verify_api_key),
 ):
     """Add new devices to GreenLake.
 

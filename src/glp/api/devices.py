@@ -6,14 +6,21 @@ the HPE GreenLake Platform API to PostgreSQL. Supports both database sync
 and JSON export operations.
 
 Architecture:
-    DeviceSyncer composes GLPClient for HTTP concerns and focuses purely on:
-    - Device-specific field mappings (all 30+ fields)
-    - Database schema operations (devices, device_subscriptions, device_tags)
-    - Business logic
+    DeviceSyncer now delegates to Clean Architecture use cases internally:
+    - SyncDevicesUseCase: Orchestrates the sync workflow
+    - PostgresDeviceRepository: Handles database operations
+    - GLPDeviceAPI: Handles API operations
+    - DeviceFieldMapper: Handles field transformations
+
+    This maintains backward compatibility while enabling:
+    - Unit testing without infrastructure
+    - Reusable components
+    - Clear separation of concerns
 
 The separation of concerns means:
     - GLPClient handles: HTTP, auth, pagination, rate limiting, retries
     - DeviceSyncer handles: device schema, field extraction, related tables
+    - Clean Architecture layers handle: testable, pluggable components
 
 Database Tables:
     - devices: Main device inventory with all API fields
@@ -44,6 +51,10 @@ from .exceptions import (
     SyncError,
 )
 
+# Clean Architecture imports
+from ..sync.adapters import DeviceFieldMapper, GLPDeviceAPI, PostgresDeviceRepository
+from ..sync.use_cases import SyncDevicesUseCase
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,15 +77,34 @@ class DeviceSyncer:
         self,
         client: GLPClient,
         db_pool=None,
+        *,
+        use_clean_architecture: bool = True,
+        use_streaming: bool = False,
     ):
         """Initialize DeviceSyncer.
 
         Args:
             client: Configured GLPClient instance
             db_pool: asyncpg connection pool (optional for JSON-only mode)
+            use_clean_architecture: If True, use the new Clean Architecture
+                                   use case internally (default: True)
+            use_streaming: If True, use streaming mode for memory-efficient
+                          sync of large datasets (100K+ devices). Processes
+                          page by page instead of loading all into memory.
         """
         self.client = client
         self.db_pool = db_pool
+        self._use_clean_architecture = use_clean_architecture
+        self._use_streaming = use_streaming
+
+        # Create use case with adapters if db_pool is provided
+        self._use_case: SyncDevicesUseCase | None = None
+        if db_pool and use_clean_architecture:
+            self._use_case = SyncDevicesUseCase(
+                device_api=GLPDeviceAPI(client),
+                device_repo=PostgresDeviceRepository(db_pool),
+                field_mapper=DeviceFieldMapper(),
+            )
 
     # ----------------------------------------
     # Fetching
@@ -425,6 +455,12 @@ class DeviceSyncer:
     async def sync(self) -> dict:
         """Full sync: fetch all devices and upsert to database.
 
+        When use_clean_architecture=True (default), delegates to SyncDevicesUseCase.
+        Otherwise, uses the legacy implementation for backward compatibility.
+
+        When use_streaming=True, uses memory-efficient streaming mode that
+        processes devices page by page. Recommended for large inventories.
+
         Returns:
             Sync statistics dictionary
 
@@ -432,6 +468,31 @@ class DeviceSyncer:
             GLPError: If API fetch fails
             PartialSyncError: If some devices failed to sync
         """
+        # Use Clean Architecture use case if available
+        if self._use_case:
+            if self._use_streaming:
+                logger.info("Using Clean Architecture use case for sync (streaming mode)")
+                result = await self._use_case.execute_streaming()
+            else:
+                logger.info("Using Clean Architecture use case for sync")
+                result = await self._use_case.execute()
+
+            # Convert SyncResult to backward-compatible dict format
+            stats = result.to_dict()
+
+            # Raise PartialSyncError if there were errors (for backward compatibility)
+            if not result.success and result.error_details:
+                raise PartialSyncError(
+                    f"Device sync completed with {result.errors} errors",
+                    succeeded=result.upserted,
+                    failed=result.errors,
+                    errors=result.error_details,
+                    details=stats,
+                )
+
+            return stats
+
+        # Legacy implementation (when use_clean_architecture=False or no db_pool)
         logger.info(f"Starting device sync at {datetime.utcnow().isoformat()}")
 
         try:
@@ -470,10 +531,12 @@ class DeviceSyncer:
             GLPError: If API fetch fails
             IOError: If file cannot be written
         """
+        import aiofiles
+
         devices = await self.fetch_all_devices()
 
-        with open(filepath, "w") as f:
-            json.dump(devices, f, indent=2)
+        async with aiofiles.open(filepath, "w") as f:
+            await f.write(json.dumps(devices, indent=2))
 
         logger.info(f"Saved {len(devices):,} devices to {filepath}")
         return len(devices)

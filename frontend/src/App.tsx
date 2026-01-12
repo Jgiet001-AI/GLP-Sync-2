@@ -1,15 +1,20 @@
 import { lazy, Suspense, useState, useEffect } from 'react'
-import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'react-hot-toast'
-import { LayoutDashboard, Upload, Menu, X, Server, Shield, Search, Command } from 'lucide-react'
+import { LayoutDashboard, Upload, Menu, X, Server, Shield, Search, Command, Users } from 'lucide-react'
 import { CommandPalette } from './components/ui/CommandPalette'
+import { Breadcrumbs } from './components/navigation/Breadcrumbs'
+import { ChatWidget } from './components/chat'
+import { BackgroundTaskProvider } from './contexts/BackgroundTaskContext'
+import { BackgroundTaskIndicator } from './components/BackgroundTaskIndicator'
 
 // Lazy load page components for code splitting
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const DevicesList = lazy(() => import('./pages/DevicesList').then(m => ({ default: m.DevicesList })))
 const SubscriptionsList = lazy(() => import('./pages/SubscriptionsList').then(m => ({ default: m.SubscriptionsList })))
 const DeviceAssignment = lazy(() => import('./pages/DeviceAssignment').then(m => ({ default: m.DeviceAssignment })))
+const ClientsPage = lazy(() => import('./pages/ClientsPage').then(m => ({ default: m.ClientsPage })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,10 +37,27 @@ function PageLoader() {
   )
 }
 
+// Breadcrumb wrapper - only shows on non-dashboard pages
+function BreadcrumbWrapper() {
+  const location = useLocation()
+
+  // Don't show breadcrumbs on dashboard
+  if (location.pathname === '/') return null
+
+  return (
+    <div className="border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm">
+      <div className="mx-auto max-w-[1600px] px-6 py-3">
+        <Breadcrumbs />
+      </div>
+    </div>
+  )
+}
+
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/devices', label: 'Devices', icon: Server },
   { path: '/subscriptions', label: 'Subscriptions', icon: Shield },
+  { path: '/clients', label: 'Clients', icon: Users },
   { path: '/assignment', label: 'Assignment', icon: Upload },
 ] as const
 
@@ -167,46 +189,55 @@ function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <div className="min-h-screen bg-slate-900">
-          <Navigation onOpenSearch={() => setSearchOpen(true)} />
-          <main className="pt-16">
-            <Suspense fallback={<PageLoader />}>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/devices" element={<DevicesList />} />
-                <Route path="/subscriptions" element={<SubscriptionsList />} />
-                <Route path="/assignment" element={<DeviceAssignment />} />
-              </Routes>
-            </Suspense>
-          </main>
-          <Toaster
-            position="bottom-right"
-            toastOptions={{
-              className: '',
-              style: {
-                background: 'var(--color-bg-secondary)',
-                color: 'var(--color-text-primary)',
-                border: '1px solid var(--color-border)',
-              },
-              success: {
-                iconTheme: {
-                  primary: 'var(--color-hpe-green)',
-                  secondary: 'var(--color-text-primary)',
+      <BackgroundTaskProvider>
+        <BrowserRouter>
+          <div className="min-h-screen bg-slate-900">
+            <Navigation onOpenSearch={() => setSearchOpen(true)} />
+            <main className="pt-16">
+              {/* Breadcrumb navigation - shows on all pages except dashboard */}
+              <BreadcrumbWrapper />
+              <Suspense fallback={<PageLoader />}>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/devices" element={<DevicesList />} />
+                  <Route path="/subscriptions" element={<SubscriptionsList />} />
+                  <Route path="/clients" element={<ClientsPage />} />
+                  <Route path="/assignment" element={<DeviceAssignment />} />
+                </Routes>
+              </Suspense>
+            </main>
+            <Toaster
+              position="bottom-left"
+              toastOptions={{
+                className: '',
+                style: {
+                  background: 'var(--color-bg-secondary)',
+                  color: 'var(--color-text-primary)',
+                  border: '1px solid var(--color-border)',
                 },
-              },
-              error: {
-                iconTheme: {
-                  primary: 'var(--color-error)',
-                  secondary: 'var(--color-text-primary)',
+                success: {
+                  iconTheme: {
+                    primary: 'var(--color-hpe-green)',
+                    secondary: 'var(--color-text-primary)',
+                  },
                 },
-              },
-            }}
-          />
-          {/* Global Command Palette */}
-          <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
-        </div>
-      </BrowserRouter>
+                error: {
+                  iconTheme: {
+                    primary: 'var(--color-error)',
+                    secondary: 'var(--color-text-primary)',
+                  },
+                },
+              }}
+            />
+            {/* Global Command Palette */}
+            <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+            {/* AI Chat Widget */}
+            <ChatWidget apiBaseUrl="/api/agent" position="bottom-right" />
+            {/* Background Task Indicator (bottom-right, above chat) */}
+            <BackgroundTaskIndicator />
+          </div>
+        </BrowserRouter>
+      </BackgroundTaskProvider>
     </QueryClientProvider>
   )
 }

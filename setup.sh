@@ -180,9 +180,122 @@ echo ""
 print_success "Scheduler settings configured"
 
 # ============================================
+# API Security Settings
+# ============================================
+print_header "Step 4: API Security Configuration"
+
+echo "Configure API authentication for the dashboard and assignment APIs."
+echo ""
+echo "  1) Development mode - No authentication required"
+echo "  2) Production mode - API key required (auto-generated)"
+echo ""
+
+echo -ne "${CYAN}Select mode (1-2)${NC} [${YELLOW}1${NC}]: "
+read security_mode
+
+# Default to development
+if [ -z "$security_mode" ]; then
+    security_mode="1"
+fi
+
+DISABLE_AUTH="false"
+API_KEY=""
+
+case $security_mode in
+    1)
+        DISABLE_AUTH="true"
+        REQUIRE_AUTH="false"
+        JWT_SECRET=""
+        print_success "Development mode: Authentication disabled"
+        ;;
+    2|*)
+        DISABLE_AUTH="false"
+        REQUIRE_AUTH="true"
+        API_KEY=$(openssl rand -base64 32 | tr -d '/+=' | head -c 43)
+        JWT_SECRET=$(openssl rand -base64 48 | tr -d '/+=' | head -c 64)
+        echo ""
+        print_success "Production mode: Secrets generated"
+        echo -e "  ${YELLOW}API Key:    $API_KEY${NC}"
+        echo -e "  ${YELLOW}JWT Secret: ${JWT_SECRET:0:16}...${NC}"
+        echo ""
+        echo -e "  ${CYAN}API Key: Use in X-API-Key header for dashboard/assignment APIs${NC}"
+        echo -e "  ${CYAN}JWT Secret: Used internally for agent chatbot authentication${NC}"
+        ;;
+esac
+
+echo ""
+
+# ============================================
+# AI Chatbot Settings (Optional)
+# ============================================
+print_header "Step 5: AI Chatbot Configuration"
+
+echo "The AI chatbot can use different LLM providers."
+echo "Select your preferred provider (or skip to configure later)."
+echo ""
+echo "  1) Anthropic (Claude) - Recommended"
+echo "  2) OpenAI (GPT-4)"
+echo "  3) Ollama (Local, no API key needed)"
+echo "  4) Skip for now"
+echo ""
+
+echo -ne "${CYAN}Select LLM provider (1-4)${NC} [${YELLOW}4${NC}]: "
+read llm_choice
+
+# Default to skip
+if [ -z "$llm_choice" ]; then
+    llm_choice="4"
+fi
+
+LLM_PROVIDER=""
+LLM_API_KEY=""
+LLM_MODEL=""
+EMBEDDING_MODEL=""
+
+case $llm_choice in
+    1)
+        LLM_PROVIDER="anthropic"
+        echo ""
+        prompt_required "Anthropic API Key" LLM_API_KEY "true"
+        prompt_with_default "Claude Model" "claude-sonnet-4-5-20250929" LLM_MODEL
+        echo ""
+        echo -e "${YELLOW}Note: Anthropic doesn't provide embeddings. Using OpenAI for embeddings.${NC}"
+        echo -ne "${CYAN}OpenAI API Key for embeddings (optional, press Enter to skip)${NC}: "
+        read -s OPENAI_API_KEY
+        echo ""
+        if [ -n "$OPENAI_API_KEY" ]; then
+            EMBEDDING_MODEL="text-embedding-3-large"
+        fi
+        print_success "Anthropic (Claude) configured"
+        ;;
+    2)
+        LLM_PROVIDER="openai"
+        echo ""
+        prompt_required "OpenAI API Key" LLM_API_KEY "true"
+        prompt_with_default "GPT Model" "gpt-5-nano-2025-08-07" LLM_MODEL
+        EMBEDDING_MODEL="text-embedding-3-large"
+        print_success "OpenAI (GPT) configured"
+        ;;
+    3)
+        LLM_PROVIDER="ollama"
+        echo ""
+        OLLAMA_BASE_URL="http://localhost:11434"
+        prompt_with_default "Ollama Model" "qwen3:4b" LLM_MODEL
+        echo -e "${YELLOW}Note: Ollama URL automatically set to $OLLAMA_BASE_URL${NC}"
+        print_success "Ollama configured (run: ollama run $LLM_MODEL)"
+        ;;
+    4|*)
+        echo ""
+        print_warning "Skipping LLM configuration. You can add it to .env later."
+        ;;
+esac
+
+echo ""
+
+# ============================================
 # Confirm Settings
 # ============================================
-print_header "Step 4: Confirm Configuration"
+print_header "Step 6: Confirm Configuration"
 
 echo -e "${BOLD}GreenLake API:${NC}"
 echo "  Client ID:     ${GLP_CLIENT_ID:0:8}..."
@@ -201,6 +314,27 @@ echo "  Devices:       $SYNC_DEVICES"
 echo "  Subscriptions: $SYNC_SUBSCRIPTIONS"
 echo "  On Startup:    $SYNC_ON_STARTUP"
 echo ""
+echo -e "${BOLD}API Security:${NC}"
+if [ "$DISABLE_AUTH" = "true" ]; then
+    echo "  Mode:          Development (auth disabled)"
+else
+    echo "  Mode:          Production"
+    echo "  API Key:       ${API_KEY:0:8}..."
+    echo "  JWT Secret:    ${JWT_SECRET:0:8}..."
+fi
+echo ""
+echo -e "${BOLD}AI Chatbot:${NC}"
+if [ -n "$LLM_PROVIDER" ]; then
+    echo "  Provider:      $LLM_PROVIDER"
+    echo "  Model:         $LLM_MODEL"
+    echo "  API Key:       ********"
+    if [ -n "$EMBEDDING_MODEL" ]; then
+        echo "  Embeddings:    $EMBEDDING_MODEL"
+    fi
+else
+    echo "  Provider:      Not configured"
+fi
+echo ""
 
 echo -ne "${YELLOW}Proceed with these settings? (y/n)${NC}: "
 read confirm
@@ -213,7 +347,7 @@ fi
 # ============================================
 # Create .env File
 # ============================================
-print_header "Step 5: Creating Configuration"
+print_header "Step 7: Creating Configuration"
 
 print_step "Writing .env file..."
 
@@ -242,14 +376,62 @@ SYNC_ON_STARTUP=$SYNC_ON_STARTUP
 SYNC_MAX_RETRIES=3
 SYNC_RETRY_DELAY_MINUTES=5
 HEALTH_CHECK_PORT=8080
+
+# API Security Settings
+# Development: DISABLE_AUTH=true bypasses authentication
+# Production: Set DISABLE_AUTH=false and use API_KEY with X-API-Key header
+DISABLE_AUTH=$DISABLE_AUTH
+API_KEY=$API_KEY
+
+# JWT Authentication (for Agent Chatbot API)
+REQUIRE_AUTH=$REQUIRE_AUTH
+JWT_SECRET=$JWT_SECRET
+JWT_ALGORITHM=HS256
 EOF
 
+# Add LLM configuration if provider was selected
+if [ -n "$LLM_PROVIDER" ]; then
+    cat >> .env << EOF
+
+# AI Chatbot Configuration
+LLM_PROVIDER=$LLM_PROVIDER
+LLM_MODEL=$LLM_MODEL
+EOF
+
+    if [ "$LLM_PROVIDER" = "anthropic" ]; then
+        echo "ANTHROPIC_API_KEY=$LLM_API_KEY" >> .env
+        if [ -n "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY=$OPENAI_API_KEY" >> .env
+            echo "EMBEDDING_MODEL=$EMBEDDING_MODEL" >> .env
+        fi
+    elif [ "$LLM_PROVIDER" = "openai" ]; then
+        echo "OPENAI_API_KEY=$LLM_API_KEY" >> .env
+        echo "EMBEDDING_MODEL=$EMBEDDING_MODEL" >> .env
+    elif [ "$LLM_PROVIDER" = "ollama" ]; then
+        echo "OLLAMA_BASE_URL=$OLLAMA_BASE_URL" >> .env
+        echo "OLLAMA_MODEL=$LLM_MODEL" >> .env
+    fi
+fi
+
 print_success ".env file created"
+
+# Create frontend .env if in production mode (with API key)
+if [ "$DISABLE_AUTH" = "false" ] && [ -n "$API_KEY" ]; then
+    print_step "Creating frontend/.env with API key..."
+    cat > frontend/.env << EOF
+# Frontend Environment Variables
+# Generated by setup.sh
+
+# API Key for dashboard requests
+VITE_API_KEY=$API_KEY
+EOF
+    print_success "frontend/.env created"
+fi
 
 # ============================================
 # Build and Start
 # ============================================
-print_header "Step 6: Building & Starting Containers"
+print_header "Step 8: Building & Starting Containers"
 
 print_step "Building Docker images..."
 docker compose build
@@ -267,8 +449,25 @@ print_success "Containers started!"
 print_header "Setup Complete! "
 
 echo -e "${BOLD}Services Running:${NC}"
-echo "  • PostgreSQL:  localhost:5432"
+echo "  • PostgreSQL:   localhost:5432"
 echo "  • Health Check: http://localhost:8080"
+if [ -n "$LLM_PROVIDER" ]; then
+    echo "  • AI Chatbot:   Configured with $LLM_PROVIDER"
+fi
+echo ""
+
+echo -e "${BOLD}API Security:${NC}"
+if [ "$DISABLE_AUTH" = "true" ]; then
+    echo "  • Mode: Development (no authentication)"
+else
+    echo "  • Mode: Production"
+    echo "  • API Key:    $API_KEY"
+    echo "  • JWT Secret: $JWT_SECRET"
+    echo ""
+    echo -e "  ${YELLOW}IMPORTANT: Save these secrets!${NC}"
+    echo -e "  ${CYAN}API Key: Use in X-API-Key header for dashboard/assignment APIs${NC}"
+    echo -e "  ${CYAN}JWT Secret: Configured automatically for agent chatbot API${NC}"
+fi
 echo ""
 
 echo -e "${BOLD}Useful Commands:${NC}"

@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import toast from 'react-hot-toast'
 import { dashboardApiClient } from '../api/client'
+import { useBackgroundTasks } from '../contexts/BackgroundTaskContext'
 import { Tooltip } from '../components/ui/Tooltip'
 import {
   Server,
@@ -289,8 +289,8 @@ function ExpiringItemRow({ item }: { item: ExpiringItem }) {
 
   const Icon = item.item_type === 'device' ? Server : Shield
   const href = item.item_type === 'device'
-    ? `/devices?search=${item.identifier}`
-    : `/subscriptions?search=${item.identifier}`
+    ? `/devices?search=${encodeURIComponent(item.identifier)}`
+    : `/subscriptions?search=${encodeURIComponent(item.identifier)}`
 
   return (
     <Link
@@ -431,6 +431,9 @@ export function Dashboard() {
   const queryClient = useQueryClient()
   const [syncProgress, setSyncProgress] = useState('')
 
+  // Background task context
+  const { addTask, updateTask } = useBackgroundTasks()
+
   const { data, isLoading, error, refetch } = useQuery<DashboardResponse>({
     queryKey: ['dashboard'],
     queryFn: () => dashboardApiClient.getDashboard(),
@@ -450,19 +453,43 @@ export function Dashboard() {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] })
       queryClient.invalidateQueries({ queryKey: ['devices-list'] })
       queryClient.invalidateQueries({ queryKey: ['subscriptions-list'] })
-
-      // Handle different response formats (total, upserted, fetched, updated)
-      const deviceCount = result.devices?.total || result.devices?.upserted || result.devices?.fetched || 0
-      const subCount = result.subscriptions?.total || result.subscriptions?.upserted || result.subscriptions?.fetched || 0
-
-      toast.success(`Sync complete! ${deviceCount.toLocaleString()} devices, ${subCount} subscriptions`)
       setSyncProgress('')
+      return result
     },
-    onError: (error) => {
+    onError: () => {
       setSyncProgress('')
-      toast.error(error instanceof Error ? error.message : 'Sync failed')
     },
   })
+
+  // Handle sync with background task tracking
+  const handleSync = useCallback(() => {
+    const taskId = addTask({
+      type: 'sync',
+      title: 'Syncing with GreenLake',
+      description: 'Fetching devices and subscriptions',
+      status: 'running',
+    })
+
+    syncMutation.mutate(undefined, {
+      onSuccess: (result) => {
+        const deviceCount = result.devices?.total || result.devices?.upserted || result.devices?.fetched || 0
+        const subCount = result.subscriptions?.total || result.subscriptions?.upserted || result.subscriptions?.fetched || 0
+
+        updateTask(taskId, {
+          status: 'completed',
+          completedAt: Date.now(),
+          result: { devices: deviceCount, subscriptions: subCount },
+        })
+      },
+      onError: (error) => {
+        updateTask(taskId, {
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Sync failed',
+          completedAt: Date.now(),
+        })
+      },
+    })
+  }, [addTask, updateTask, syncMutation])
 
   const isSyncing = syncMutation.isPending
 
@@ -551,7 +578,7 @@ export function Dashboard() {
                   )}
                 </div>
                 <button
-                  onClick={() => syncMutation.mutate()}
+                  onClick={handleSync}
                   disabled={isSyncing}
                   className="flex items-center gap-2 rounded-lg bg-hpe-green px-4 py-2 text-sm font-medium text-white transition-all hover:bg-hpe-green/90 disabled:opacity-50 cursor-pointer"
                 >

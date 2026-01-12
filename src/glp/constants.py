@@ -15,6 +15,8 @@ Attributes:
 
     GLP_URLS (dict[str, str]): GreenLake Platform (GLP) API URLs and endpoints.
 
+    ARUBA_CENTRAL_URLS (dict[str, str]): Aruba Central API endpoints.
+
     SCOPE_URLS (dict[str, str]): Scope-related API URLs for site and device
         organization.
 """
@@ -60,6 +62,15 @@ GLP_URLS = {
     "SERVICE_MANAGER_BY_REGION": "per-region-service-managers",
 }
 
+# Aruba Central API endpoints
+# Note: Base URL is region-specific (use CLUSTER_BASE_URLS)
+ARUBA_CENTRAL_URLS = {
+    "TOKEN_URL": "https://sso.common.cloud.hpe.com/as/token.oauth2",
+    "DEVICES": "/network-monitoring/v1alpha1/devices",
+    "SITES": "/central/v2/sites",
+    "DEVICE_GROUPS": "/central/v2/device_groups",
+}
+
 SCOPE_URLS = {
     "SITE": "sites",
     "SITE_COLLECTION": "site-collections",
@@ -76,5 +87,6 @@ __all__ = [
     "SUPPORTED_CONFIG_PERSONAS",
     "AUTHENTICATION",
     "GLP_URLS",
+    "ARUBA_CENTRAL_URLS",
     "SCOPE_URLS",
 ]
