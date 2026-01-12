@@ -1,249 +1,385 @@
 # HPE GreenLake Device & Subscription Sync
 
-Sync device and subscription inventory from HPE GreenLake Platform to PostgreSQL.
+A comprehensive platform for syncing device and subscription inventory from HPE GreenLake Platform to PostgreSQL, with a React dashboard, AI chatbot, and Aruba Central integration.
 
 ## Features
 
-- **OAuth2 Authentication** — Automatic token refresh with 5-minute buffer
-- **Paginated Fetching** — Devices: 2,000/page, Subscriptions: 50/page
-- **PostgreSQL Sync** — Upsert with JSONB storage + normalized tables
-- **Full-Text Search** — Search devices by serial, name, model
-- **Scheduler** — Automated sync at configurable intervals
-- **Docker Ready** — Production-ready container with health checks
+### Core Sync
+- **OAuth2 Authentication** - Automatic token refresh with 5-minute buffer
+- **Paginated Fetching** - Devices: 2,000/page, Subscriptions: 50/page
+- **PostgreSQL Sync** - Upsert with JSONB storage + normalized tables
+- **Full-Text Search** - Search devices by serial, name, model
+- **Scheduler** - Automated sync at configurable intervals
+- **Circuit Breaker** - Resilience layer with automatic recovery
+
+### Web Dashboard
+- **React Frontend** - Modern UI with TailwindCSS
+- **Device Assignment** - Bulk assign subscriptions, regions, and tags
+- **Real-time Progress** - Server-Sent Events for operation tracking
+- **Command Palette** - Quick navigation (Cmd+K)
+
+### AI Agent Chatbot
+- **Multi-Provider** - Anthropic Claude and OpenAI GPT support
+- **MCP Tools** - 27 read-only database tools for AI assistants
+- **WebSocket Streaming** - Real-time chat with ticket authentication
+- **Memory Patterns** - Conversation history and semantic search
+
+### Integrations
+- **Aruba Central** - Device and client sync from Aruba
+- **Docker Hub** - Automated multi-arch image publishing
+- **GitHub Actions** - CI/CD with vulnerability scanning
 
 ## Quick Start
 
-### Option 1: Interactive Setup (Recommended)
+### Option 1: Docker Compose (Recommended)
 
 ```bash
-git clone https://github.com/Jgiet001-AI/Demo_Comcast_GLP.git
-cd Demo_Comcast_GLP
+# Clone the repository
+git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
+cd GLP-Sync-2
 
-chmod +x setup.sh
-./setup.sh
-```
-
-### Option 2: Docker Compose
-
-```bash
-# Create .env file with credentials
+# Create .env file
 cp .env.example .env
-# Edit .env with your GreenLake credentials
+# Edit .env with your credentials
 
-# Start services
+# Start all services
 docker compose up -d
 
 # View logs
-docker compose logs -f scheduler
+docker compose logs -f
+
+# Access the dashboard
+open http://localhost
 ```
 
-### Option 3: Local Development
+### Option 2: Production Deployment
 
 ```bash
-# Create virtual environment
-uv sync
+# Use pre-built images from Docker Hub
+export DOCKERHUB_USERNAME=yourorg
 
-# Configure credentials
-cp .env.example .env
-# Edit .env
-
-# Run sync
-source .venv/bin/activate
-python main.py
+# Start with production compose
+docker compose -f docker-compose.prod.yml up -d
 ```
+
+### Option 3: Security-Hardened Deployment
+
+```bash
+# Start with security features enabled
+docker compose -f docker-compose.secure.yml up -d
+```
+
+## Docker Architecture
+
+### Services
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `postgres` | 5432 | PostgreSQL 16 with pgvector |
+| `redis` | 6379 | WebSocket ticket authentication |
+| `scheduler` | 8080 | Automated sync scheduler |
+| `api-server` | 8000 | FastAPI backend |
+| `mcp-server` | 8010 | MCP server for AI assistants |
+| `frontend` | 80 | React dashboard (nginx) |
+
+### Compose Files
+
+| File | Purpose |
+|------|---------|
+| `docker-compose.yml` | Development with local builds |
+| `docker-compose.prod.yml` | Production with pre-built images |
+| `docker-compose.secure.yml` | Security-hardened with read-only filesystems |
+
+### Security Features
+
+- Base images pinned by SHA256 digest
+- Non-root users (appuser, nginx)
+- Read-only filesystems (secure compose)
+- Dropped capabilities
+- No-new-privileges security option
+- Resource limits (CPU/memory)
+- Internal network isolation
+- Ports bound to localhost (prod/secure)
+
+## Environment Variables
+
+### Required
+
+| Variable | Description |
+|----------|-------------|
+| `GLP_CLIENT_ID` | HPE GreenLake OAuth2 client ID |
+| `GLP_CLIENT_SECRET` | HPE GreenLake OAuth2 client secret |
+| `GLP_TOKEN_URL` | OAuth2 token endpoint |
+| `API_KEY` | API key for dashboard authentication |
+| `POSTGRES_PASSWORD` | PostgreSQL password |
+
+### Optional
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GLP_BASE_URL` | `https://global.api.greenlake.hpe.com` | GreenLake API base URL |
+| `DATABASE_URL` | Auto-generated | PostgreSQL connection string |
+| `SYNC_INTERVAL_MINUTES` | `60` | Minutes between syncs |
+| `SYNC_DEVICES` | `true` | Enable device sync |
+| `SYNC_SUBSCRIPTIONS` | `true` | Enable subscription sync |
+| `JWT_SECRET` | - | Secret for agent API JWT tokens |
+| `ANTHROPIC_API_KEY` | - | Anthropic API key for Claude chatbot |
+| `OPENAI_API_KEY` | - | OpenAI API key for GPT chatbot |
+| `CORS_ORIGINS` | `http://localhost:3000` | Allowed CORS origins |
+
+### Aruba Central (Optional)
+
+| Variable | Description |
+|----------|-------------|
+| `ARUBA_CLIENT_ID` | Aruba Central OAuth2 client ID |
+| `ARUBA_CLIENT_SECRET` | Aruba Central OAuth2 client secret |
+| `ARUBA_TOKEN_URL` | Aruba Central token endpoint |
+| `ARUBA_BASE_URL` | Aruba Central API base URL |
 
 ## CLI Usage
 
 ```bash
-# DEFAULT: syncs both devices AND subscriptions
+# Sync both devices and subscriptions
 python main.py
 
-# SYNC ONLY ONE
+# Sync specific resources
 python main.py --devices              # Devices only
 python main.py --subscriptions        # Subscriptions only
 
-# UTILITIES
-python main.py --expiring-days 90     # Show expiring subscriptions
+# Export to JSON (no database required)
+python main.py --json-only
 
-# JSON EXPORT (no database needed)
-python main.py --json-only            # Export to JSON files
+# Show expiring subscriptions
+python main.py --expiring-days 90
 
-# BACKUPS
+# Backup data
 python main.py --backup devices.json --subscription-backup subs.json
 ```
 
-## MCP Server
+## API Endpoints
 
-A read-only MCP (Model Context Protocol) server for AI assistants to query the database.
+### Dashboard API (`/api`)
 
-### Starting the Server
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/health` | GET | Health check |
+| `/api/dashboard/stats` | GET | Dashboard statistics |
+| `/api/devices` | GET | List devices with filters |
+| `/api/subscriptions` | GET | List subscriptions |
+| `/api/assignment/upload` | POST | Upload Excel for assignment |
+| `/api/assignment/apply` | POST | Apply device assignments |
+| `/api/assignment/apply-stream` | POST | Apply with SSE progress |
 
-```bash
-# stdio transport (default, for Claude Desktop)
-python server.py
+### Agent API (`/api/agent`)
 
-# HTTP transport (for remote/web access)
-python server.py --transport http --port 8000
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/agent/ws-ticket` | POST | Get WebSocket auth ticket |
+| `/api/agent/chat` | WebSocket | Real-time chat with AI |
+| `/api/agent/conversations` | GET | List conversations |
 
-### Claude Desktop Configuration
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "greenlake-inventory": {
-      "command": "uv",
-      "args": ["run", "python", "server.py"],
-      "cwd": "/path/to/Demo_Comcast_GLP",
-      "env": {
-        "DATABASE_URL": "postgresql://user:pass@localhost:5432/postgres"
-      }
-    }
-  }
-}
-```
-
-### Available MCP Tools
+### MCP Server (Port 8010)
 
 | Tool | Description |
-| ---- | ----------- |
+|------|-------------|
 | `search_devices` | Full-text search across devices |
 | `get_device_by_serial` | Get device by serial number |
-| `list_devices` | List devices with filters (type, region, state) |
-| `get_device_subscriptions` | Get subscriptions linked to a device |
-| `search_subscriptions` | Full-text search across subscriptions |
-| `get_subscription_by_key` | Get subscription by key |
+| `list_devices` | List devices with filters |
+| `get_device_subscriptions` | Get subscriptions linked to device |
+| `search_subscriptions` | Full-text search subscriptions |
 | `list_expiring_subscriptions` | Subscriptions expiring within N days |
-| `get_device_summary` | Device counts by type and region |
-| `get_subscription_summary` | Subscription counts by type/status |
+| `get_device_summary` | Device counts by type/region |
+| `get_subscription_summary` | Subscription counts by status |
 | `run_query` | Execute read-only SQL queries |
-| `ask_database` | Natural language database queries (uses sampling) |
-
-### Available MCP Resources
-
-| Resource URI | Description |
-| ------------ | ----------- |
-| `schema://devices` | Devices table schema with descriptions |
-| `schema://subscriptions` | Subscriptions table schema |
-| `schema://views` | Available database views documentation |
-| `data://valid-values` | Valid values for categorical columns |
-| `data://query-examples` | Example SQL queries |
-
-### Available MCP Prompts
-
-| Prompt | Description |
-| ------ | ----------- |
-| `analyze_device` | Analyze a specific device by serial |
-| `analyze_expiring` | Subscription renewal analysis |
-| `device_report` | Device inventory report by type |
-| `subscription_utilization` | License utilization analysis |
-
-## Docker Commands
-
-```bash
-# Start scheduler (syncs every hour by default)
-docker compose up -d
-
-# View logs
-docker compose logs -f scheduler
-
-# Health check
-curl http://localhost:8080/
-
-# Manual one-time sync
-docker compose run --rm sync-once
-
-# Check expiring subscriptions
-docker compose run --rm check-expiring
-
-# Stop services
-docker compose down
-
-# Stop and remove data
-docker compose down -v
-```
-
-## Environment Variables
-
-| Variable | Description | Default |
-| -------- | ----------- | ------- |
-| `GLP_CLIENT_ID` | OAuth2 client ID | *required* |
-| `GLP_CLIENT_SECRET` | OAuth2 client secret | *required* |
-| `GLP_TOKEN_URL` | OAuth2 token endpoint | *required* |
-| `GLP_BASE_URL` | GreenLake API base URL | `https://global.api.greenlake.hpe.com` |
-| `DATABASE_URL` | PostgreSQL connection | *required for DB sync* |
-| `SYNC_INTERVAL_MINUTES` | Minutes between syncs | `60` |
-| `SYNC_DEVICES` | Enable device sync | `true` |
-| `SYNC_SUBSCRIPTIONS` | Enable subscription sync | `true` |
-| `SYNC_ON_STARTUP` | Sync immediately on start | `true` |
-| `HEALTH_CHECK_PORT` | Health endpoint port | `8080` |
+| `ask_database` | Natural language database queries |
 
 ## Project Structure
 
-```text
+```
 ├── main.py                      # CLI entry point
-├── server.py                    # FastMCP server (read-only database access)
 ├── scheduler.py                 # Automated sync scheduler
-├── Dockerfile                   # Production container
-├── docker-compose.yml           # Full stack deployment
-├── setup.sh                     # Interactive setup wizard
-├── src/glp/api/
-│   ├── auth.py                  # OAuth2 token management
-│   ├── client.py                # Generic HTTP client
-│   ├── devices.py               # Device sync logic
-│   └── subscriptions.py         # Subscription sync logic
+├── server.py                    # FastMCP server
+├── Dockerfile                   # Backend container
+├── docker-compose.yml           # Development stack
+├── docker-compose.prod.yml      # Production stack
+├── docker-compose.secure.yml    # Security-hardened stack
+├── nginx.conf                   # Reverse proxy config
+│
+├── frontend/
+│   ├── Dockerfile               # Frontend container
+│   ├── nginx.conf               # Frontend nginx config
+│   └── src/
+│       ├── pages/               # Dashboard, Devices, Subscriptions
+│       ├── components/          # UI components, chat widget
+│       └── hooks/               # React hooks
+│
+├── src/glp/
+│   ├── api/                     # GreenLake & Aruba API clients
+│   │   ├── auth.py              # OAuth2 token management
+│   │   ├── client.py            # HTTP client with resilience
+│   │   ├── devices.py           # Device sync
+│   │   ├── subscriptions.py     # Subscription sync
+│   │   ├── resilience.py        # Circuit breaker
+│   │   └── aruba_*.py           # Aruba Central integration
+│   │
+│   ├── agent/                   # AI chatbot
+│   │   ├── api/                 # WebSocket & REST endpoints
+│   │   ├── orchestrator/        # Agent logic
+│   │   ├── providers/           # Anthropic, OpenAI
+│   │   ├── memory/              # Conversation & semantic memory
+│   │   ├── tools/               # MCP tool registry
+│   │   └── security/            # Ticket auth, CoT redaction
+│   │
+│   ├── assignment/              # Device assignment module
+│   │   ├── domain/              # Entities and ports
+│   │   ├── use_cases/           # Business logic
+│   │   ├── adapters/            # PostgreSQL, Excel
+│   │   └── api/                 # FastAPI routers
+│   │
+│   └── sync/                    # Clean architecture sync
+│       ├── domain/              # Entities and ports
+│       ├── use_cases/           # Sync orchestration
+│       └── adapters/            # API and DB adapters
+│
 ├── db/
-│   ├── schema.sql               # Device tables + LLM helper views
+│   ├── schema.sql               # Device tables
 │   ├── subscriptions_schema.sql # Subscription tables
 │   └── migrations/              # Schema migrations
-└── tests/                       # 49 tests
+│
+├── tests/                       # Test suites
+│   ├── test_*.py                # Unit tests
+│   ├── assignment/              # Assignment tests
+│   ├── agent/                   # Agent tests
+│   └── sync/                    # Sync tests
+│
+└── .github/workflows/
+    ├── ci.yml                   # Tests and linting
+    └── publish.yml              # Docker Hub publishing
 ```
 
 ## Database Schema
 
 ### Tables
 
-| Table | Purpose |
-| ----- | ------- |
+| Table | Description |
+|-------|-------------|
 | `devices` | Device inventory (28 columns) |
 | `subscriptions` | Subscription inventory (20 columns) |
 | `device_subscriptions` | Device-subscription relationships |
-| `device_tags` | Device tags (normalized) |
-| `subscription_tags` | Subscription tags (normalized) |
+| `device_tags` | Device tags (key-value) |
+| `subscription_tags` | Subscription tags (key-value) |
 | `sync_history` | Sync audit log |
+| `agent_conversations` | Chat conversations |
+| `agent_messages` | Chat messages with embeddings |
 
-### Useful Views
+### Views
 
-- `active_subscriptions` — Only STARTED subscriptions
-- `subscriptions_expiring_soon` — Expiring in 90 days
-- `subscription_summary` — Count by type/status
+| View | Description |
+|------|-------------|
+| `active_devices` | Devices with active subscriptions |
+| `active_subscriptions` | STARTED subscriptions only |
+| `devices_expiring_soon` | Devices expiring in 90 days |
+| `subscriptions_expiring_soon` | Subscriptions expiring in 90 days |
+| `device_summary` | Counts by type and region |
+| `subscription_summary` | Counts by type and status |
 
-## Testing
+## Development
+
+### Local Setup
 
 ```bash
-# Run all tests (49 tests)
+# Install dependencies
+uv sync
+
+# Start PostgreSQL and Redis
+docker compose up -d postgres redis
+
+# Run API server
+uv run uvicorn src.glp.assignment.app:app --reload --port 8000
+
+# Run frontend
+cd frontend && npm install && npm run dev
+```
+
+### Testing
+
+```bash
+# All tests
 uv run pytest tests/ -v
 
 # Unit tests only (no database)
-uv run pytest tests/test_auth.py tests/test_devices.py tests/test_subscriptions.py -v
+uv run pytest tests/test_auth.py tests/test_devices.py -v
 
-# Database tests (requires PostgreSQL)
+# Database tests
 uv run pytest tests/test_database.py -v
+
+# Assignment tests
+uv run pytest tests/assignment/ -v
+
+# Agent tests
+uv run pytest tests/agent/ -v
 ```
+
+### Linting
+
+```bash
+uv run ruff check .
+```
+
+## CI/CD
+
+### GitHub Actions
+
+Push to `main` or create a tag to trigger:
+
+1. **CI** - Run tests and linting
+2. **Publish** - Build and push Docker images to Docker Hub
+
+### Required Secrets
+
+| Name | Description |
+|------|-------------|
+| `DOCKERHUB_TOKEN` | Docker Hub access token |
+
+### Required Variables
+
+| Name | Description |
+|------|-------------|
+| `DOCKERHUB_USERNAME` | Docker Hub username/org |
 
 ## Architecture
 
-```text
-┌─────────────────┐     ┌──────────────┐     ┌────────────┐
-│  GreenLake API  │────▶│   GLPClient  │────▶│ PostgreSQL │
-└─────────────────┘     └──────────────┘     └────────────┘
-         │                      │
-         │              ┌───────┴───────┐
-         │              │               │
-         ▼              ▼               ▼
-   TokenManager    DeviceSyncer  SubscriptionSyncer
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Frontend (React)                          │
+│                    nginx:8080 → Host:80                          │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      API Server (FastAPI)                        │
+│                         Port 8000                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │  Dashboard  │  │  Assignment │  │     Agent Chatbot       │  │
+│  │     API     │  │     API     │  │  (Anthropic/OpenAI)     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+         │                  │                     │
+         ▼                  ▼                     ▼
+┌─────────────┐    ┌─────────────┐       ┌─────────────┐
+│  PostgreSQL │    │   Redis     │       │ MCP Server  │
+│    (5432)   │    │   (6379)    │       │   (8010)    │
+└─────────────┘    └─────────────┘       └─────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Scheduler Service                           │
+│                         Port 8080                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ GreenLake   │  │   Aruba     │  │     Circuit Breaker     │  │
+│  │    Sync     │  │   Central   │  │      Resilience         │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## License

@@ -4,21 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HPE GreenLake Device & Subscription Sync - syncs device and subscription inventory from HPE GreenLake Platform (GLP) API to PostgreSQL with OAuth2 authentication, paginated fetching, and automated scheduling.
+HPE GreenLake Device & Subscription Sync - A comprehensive platform for syncing device and subscription inventory from HPE GreenLake Platform (GLP) API to PostgreSQL. Features include a React dashboard, AI chatbot with Anthropic/OpenAI support, Aruba Central integration, and Docker deployment with security hardening.
 
 ## Commands
 
 ### Development Setup
 ```bash
-uv sync                    # Install dependencies
+uv sync                    # Install all dependencies
 uv sync --no-dev          # Production dependencies only
+```
+
+### Running Services
+```bash
+# API Server (FastAPI)
+uv run uvicorn src.glp.assignment.app:app --reload --port 8000
+
+# Frontend (React)
+cd frontend && npm install && npm run dev
+
+# Scheduler
+python scheduler.py
+
+# MCP Server
+python server.py --transport http --port 8010
 ```
 
 ### Testing
 ```bash
-uv run pytest tests/ -v                                              # All 49 tests
-uv run pytest tests/test_auth.py tests/test_devices.py tests/test_subscriptions.py -v  # Unit tests (no DB)
-uv run pytest tests/test_database.py -v                              # Database tests (requires PostgreSQL)
+uv run pytest tests/ -v                              # All tests
+uv run pytest tests/test_auth.py tests/test_devices.py -v  # Unit tests (no DB)
+uv run pytest tests/test_database.py -v              # Database tests
+uv run pytest tests/assignment/ -v                   # Assignment tests
+uv run pytest tests/agent/ -v                        # Agent chatbot tests
+uv run pytest tests/sync/ -v                         # Clean sync tests
 ```
 
 ### Linting
@@ -37,169 +55,234 @@ python main.py --expiring-days 90      # Show expiring subscriptions
 
 ### Docker
 ```bash
+# Development
 docker compose up -d                   # Start full stack
-docker compose logs -f scheduler       # View logs
+docker compose logs -f                 # View all logs
 docker compose run --rm sync-once      # One-time sync
 docker compose down -v                 # Stop and remove data
+
+# Production (pre-built images)
+docker compose -f docker-compose.prod.yml up -d
+
+# Security-hardened
+docker compose -f docker-compose.secure.yml up -d
+
+# Build and push to Docker Hub
+docker compose build
+docker compose push
 ```
 
 ## Architecture
 
 ```
-GreenLake API
-      │
-      ▼
-TokenManager (OAuth2 - auto-refresh with 5-min buffer)
-      │
-      ▼
-GLPClient (HTTP layer - pagination, rate limits, retries)
-      │
-      ├──────────────────┐
-      ▼                  ▼
-DeviceSyncer      SubscriptionSyncer
-      │                  │
-      └────────┬─────────┘
-               ▼
-         PostgreSQL
+┌─────────────────────────────────────────────────────────────────┐
+│                        Frontend (React)                          │
+│                    nginx:8080 → Host:80                          │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      API Server (FastAPI)                        │
+│                         Port 8000                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │  Dashboard  │  │  Assignment │  │     Agent Chatbot       │  │
+│  │     API     │  │     API     │  │  (Anthropic/OpenAI)     │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+         │                  │                     │
+         ▼                  ▼                     ▼
+┌─────────────┐    ┌─────────────┐       ┌─────────────┐
+│  PostgreSQL │    │   Redis     │       │ MCP Server  │
+│   (5432)    │    │   (6379)    │       │   (8010)    │
+└─────────────┘    └─────────────┘       └─────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Scheduler Service                           │
+│                         Port 8080                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ GreenLake   │  │   Aruba     │  │     Circuit Breaker     │  │
+│  │    Sync     │  │   Central   │  │      Resilience         │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Design Principles:**
-- GLPClient handles HTTP concerns only (auth, pagination, rate limiting)
-- Syncers handle resource-specific logic (field mapping, DB operations)
-- TokenManager handles OAuth2 exclusively
+- Clean Architecture with domain, use_cases, adapters layers
 - All I/O is async (aiohttp, asyncpg, asyncio)
-- Full API responses stored in JSONB `raw_data`, important fields normalized into columns
+- Circuit breaker pattern for API resilience
+- Full API responses stored in JSONB `raw_data`, important fields normalized
+- Non-root Docker containers with security hardening
+- WebSocket ticket authentication for real-time chat
 
 ## Source Structure
 
+### Core Sync
 - `main.py` - CLI entry point for one-time syncs
-- `scheduler.py` - Long-running scheduler (Docker main process)
-- `src/glp/api/auth.py` - OAuth2 TokenManager with token caching
-- `src/glp/api/client.py` - Generic GLPClient with pagination (devices: 2000/page, subscriptions: 50/page)
-- `src/glp/api/devices.py` - DeviceSyncer (fetch + upsert devices)
-- `src/glp/api/subscriptions.py` - SubscriptionSyncer (fetch + upsert subscriptions)
-- `src/glp/constants.py` - API URLs, cluster configs
+- `scheduler.py` - Long-running scheduler with health endpoint
+- `server.py` - FastMCP server (27 read-only database tools)
+
+### API Layer (`src/glp/api/`)
+- `auth.py` - OAuth2 TokenManager with token caching
+- `client.py` - Generic GLPClient with pagination and resilience
+- `devices.py` - DeviceSyncer (fetch + upsert devices)
+- `subscriptions.py` - SubscriptionSyncer (fetch + upsert subscriptions)
+- `resilience.py` - Circuit breaker and retry logic
+- `device_manager.py` - Device write operations (v2beta1 API)
+- `aruba_*.py` - Aruba Central integration
+
+### Agent Chatbot (`src/glp/agent/`)
+- `api/router.py` - WebSocket and REST endpoints
+- `api/auth.py` - JWT authentication
+- `orchestrator/agent.py` - Main agent logic
+- `providers/anthropic.py` - Claude integration
+- `providers/openai.py` - GPT integration
+- `memory/conversation.py` - Conversation history
+- `memory/semantic.py` - Semantic search with embeddings
+- `security/ticket_auth.py` - Redis-based WebSocket tickets
+- `security/cot_redactor.py` - Chain-of-thought redaction
+- `tools/registry.py` - MCP tool registry
+- `tools/write_executor.py` - Rate-limited write operations
+
+### Device Assignment (`src/glp/assignment/`)
+- `domain/entities.py` - DeviceAssignment, SubscriptionOption
+- `domain/ports.py` - Repository interfaces
+- `use_cases/apply_assignments.py` - Bulk assignment logic
+- `use_cases/sync_and_report.py` - Post-assignment sync
+- `adapters/postgres_device_repo.py` - Database operations
+- `adapters/excel_parser.py` - Excel file processing
+- `api/router.py` - FastAPI endpoints with SSE streaming
+
+### Clean Sync Module (`src/glp/sync/`)
+- `domain/entities.py` - Device, Subscription entities
+- `domain/ports.py` - Repository and API ports
+- `use_cases/sync_devices.py` - Device sync orchestration
+- `use_cases/sync_subscriptions.py` - Subscription sync
+- `adapters/glp_api_adapter.py` - GreenLake API adapter
+- `adapters/postgres_device_repo.py` - Database adapter
+
+### Frontend (`frontend/`)
+- `src/pages/` - Dashboard, DevicesList, SubscriptionsList, ClientsPage
+- `src/components/chat/` - ChatWidget, ChatMessage
+- `src/components/filters/` - Filter panels
+- `src/hooks/useChat.ts` - WebSocket chat hook
+- `src/hooks/useAssignment.ts` - Assignment workflow
 
 ## Database
 
-**Tables:** `devices` (28 cols), `subscriptions` (20 cols), `device_subscriptions` (M:M), `device_tags`, `subscription_tags`, `sync_history`
+### Tables
+- `devices` (28 cols) - Device inventory with JSONB raw_data
+- `subscriptions` (20 cols) - Subscription inventory
+- `device_subscriptions` - M:M relationship
+- `device_tags`, `subscription_tags` - Normalized tags
+- `sync_history` - Audit log
+- `agent_conversations` - Chat sessions
+- `agent_messages` - Messages with embeddings (pgvector)
 
-**Views:** `active_devices`, `active_subscriptions`, `devices_expiring_soon`, `subscriptions_expiring_soon`, `device_summary`, `subscription_summary`
+### Views
+- `active_devices`, `active_subscriptions`
+- `devices_expiring_soon`, `subscriptions_expiring_soon`
+- `device_summary`, `subscription_summary`
 
-**Functions:** `search_devices(query, limit)`, `get_devices_by_tag(key, value)`
+### Functions
+- `search_devices(query, limit)` - Full-text search
+- `get_devices_by_tag(key, value)` - Tag-based lookup
 
-Schema files: `db/schema.sql`, `db/subscriptions_schema.sql`
+Schema files: `db/schema.sql`, `db/subscriptions_schema.sql`, `db/migrations/`
 
 ## Environment Variables
 
-Required:
-- `GLP_CLIENT_ID`, `GLP_CLIENT_SECRET`, `GLP_TOKEN_URL` - OAuth2 credentials
-- `DATABASE_URL` - PostgreSQL connection (not needed for `--json-only`)
+### Required
+- `GLP_CLIENT_ID`, `GLP_CLIENT_SECRET`, `GLP_TOKEN_URL` - GreenLake OAuth2
+- `DATABASE_URL` - PostgreSQL connection
+- `API_KEY` - Dashboard authentication
 
-Optional:
+### Optional - Core
 - `GLP_BASE_URL` - API base (default: `https://global.api.greenlake.hpe.com`)
 - `SYNC_INTERVAL_MINUTES` - Scheduler interval (default: 60)
-- `SYNC_DEVICES`, `SYNC_SUBSCRIPTIONS` - Enable/disable sync types (default: true)
-- `HEALTH_CHECK_PORT` - Health endpoint port (default: 8080)
+- `SYNC_DEVICES`, `SYNC_SUBSCRIPTIONS` - Enable/disable (default: true)
+- `HEALTH_CHECK_PORT` - Health endpoint (default: 8080)
 
-## Device Assignment Feature
+### Optional - Agent
+- `JWT_SECRET` - JWT signing secret
+- `ANTHROPIC_API_KEY` - Claude API key
+- `OPENAI_API_KEY` - GPT API key
+- `REDIS_URL` - WebSocket ticket store
 
-The assignment module provides a web UI for bulk device assignment operations.
+### Optional - Aruba Central
+- `ARUBA_CLIENT_ID`, `ARUBA_CLIENT_SECRET`, `ARUBA_TOKEN_URL`, `ARUBA_BASE_URL`
 
-### Running the Assignment API
-```bash
-# Backend (FastAPI)
-uv run uvicorn src.glp.assignment.app:app --reload --port 8000
+## Docker Deployment
 
-# Frontend (React)
-cd frontend && npm install && npm run dev
-```
+### Services
+| Service | Port | Description |
+|---------|------|-------------|
+| postgres | 5432 | PostgreSQL 16 with pgvector |
+| redis | 6379 | WebSocket ticket auth |
+| scheduler | 8080 | Sync scheduler |
+| api-server | 8000 | FastAPI backend |
+| mcp-server | 8010 | MCP for AI assistants |
+| frontend | 80 | React + nginx |
 
-### Assignment Architecture (Clean Architecture)
-```
-src/glp/assignment/
-├── domain/          # Entities (DeviceAssignment, SubscriptionOption) and Ports (interfaces)
-├── use_cases/       # ProcessExcel, GetOptions, ApplyAssignments, SyncAndReport
-├── adapters/        # PostgreSQL repos, Excel parser, DeviceManager wrapper
-└── api/             # FastAPI router and Pydantic schemas
-```
+### Compose Files
+- `docker-compose.yml` - Development with local builds
+- `docker-compose.prod.yml` - Production with pre-built images
+- `docker-compose.secure.yml` - Security-hardened
 
-### Assignment Workflow
-1. **Upload** - Drop Excel file with serials/MACs
-2. **Review** - See devices found in DB and their current status
-3. **Assign** - Select subscription (by device type), region (shows name, stores app UUID), tags
-4. **Apply** - Intelligent patching (only patches what's missing)
-5. **Report** - Resync with GreenLake and view summary
-
-### Key Design Decisions
-- Region = Application ID (1:1 mapping, user sees region name)
-- Intelligent gap detection - only PATCH what's actually missing
-- Batch operations - max 25 devices per API call
-- New devices - POST to GreenLake first if not in DB
-
-## Performance Profiling
-
-The project includes comprehensive profiling tools for CPU, memory, and database analysis.
-
-### Install Profiling Tools
-```bash
-uv sync --group profiling    # Install optional profiling dependencies
-```
-
-### Quick Benchmarks
-```bash
-# Mock data benchmark (no external dependencies)
-python benchmark.py --mock
-
-# Memory scaling analysis
-python benchmark.py --memory
-
-# CPU profiling with visualization
-python benchmark.py --cpu --cpu-dump sync.prof
-snakeviz sync.prof  # Opens interactive flamegraph
-
-# All profiling modes
-python benchmark.py --all --output report.json
-```
-
-### Profiling Utilities (`src/glp/profiling.py`)
-```python
-from src.glp.profiling import (
-    profile_async,          # Decorator for async functions
-    async_timer,            # Context manager for timing
-    memory_profile,         # Context manager for memory tracking
-    cpu_profile,            # Context manager for CPU profiling
-    QueryProfiler,          # Database query analysis
-    AsyncProfiler,          # Comprehensive async profiler
-)
-
-# Example: Profile an async function
-@profile_async("fetch_devices", include_memory=True)
-async def fetch_devices():
-    ...
-
-# Example: Time a code block
-async with async_timer("db_operation") as t:
-    await db_query()
-print(f"Took {t.duration_ms:.2f}ms")
-```
-
-### Known Performance Bottlenecks
-| Issue | Location | Impact |
-|-------|----------|--------|
-| Per-device transactions | `devices.py:117` | O(N) transactions for N devices |
-| N+1 existence checks | `sync_to_postgres()` | SELECT before each INSERT/UPDATE |
-| DELETE + INSERT for tags | `_sync_tags()` | Redundant when tags unchanged |
-
-### Optimization Opportunities
-- Use `INSERT ... ON CONFLICT` (UPSERT) instead of SELECT + INSERT/UPDATE
-- Batch DELETE operations with `WHERE device_id IN (...)`
-- Use `executemany()` for bulk inserts
-- Increase transaction scope (e.g., 100 devices per transaction)
+### Security Features
+- Base images pinned by SHA256 digest
+- Non-root users (appuser UID 1000, nginx)
+- Read-only filesystems (secure compose)
+- Dropped capabilities, no-new-privileges
+- Resource limits (CPU/memory)
+- Ports bound to localhost (prod/secure)
 
 ## Testing Notes
 
 - Unit tests use mocks, no external services required
 - Database tests require PostgreSQL (CI provides service container)
+- Agent tests mock LLM providers
 - Use pytest-asyncio for async tests
-- Assignment tests: `uv run pytest tests/assignment/ -v`
+- Coverage: `uv run pytest --cov=src tests/`
+
+## CI/CD
+
+### GitHub Actions
+- `ci.yml` - Tests, linting on push/PR
+- `publish.yml` - Multi-arch Docker builds, Trivy scanning, Docker Hub push
+
+### Required Setup
+- Secret: `DOCKERHUB_TOKEN`
+- Variable: `DOCKERHUB_USERNAME`
+
+## Key Patterns
+
+### Resilience
+```python
+from src.glp.api.resilience import CircuitBreaker, with_retry
+
+@with_retry(max_attempts=3)
+async def fetch_data():
+    async with circuit_breaker:
+        return await api.get("/devices")
+```
+
+### SSE Streaming
+```python
+@router.post("/apply-stream")
+async def apply_stream(request: Request):
+    async def generate():
+        async for event in apply_assignments():
+            yield f"data: {event.json()}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+```
+
+### WebSocket Chat
+```python
+@router.websocket("/chat")
+async def chat(websocket: WebSocket, ticket: str):
+    if not await verify_ticket(ticket):
+        await websocket.close(code=4001)
+        return
+    await agent.stream_response(websocket, message)
+```
