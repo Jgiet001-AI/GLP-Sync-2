@@ -32,8 +32,19 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-greenlake}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-devices.sql:ro
+      # Initial schema files (run on first init only)
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./db/subscriptions_schema.sql:/docker-entrypoint-initdb.d/02-subscriptions.sql:ro
+      # Migration files (run on first init only)
+      - ./db/migrations/001_add_device_fields.sql:/docker-entrypoint-initdb.d/03-migration-001.sql:ro
+      - ./db/migrations/002_schema_improvements.sql:/docker-entrypoint-initdb.d/04-migration-002.sql:ro
+      - ./db/migrations/003_add_central_fields.sql:/docker-entrypoint-initdb.d/05-migration-003.sql:ro
+      - ./db/migrations/004_agent_chatbot.sql:/docker-entrypoint-initdb.d/06-migration-004.sql:ro
+      - ./db/migrations/005_agent_messages_rls.sql:/docker-entrypoint-initdb.d/07-migration-005.sql:ro
+      - ./db/migrations/006_agentdb_memory_patterns.sql:/docker-entrypoint-initdb.d/08-migration-006.sql:ro
+      # Additional migrations
+      - ./db/aruba_central_migration.sql:/docker-entrypoint-initdb.d/09-aruba-central.sql:ro
+      - ./db/clients_migration.sql:/docker-entrypoint-initdb.d/10-clients.sql:ro
     ports:
       - "5432:5432"
     healthcheck:

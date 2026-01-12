@@ -1,0 +1,102 @@
+# Nginx configuration for GLP Frontend Container
+# Serves static React files and proxies API requests to backend
+# Runs as non-root user on port 8080
+#
+# API_KEY is injected at container startup via envsubst
+# This keeps the API key server-side, never exposed to browser
+
+# WebSocket upgrade mapping (only upgrade when requested)
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    # Use unprivileged port for non-root user
+    listen 8080;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # CSP includes ws:/wss: for WebSocket support (agent chatbot)
+    # 'self' covers proxied /api routes; no need to whitelist internal api-server
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss: https:;" always;
+
+    # Gzip compression
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/json
+        application/xml
+        application/rss+xml
+        image/svg+xml;
+
+    # Serve static files with long-term caching
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # API proxy to backend service
+    # API_KEY is injected server-side - never exposed to browser
+    location /api/ {
+        proxy_pass http://api-server:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Inject API key server-side (from environment variable)
+        # This is substituted at container startup by envsubst
+        proxy_set_header X-API-Key "${API_KEY}";
+
+        # WebSocket support (uses map for proper upgrade handling)
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 86400;
+
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+
+    # Don't cache index.html (for cache busting) - must be before location /
+    location = /index.html {
+        expires -1;
+        add_header Cache-Control "no-store, no-cache, must-revalidate";
+    }
+
+    # SPA routing - serve index.html for all non-file routes
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 '{"status":"healthy","service":"glp-frontend"}';
+        add_header Content-Type application/json;
+    }
+
+    # Deny access to hidden files
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+}

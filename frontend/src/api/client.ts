@@ -14,28 +14,21 @@ import type {
 } from '../types'
 import { ApiError, ApiErrorResponse } from '../types'
 
-// Get API key from environment (Vite uses VITE_ prefix)
-const API_KEY = import.meta.env.VITE_API_KEY || ''
-
-// Create base headers with optional API key
-const createHeaders = () => {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-  if (API_KEY) {
-    headers['X-API-Key'] = API_KEY
-  }
-  return headers
-}
+// Note: API_KEY is now injected by nginx proxy (server-side)
+// This keeps secrets out of the browser bundle
 
 const api = axios.create({
   baseURL: '/api/assignment',
-  headers: createHeaders(),
+  headers: {
+    'Content-Type': 'application/json',
+  },
 })
 
 const dashboardApi = axios.create({
   baseURL: '/api/dashboard',
-  headers: createHeaders(),
+  headers: {
+    'Content-Type': 'application/json',
+  },
 })
 
 // Error interceptor factory - converts axios errors to structured ApiError

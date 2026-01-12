@@ -17,7 +17,11 @@
 # -----------------------------------------------------------------------------
 ARG PYTHON_VERSION=3.11
 ARG PYTHON_DIGEST=sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36
-ARG UV_DIGEST=sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5
+
+# -----------------------------------------------------------------------------
+# Stage 0: UV installer (workaround for --from not supporting ARG)
+# -----------------------------------------------------------------------------
+FROM ghcr.io/astral-sh/uv:latest AS uv
 
 # -----------------------------------------------------------------------------
 # Stage 1: Build dependencies
@@ -32,11 +36,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv for fast dependency management (pinned by digest)
-COPY --from=ghcr.io/astral-sh/uv@${UV_DIGEST} /uv /usr/local/bin/uv
+# Install uv for fast dependency management
+COPY --from=uv /uv /usr/local/bin/uv
 
-# Copy dependency files
-COPY pyproject.toml ./
+# Copy dependency files (README.md needed by pyproject.toml)
+COPY pyproject.toml README.md ./
 COPY uv.lock* ./
 
 # Create virtual environment and install dependencies

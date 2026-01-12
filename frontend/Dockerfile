@@ -47,7 +47,8 @@ LABEL org.opencontainers.image.vendor="HPE"
 LABEL org.opencontainers.image.source="https://github.com/hpe/glp-sync"
 LABEL org.opencontainers.image.base.name="docker.io/library/nginx:1.27-alpine"
 
-# Copy custom nginx configuration
+# Copy nginx configuration template (for envsubst)
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy built assets from builder stage
@@ -61,7 +62,15 @@ RUN chown -R nginx:nginx /usr/share/nginx/html && \
     chown -R nginx:nginx /var/cache/nginx /var/run && \
     # Create pid file location with correct permissions
     touch /var/run/nginx.pid && \
-    chown nginx:nginx /var/run/nginx.pid
+    chown nginx:nginx /var/run/nginx.pid && \
+    # Create startup script for envsubst
+    echo '#!/bin/sh' > /docker-entrypoint.sh && \
+    echo 'if [ -n "$API_KEY" ]; then' >> /docker-entrypoint.sh && \
+    echo '  envsubst "\$API_KEY" < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf' >> /docker-entrypoint.sh && \
+    echo 'fi' >> /docker-entrypoint.sh && \
+    echo 'exec nginx -g "daemon off;"' >> /docker-entrypoint.sh && \
+    chmod +x /docker-entrypoint.sh && \
+    chown nginx:nginx /docker-entrypoint.sh /etc/nginx/conf.d/default.conf
 
 # Use non-root user
 USER nginx
@@ -73,8 +82,8 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget -q --spider http://localhost:8080/health || exit 1
 
-# Start nginx in foreground
-CMD ["nginx", "-g", "daemon off;"]
+# Start nginx with envsubst for API_KEY injection
+CMD ["/docker-entrypoint.sh"]
 
 # -----------------------------------------------------------------------------
 # Build Commands:

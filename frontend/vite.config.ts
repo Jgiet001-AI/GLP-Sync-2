@@ -28,10 +28,7 @@ export default defineConfig(({ mode }) => {
       // Inline small assets
       assetsInlineLimit: 4096,
     },
-    // Define environment variables for client-side
-    define: {
-      // Make API key available at build time (for production builds)
-      __API_KEY__: JSON.stringify(env.VITE_API_KEY || ''),
-    },
+    // Note: API_KEY is NOT included in client bundle (security)
+    // API authentication is handled by nginx proxy injection
   }
 })

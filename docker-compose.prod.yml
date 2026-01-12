@@ -4,8 +4,8 @@
 # Uses pre-built images from Docker Hub instead of local builds.
 #
 # Usage:
-#   # Set your Docker Hub username
-#   export DOCKERHUB_USERNAME=yourorg
+#   # Create .env file with required variables (see bottom of file)
+#   cp .env.example .env && nano .env
 #
 #   # Start the stack
 #   docker compose -f docker-compose.prod.yml up -d
@@ -31,8 +31,19 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-greenlake}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-devices.sql:ro
+      # Initial schema files (run on first init only)
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./db/subscriptions_schema.sql:/docker-entrypoint-initdb.d/02-subscriptions.sql:ro
+      # Migration files (run on first init only)
+      - ./db/migrations/001_add_device_fields.sql:/docker-entrypoint-initdb.d/03-migration-001.sql:ro
+      - ./db/migrations/002_schema_improvements.sql:/docker-entrypoint-initdb.d/04-migration-002.sql:ro
+      - ./db/migrations/003_add_central_fields.sql:/docker-entrypoint-initdb.d/05-migration-003.sql:ro
+      - ./db/migrations/004_agent_chatbot.sql:/docker-entrypoint-initdb.d/06-migration-004.sql:ro
+      - ./db/migrations/005_agent_messages_rls.sql:/docker-entrypoint-initdb.d/07-migration-005.sql:ro
+      - ./db/migrations/006_agentdb_memory_patterns.sql:/docker-entrypoint-initdb.d/08-migration-006.sql:ro
+      # Additional migrations
+      - ./db/aruba_central_migration.sql:/docker-entrypoint-initdb.d/09-aruba-central.sql:ro
+      - ./db/clients_migration.sql:/docker-entrypoint-initdb.d/10-clients.sql:ro
     ports:
       - "127.0.0.1:5432:5432"  # Bind to localhost only
     healthcheck:
@@ -44,17 +55,20 @@ services:
       - glp-internal
 
   # --------------------------------------------------------------------------
-  # Redis (WebSocket Ticket Auth)
+  # Redis (WebSocket Ticket Auth) - With Password Authentication
   # --------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: glp-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-redis_secret}
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,7 +79,7 @@ services:
   # GLP Sync Scheduler
   # --------------------------------------------------------------------------
   scheduler:
-    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-jgiet001}/glp-sync:${IMAGE_TAG:-latest}
     container_name: glp-scheduler
     restart: unless-stopped
     depends_on:
@@ -97,7 +111,7 @@ services:
   # FastAPI Server (Dashboard & Assignment APIs)
   # --------------------------------------------------------------------------
   api-server:
-    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-jgiet001}/glp-sync:${IMAGE_TAG:-latest}
     container_name: glp-api-server
     restart: unless-stopped
     depends_on:
@@ -106,19 +120,26 @@ services:
       redis:
         condition: service_healthy
     environment:
-      REDIS_URL: redis://redis:6379/0
+      # Redis with authentication
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379/0
+      # GreenLake API
       GLP_CLIENT_ID: ${GLP_CLIENT_ID:?GLP_CLIENT_ID is required}
       GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET:?GLP_CLIENT_SECRET is required}
       GLP_TOKEN_URL: ${GLP_TOKEN_URL:?GLP_TOKEN_URL is required}
       GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-greenlake}
+      # API Security
       API_KEY: ${API_KEY:?API_KEY is required for production}
       DISABLE_AUTH: "false"
-      JWT_SECRET: ${JWT_SECRET:-}
+      # JWT Authentication (required for agent chatbot)
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required for agent auth}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
-      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      REQUIRE_AUTH: "true"
+      # AI Providers (optional)
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # CORS
       CORS_ORIGINS: ${CORS_ORIGINS:-https://your-domain.com}
     command: ["python", "-m", "uvicorn", "src.glp.assignment.app:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
@@ -131,10 +152,10 @@ services:
       - glp-internal
 
   # --------------------------------------------------------------------------
-  # MCP Server (FastMCP)
+  # MCP Server (FastMCP) - For AI Assistants
   # --------------------------------------------------------------------------
   mcp-server:
-    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-sync:${IMAGE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-jgiet001}/glp-sync:${IMAGE_TAG:-latest}
     container_name: glp-mcp-server
     restart: unless-stopped
     depends_on:
@@ -144,6 +165,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-greenlake}
       DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
       DB_POOL_MAX: ${MCP_DB_POOL_MAX:-10}
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8010}:8000"
     command: ["python", "server.py", "--transport", "http", "--port", "8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -156,13 +179,17 @@ services:
 
   # --------------------------------------------------------------------------
   # Frontend (React + Nginx)
+  # Note: API_KEY is injected by nginx, NOT bundled in frontend code
   # --------------------------------------------------------------------------
   frontend:
-    image: ${DOCKERHUB_USERNAME:-yourorg}/glp-frontend:${IMAGE_TAG:-latest}
+    image: ${DOCKERHUB_USERNAME:-jgiet001}/glp-frontend:${IMAGE_TAG:-latest}
     container_name: glp-frontend
     restart: unless-stopped
     depends_on:
       - api-server
+    environment:
+      # API key for nginx to inject into backend requests
+      API_KEY: ${API_KEY}
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-80}:8080"
     healthcheck:
@@ -187,16 +214,30 @@ volumes:
 # =============================================================================
 # Required Environment Variables (.env)
 # =============================================================================
+# # Database
+# POSTGRES_USER=glp
 # POSTGRES_PASSWORD=your_secure_password
+# POSTGRES_DB=greenlake
+#
+# # Redis
+# REDIS_PASSWORD=your_redis_password
+#
+# # GreenLake API
 # GLP_CLIENT_ID=your_client_id
 # GLP_CLIENT_SECRET=your_client_secret
 # GLP_TOKEN_URL=https://sso.common.cloud.hpe.com/as/token.oauth2
-# API_KEY=your_api_key
-# DOCKERHUB_USERNAME=yourorg
 #
-# Optional:
-# IMAGE_TAG=v1.0.0
+# # API Security (REQUIRED)
+# API_KEY=your_secure_api_key
+# JWT_SECRET=your_64_char_jwt_secret
+#
+# # Docker Hub (default: jgiet001)
+# DOCKERHUB_USERNAME=jgiet001
+# IMAGE_TAG=latest
+#
+# # Optional
 # CORS_ORIGINS=https://your-domain.com
-# JWT_SECRET=your_jwt_secret
 # ANTHROPIC_API_KEY=your_key
+# FRONTEND_PORT=80
+# MCP_PORT=8010
 # =============================================================================

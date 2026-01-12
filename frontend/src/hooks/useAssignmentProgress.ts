@@ -87,11 +87,11 @@ export function useAssignmentProgress(): UseAssignmentProgressReturn {
         throw new Error('Streaming not supported in this browser')
       }
 
+      // Note: X-API-Key is injected by nginx proxy (server-side)
       const response = await fetch('/api/assignment/apply-stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-API-Key': import.meta.env.VITE_API_KEY || '',
         },
         body: JSON.stringify(request),
         signal: controller.signal,

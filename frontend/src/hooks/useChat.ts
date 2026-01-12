@@ -103,8 +103,8 @@ export function useChat(options: UseChatOptions = {}) {
   const currentMessageRef = useRef<string>('')
   const currentThinkingRef = useRef<string>('')
   const reconnectAttemptsRef = useRef(0)
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const manualDisconnectRef = useRef(false)
 
   // Clear reconnect timeout
