@@ -50,6 +50,16 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Required Secrets](#required-secrets)
   - [Required Variables](#required-variables)
 - [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting)
+  - [Docker Container Issues](#docker-container-issues)
+  - [Database Connection Problems](#database-connection-problems)
+  - [GreenLake API Authentication Failures](#greenlake-api-authentication-failures)
+  - [Frontend Connection Issues](#frontend-connection-issues)
+  - [AI Chatbot Problems](#ai-chatbot-problems)
+  - [Performance and Sync Issues](#performance-and-sync-issues)
+  - [Setup Wizard Issues](#setup-wizard-issues)
+  - [Common Error Messages](#common-error-messages)
+  - [Getting Help](#getting-help)
 - [License](#license)
 
 ## Features
@@ -499,6 +509,434 @@ Push to `main` or create a tag to trigger:
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+## Troubleshooting
+
+### Docker Container Issues
+
+#### Containers Won't Start
+
+**Problem:** Services fail to start or crash immediately.
+
+```bash
+# Check container status
+docker compose ps
+
+# View logs for specific service
+docker compose logs api-server
+docker compose logs scheduler
+docker compose logs frontend
+```
+
+**Solutions:**
+
+1. **Port conflicts** - Check if ports are already in use:
+   ```bash
+   # macOS/Linux
+   lsof -i :80    # Frontend
+   lsof -i :8000  # API server
+   lsof -i :5432  # PostgreSQL
+
+   # Stop conflicting services or change ports in docker-compose.yml
+   ```
+
+2. **Missing environment variables** - Verify `.env` file exists and contains required values:
+   ```bash
+   # Check for missing variables
+   grep -E "^(GLP_CLIENT_ID|GLP_CLIENT_SECRET|API_KEY|POSTGRES_PASSWORD)=" .env
+
+   # If missing, copy from template
+   cp .env.example .env
+   nano .env
+   ```
+
+3. **Insufficient resources** - Docker needs adequate memory/CPU:
+   ```bash
+   # Check Docker resource allocation (Docker Desktop)
+   # Settings → Resources → Increase Memory to 4GB+
+   ```
+
+#### Image Build Failures
+
+**Problem:** `docker compose build` fails with errors.
+
+**Solutions:**
+
+1. **Network issues during build:**
+   ```bash
+   # Retry with no cache
+   docker compose build --no-cache
+
+   # Or pull pre-built images instead
+   docker pull jgiet001/glp-sync:latest
+   docker pull jgiet001/glp-frontend:latest
+   docker compose up -d
+   ```
+
+2. **Disk space issues:**
+   ```bash
+   # Check disk space
+   df -h
+
+   # Clean up Docker resources
+   docker system prune -a --volumes
+   ```
+
+### Database Connection Problems
+
+#### "relation does not exist" Error
+
+**Problem:** API or scheduler fails with `relation "devices" does not exist`.
+
+**Solutions:**
+
+1. **Schema not initialized** - Reset database and apply schema:
+   ```bash
+   # Stop services
+   docker compose down
+
+   # Remove database volume (⚠️ DATA LOSS)
+   docker volume rm glp-sync-2_postgres_data
+
+   # Restart - schema will auto-apply
+   docker compose up -d
+
+   # Verify schema
+   docker compose exec postgres psql -U glp -d greenlake -c "\dt"
+   ```
+
+2. **Migration needed** - Apply pending migrations:
+   ```bash
+   # Check migration status
+   docker compose exec postgres psql -U glp -d greenlake \
+     -c "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1;"
+
+   # Apply migrations manually
+   docker compose exec postgres psql -U glp -d greenlake -f /docker-entrypoint-initdb.d/schema.sql
+   ```
+
+#### Connection Refused
+
+**Problem:** `FATAL: password authentication failed for user "glp"`.
+
+**Solutions:**
+
+1. **Password mismatch** - Ensure `.env` matches database password:
+   ```bash
+   # Check current password in .env
+   grep POSTGRES_PASSWORD .env
+
+   # If changed, must recreate database volume
+   docker compose down -v
+   docker compose up -d
+   ```
+
+2. **Database not ready** - Wait for PostgreSQL to initialize:
+   ```bash
+   # Check database logs
+   docker compose logs postgres | tail -20
+
+   # Wait for "database system is ready to accept connections"
+   # Then restart dependent services
+   docker compose restart api-server scheduler
+   ```
+
+### GreenLake API Authentication Failures
+
+#### Invalid Client Credentials
+
+**Problem:** `401 Unauthorized` or `invalid_client` error in scheduler logs.
+
+**Solutions:**
+
+1. **Verify credentials** - Check GreenLake API credentials:
+   ```bash
+   # Test credentials manually
+   curl -X POST https://sso.common.cloud.hpe.com/as/token.oauth2 \
+     -d "grant_type=client_credentials" \
+     -d "client_id=$GLP_CLIENT_ID" \
+     -d "client_secret=$GLP_CLIENT_SECRET"
+
+   # Should return access_token
+   ```
+
+2. **Update credentials in .env:**
+   ```bash
+   nano .env
+   # Update GLP_CLIENT_ID and GLP_CLIENT_SECRET
+
+   # Restart scheduler to pick up changes
+   docker compose restart scheduler
+   ```
+
+3. **Check token URL** - Ensure `GLP_TOKEN_URL` is correct:
+   ```bash
+   # Should be (default):
+   GLP_TOKEN_URL=https://sso.common.cloud.hpe.com/as/token.oauth2
+   ```
+
+#### Token Refresh Failures
+
+**Problem:** `Token refresh failed` in logs after initial success.
+
+**Solutions:**
+
+1. **Network connectivity** - Check scheduler can reach HPE endpoints:
+   ```bash
+   # Test from within scheduler container
+   docker compose exec scheduler curl -I https://sso.common.cloud.hpe.com
+   docker compose exec scheduler curl -I https://global.api.greenlake.hpe.com
+   ```
+
+2. **Circuit breaker open** - Wait for automatic recovery (30-60 seconds):
+   ```bash
+   # Monitor logs for recovery
+   docker compose logs -f scheduler | grep -i "circuit"
+   ```
+
+### Frontend Connection Issues
+
+#### Dashboard Shows "Failed to Load Data"
+
+**Problem:** Frontend displays error messages or empty data.
+
+**Solutions:**
+
+1. **API server unreachable** - Verify backend is running:
+   ```bash
+   # Check API health endpoint
+   curl http://localhost:8000/api/health
+
+   # Should return: {"status": "healthy"}
+
+   # If not running, check logs
+   docker compose logs api-server
+   ```
+
+2. **CORS errors in browser console** - Update allowed origins:
+   ```bash
+   # Edit .env
+   nano .env
+
+   # Add your frontend URL
+   CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost
+
+   # Restart API server
+   docker compose restart api-server
+   ```
+
+3. **Authentication failures** - Check API key configuration:
+   ```bash
+   # For development, disable auth temporarily
+   nano .env
+   # Set: DISABLE_AUTH=true
+
+   # For production, ensure API_KEY is set in both .env and frontend config
+   ```
+
+#### WebSocket Chat Not Connecting
+
+**Problem:** AI chatbot shows "Connection failed" or "Ticket invalid".
+
+**Solutions:**
+
+1. **Redis not running** - Verify Redis is healthy:
+   ```bash
+   # Check Redis connection
+   docker compose exec redis redis-cli ping
+   # Should return: PONG
+
+   # If not running
+   docker compose up -d redis
+   ```
+
+2. **JWT authentication issues** - Verify JWT secret is configured:
+   ```bash
+   # Check .env
+   grep JWT_SECRET .env
+
+   # If missing, generate and add
+   python -c "import secrets; print('JWT_SECRET=' + secrets.token_urlsafe(48))" >> .env
+
+   # Restart API server
+   docker compose restart api-server
+   ```
+
+3. **WebSocket ticket expired** - Tickets are valid for 60 seconds:
+   ```bash
+   # Check ticket generation in browser network tab
+   # POST /api/agent/ws-ticket should return fresh ticket
+
+   # Ensure system clocks are synchronized (if using distributed setup)
+   ```
+
+### AI Chatbot Problems
+
+#### "No LLM Provider Available"
+
+**Problem:** Chatbot returns error: "No LLM provider available".
+
+**Solutions:**
+
+1. **Add API keys** - Configure at least one LLM provider:
+   ```bash
+   nano .env
+
+   # Option 1: Anthropic Claude (recommended)
+   ANTHROPIC_API_KEY=sk-ant-...
+
+   # Option 2: OpenAI GPT
+   OPENAI_API_KEY=sk-...
+
+   # Restart API server
+   docker compose restart api-server
+   ```
+
+2. **Verify provider initialization** - Check API server logs:
+   ```bash
+   docker compose logs api-server | grep -i "provider"
+   # Should see: "Initialized provider: anthropic" or "openai"
+   ```
+
+#### MCP Tools Not Working
+
+**Problem:** Chatbot can't access database tools.
+
+**Solutions:**
+
+1. **MCP server not running** - Start MCP server:
+   ```bash
+   # Check MCP server status
+   docker compose ps mcp-server
+
+   # If not running
+   docker compose up -d mcp-server
+
+   # Verify health
+   curl http://localhost:8010/health
+   ```
+
+2. **Database connection from MCP** - Check MCP server logs:
+   ```bash
+   docker compose logs mcp-server
+
+   # If connection errors, verify DATABASE_URL
+   docker compose exec mcp-server env | grep DATABASE_URL
+   ```
+
+### Performance and Sync Issues
+
+#### Sync Taking Too Long
+
+**Problem:** Device/subscription sync times out or takes hours.
+
+**Solutions:**
+
+1. **Reduce page size** - Adjust pagination limits:
+   ```python
+   # In scheduler container, modify:
+   # src/glp/api/devices.py (line ~45)
+   # Change: per_page=2000 → per_page=500
+   ```
+
+2. **Increase timeout** - For large inventories:
+   ```bash
+   # Edit docker-compose.yml
+   # Add to scheduler environment:
+   environment:
+     - SYNC_TIMEOUT_MINUTES=30
+
+   # Restart
+   docker compose up -d scheduler
+   ```
+
+3. **Check circuit breaker** - Too many failures slow retries:
+   ```bash
+   # Monitor scheduler logs
+   docker compose logs -f scheduler | grep -E "(circuit|retry|failed)"
+   ```
+
+#### Database Growing Too Large
+
+**Problem:** PostgreSQL volume using excessive disk space.
+
+**Solutions:**
+
+1. **Vacuum old data** - Clean up deleted rows:
+   ```bash
+   docker compose exec postgres psql -U glp -d greenlake -c "VACUUM FULL ANALYZE;"
+   ```
+
+2. **Archive old sync history** - Retain recent only:
+   ```bash
+   # Keep last 90 days
+   docker compose exec postgres psql -U glp -d greenlake -c \
+     "DELETE FROM sync_history WHERE created_at < NOW() - INTERVAL '90 days';"
+   ```
+
+### Setup Wizard Issues
+
+#### Wizard Fails to Create .env
+
+**Problem:** `./setup.sh` exits with error or creates incomplete `.env`.
+
+**Solutions:**
+
+1. **Permission issues** - Ensure script is executable:
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+2. **Manual .env creation** - Skip wizard and create manually:
+   ```bash
+   cp .env.example .env
+   nano .env
+   # Fill in required variables (see Environment Variables section)
+
+   docker compose up -d
+   ```
+
+3. **Shell compatibility** - Run with bash explicitly:
+   ```bash
+   bash setup.sh
+   ```
+
+### Common Error Messages
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `bind: address already in use` | Port conflict | Change port in `docker-compose.yml` or stop conflicting service |
+| `no such table: devices` | Schema not applied | Reset database: `docker compose down -v && docker compose up -d` |
+| `Invalid token` | API key mismatch | Verify `API_KEY` in `.env` matches frontend config |
+| `Connection refused` | Service not ready | Wait 30s for startup, check `docker compose logs <service>` |
+| `Rate limit exceeded` | Too many API calls | Enable circuit breaker retry delay (default: 5 minutes) |
+| `Out of memory` | Docker resource limit | Increase Docker Desktop memory to 4GB+ |
+
+### Getting Help
+
+If issues persist after troubleshooting:
+
+1. **Check logs** - Gather logs for debugging:
+   ```bash
+   docker compose logs > debug-logs.txt
+   ```
+
+2. **Verify environment** - Share configuration (redact secrets):
+   ```bash
+   docker compose config > docker-config.txt
+   cat .env | grep -v "SECRET\|PASSWORD\|KEY" > env-sanitized.txt
+   ```
+
+3. **GitHub Issues** - Open an issue with:
+   - Description of the problem
+   - Steps to reproduce
+   - Relevant log excerpts
+   - Environment details (OS, Docker version)
+
+4. **Community Support** - Check existing issues:
+   - [GitHub Issues](https://github.com/Jgiet001-AI/GLP-Sync-2/issues)
+   - Search for similar problems and solutions
 
 ## License
 
