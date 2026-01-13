@@ -61,6 +61,18 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Common Error Messages](#common-error-messages)
   - [Getting Help](#getting-help)
 - [Contributing](#contributing)
+- [Security](#security)
+  - [Environment Variables and Secrets](#environment-variables-and-secrets)
+  - [Authentication and Authorization](#authentication-and-authorization)
+  - [Database Security](#database-security)
+  - [Docker Security Hardening](#docker-security-hardening)
+  - [Network Security](#network-security)
+  - [WebSocket Security](#websocket-security)
+  - [Production Deployment Checklist](#production-deployment-checklist)
+  - [CI/CD Security](#cicd-security)
+  - [Security Disclosure Policy](#security-disclosure-policy)
+  - [Security Best Practices Summary](#security-best-practices-summary)
+  - [Additional Resources](#additional-resources)
 - [License](#license)
 
 ## Features
@@ -1194,6 +1206,345 @@ We love hearing your ideas! When suggesting features:
 - **Code Questions** - Comment on specific files or PRs
 
 Thank you for contributing to HPE GreenLake Device & Subscription Sync! 🎉
+
+## Security
+
+Security is a top priority for this project. This section outlines best practices, security features, and how to report vulnerabilities.
+
+### Environment Variables and Secrets
+
+**Critical: Never commit `.env` files to version control!**
+
+```bash
+# ✅ GOOD - Use .env.example as a template
+cp .env.example .env
+nano .env  # Add your actual secrets
+
+# ❌ BAD - Never commit .env
+git add .env  # DON'T DO THIS!
+```
+
+**Generate Secure Secrets:**
+
+```bash
+# API Key (32+ characters recommended)
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# JWT Secret (64+ characters REQUIRED)
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+
+# PostgreSQL Password (32+ characters recommended)
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Redis Password (32+ characters recommended)
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+### Authentication and Authorization
+
+#### Development Mode (Bypass Auth)
+
+For local development and testing:
+
+```bash
+# .env configuration
+DISABLE_AUTH=true      # Bypass API key authentication
+REQUIRE_AUTH=false     # Bypass JWT authentication
+```
+
+⚠️ **Warning:** Only use these settings in development environments. Never deploy to production with authentication disabled.
+
+#### Production Mode (Secure Auth)
+
+For production deployments:
+
+```bash
+# .env configuration
+DISABLE_AUTH=false
+REQUIRE_AUTH=true
+
+# Required secure values
+API_KEY=<your-secure-api-key-32-chars-minimum>
+JWT_SECRET=<your-jwt-secret-64-chars-minimum>
+JWT_ALGORITHM=HS256
+JWT_CLOCK_SKEW_SECONDS=30
+
+# Optional: Additional JWT validation
+JWT_ISSUER=https://your-idp.com
+JWT_AUDIENCE=glp-api
+```
+
+**JWT Requirements:**
+- **Minimum length:** 64 characters (use the generator above)
+- **Algorithm:** HS256 (HMAC with SHA-256)
+- **Token validation:** Includes signature verification, expiration check, and clock skew tolerance
+- **Custom claims:** Configure `JWT_TENANT_ID_CLAIM`, `JWT_USER_ID_CLAIM`, `JWT_SESSION_ID_CLAIM` if your IdP uses different claim names
+
+### Database Security
+
+#### PostgreSQL Configuration
+
+```bash
+# .env configuration
+POSTGRES_USER=glp
+POSTGRES_PASSWORD=<your-secure-password>  # 32+ chars recommended
+POSTGRES_DB=greenlake
+
+# Authentication method
+POSTGRES_HOST_AUTH_METHOD=scram-sha-256
+POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256"
+```
+
+**Security Features:**
+- **SCRAM-SHA-256** - Strong password-based authentication (replaces legacy MD5)
+- **Row-Level Security (RLS)** - Multi-tenant data isolation on `agent_messages` table
+- **Connection limits** - Docker Compose restricts PostgreSQL to `127.0.0.1:5432` (localhost only)
+- **Prepared statements** - All queries use parameterized SQL to prevent injection attacks
+
+#### Redis Security
+
+```bash
+# .env configuration
+REDIS_PASSWORD=<your-redis-password>  # 32+ chars recommended
+REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+```
+
+**Security Features:**
+- **Password-protected** - `requirepass` enabled by default
+- **Persistence** - AOF (Append-Only File) mode for ticket durability
+- **Network isolation** - Not exposed to host (internal Docker network only)
+
+### Docker Security Hardening
+
+This project follows Docker security best practices:
+
+#### Non-Root Users
+
+All containers run as non-root users:
+
+```yaml
+# Example from docker-compose.yml
+api-server:
+  user: "1000:1000"  # Non-root UID/GID
+```
+
+**User Mapping:**
+- **Backend services** (api-server, scheduler, mcp-server): `appuser` (UID 1000)
+- **Frontend** (nginx): `nginx` user
+- **PostgreSQL**: Internal `postgres` user
+- **Redis**: UID 999
+
+#### Capability Dropping
+
+Containers drop all Linux capabilities and only add back what's required:
+
+```yaml
+security_opt:
+  - no-new-privileges:true
+cap_drop:
+  - ALL
+cap_add:
+  - CHOWN        # PostgreSQL only
+  - SETGID       # PostgreSQL only
+  - SETUID       # PostgreSQL only
+  - DAC_OVERRIDE # PostgreSQL only
+  - FOWNER       # PostgreSQL only
+```
+
+**Most containers run with ZERO capabilities** (api-server, scheduler, mcp-server, redis, frontend).
+
+#### Read-Only Filesystems
+
+Where possible, containers use read-only root filesystems:
+
+```yaml
+api-server:
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777,size=100M  # Temporary files in memory
+```
+
+**Services with read-only FS:**
+- `api-server`
+- `scheduler`
+- `mcp-server`
+- `redis`
+- `frontend`
+
+#### Resource Limits
+
+All containers have CPU and memory limits to prevent resource exhaustion:
+
+```yaml
+deploy:
+  resources:
+    limits:
+      cpus: '1'
+      memory: 1G
+    reservations:
+      cpus: '0.25'
+      memory: 256M
+```
+
+#### Base Image Pinning
+
+All Docker images are pinned by **SHA256 digest** to ensure reproducible builds and prevent supply chain attacks:
+
+```dockerfile
+# Pinned by digest (SHA256)
+FROM python:3.12-alpine@sha256:<digest>
+FROM node:22-alpine@sha256:<digest>
+FROM nginx:1-alpine@sha256:<digest>
+```
+
+### Network Security
+
+#### Port Exposure
+
+**Default configuration (development):**
+- **Frontend:** `80` (HTTP only - use reverse proxy with TLS in production)
+- **PostgreSQL:** `127.0.0.1:5432` (localhost only - not exposed externally)
+- **Scheduler:** `127.0.0.1:8080` (localhost only - health check endpoint)
+- **Redis:** Not exposed (internal network only)
+- **MCP Server:** Not exposed by default (optional: `8010`)
+
+**Production recommendations:**
+1. **Use a reverse proxy** (nginx, Traefik, Caddy) with TLS termination
+2. **Firewall rules** - Restrict ingress to frontend port only
+3. **Internal network** - Keep PostgreSQL, Redis, and backend services on private network
+4. **VPN/VPC** - Deploy in private cloud network with VPN access for administration
+
+#### CORS Configuration
+
+Configure allowed origins for frontend access:
+
+```bash
+# .env configuration
+# Development
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# Production
+CORS_ORIGINS=https://your-domain.com,https://app.your-domain.com
+```
+
+### WebSocket Security
+
+The AI chatbot uses a **ticket-based authentication system** for WebSocket connections:
+
+**How it works:**
+1. Client authenticates via `/api/agent/ticket` endpoint (JWT required)
+2. Server generates a single-use ticket (stored in Redis with 60s TTL)
+3. Client uses ticket in WebSocket connection URL
+4. Server validates and consumes ticket (one-time use)
+5. WebSocket connection established with session context
+
+**Security properties:**
+- **Short-lived** - Tickets expire after 60 seconds
+- **Single-use** - Ticket is deleted after first use
+- **JWT-protected** - Ticket generation requires valid JWT
+- **Session-bound** - Ticket encodes tenant, user, and session IDs
+
+### Production Deployment Checklist
+
+Before deploying to production, ensure:
+
+- [ ] **Authentication enabled** - `DISABLE_AUTH=false`, `REQUIRE_AUTH=true`
+- [ ] **Secrets rotated** - Use the generators above to create strong secrets
+- [ ] **Environment variables secure** - `.env` file has `600` permissions (`chmod 600 .env`)
+- [ ] **TLS/HTTPS configured** - Use reverse proxy (nginx, Traefik, Caddy) for TLS termination
+- [ ] **Firewall rules** - Restrict ingress to HTTPS (443) and SSH (22) only
+- [ ] **Database backups** - Configure automated PostgreSQL backups
+- [ ] **Log aggregation** - Send logs to centralized logging (ELK, Splunk, Datadog)
+- [ ] **Monitoring** - Set up health check alerts (Prometheus, UptimeRobot)
+- [ ] **Update Docker images** - Pull latest security patches regularly
+- [ ] **Review CORS origins** - Ensure `CORS_ORIGINS` only includes trusted domains
+- [ ] **Vulnerability scanning** - Run `docker scan` or Trivy on images before deployment
+
+### CI/CD Security
+
+#### Automated Vulnerability Scanning
+
+GitHub Actions CI pipeline includes:
+
+```yaml
+# .github/workflows/publish.yml
+- name: Run Trivy vulnerability scanner
+  uses: aquasecurity/trivy-action@master
+  with:
+    scan-type: 'image'
+    severity: 'CRITICAL,HIGH'
+    exit-code: '1'  # Fail build if vulnerabilities found
+```
+
+**Scanned on every build:**
+- `jgiet001/glp-sync`
+- `jgiet001/glp-frontend`
+- `jgiet001/glp-mcp-server`
+- `jgiet001/glp-scheduler`
+
+#### Dependency Updates
+
+- **Python dependencies** - Managed with `uv` (locked in `uv.lock`)
+- **Node dependencies** - Managed with `npm` (locked in `package-lock.json`)
+- **Base images** - Pinned by SHA256, updated manually after security review
+
+**Recommendations:**
+- Monitor [GitHub Security Advisories](https://github.com/advisories)
+- Run `uv sync --upgrade` and `npm audit` regularly
+- Subscribe to Docker Hub security notifications
+
+### Security Disclosure Policy
+
+**If you discover a security vulnerability, please DO NOT open a public issue.**
+
+Instead, please report it privately using one of these methods:
+
+#### GitHub Security Advisories (Preferred)
+
+1. Go to [Security Advisories](https://github.com/Jgiet001-AI/GLP-Sync-2/security/advisories)
+2. Click "Report a vulnerability"
+3. Provide details about the vulnerability
+4. We will respond within 48 hours
+
+#### Email (Alternative)
+
+Send details to: **[maintainer email - replace with actual email]**
+
+**What to include:**
+- Description of the vulnerability
+- Steps to reproduce
+- Potential impact
+- Suggested fix (if known)
+
+**What to expect:**
+- **Acknowledgment** within 48 hours
+- **Initial assessment** within 1 week
+- **Fix timeline** provided based on severity
+- **Public disclosure** coordinated after fix is released
+- **Credit** in release notes (if desired)
+
+### Security Best Practices Summary
+
+| Component | Best Practice | Configuration |
+|-----------|---------------|---------------|
+| **API Key** | 32+ chars, cryptographically random | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| **JWT Secret** | 64+ chars, cryptographically random | `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| **PostgreSQL** | SCRAM-SHA-256, localhost only | `POSTGRES_HOST_AUTH_METHOD=scram-sha-256` |
+| **Redis** | Password-protected, internal network | `requirepass` enabled, no host port |
+| **Docker** | Non-root users, dropped capabilities | `user: "1000:1000"`, `cap_drop: ALL` |
+| **Network** | TLS/HTTPS, firewall rules | Reverse proxy with Let's Encrypt |
+| **CORS** | Whitelist trusted origins only | `CORS_ORIGINS=https://your-domain.com` |
+| **Secrets** | Never commit to Git | `.env` in `.gitignore` |
+| **Updates** | Regular dependency updates | `uv sync --upgrade`, `npm audit` |
+| **Scanning** | CI/CD vulnerability scanning | Trivy on every build |
+
+### Additional Resources
+
+- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [Docker Security Best Practices](https://docs.docker.com/develop/security-best-practices/)
+- [PostgreSQL Security](https://www.postgresql.org/docs/current/auth-methods.html)
+- [JWT Best Practices](https://tools.ietf.org/html/rfc8725)
+- [Python Security Guide](https://python.readthedocs.io/en/latest/library/security_warnings.html)
 
 ## License
 
