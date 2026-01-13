@@ -54,6 +54,7 @@ interface DeviceFilters {
   assigned_state?: string
   subscription_key?: string
   search?: string
+  [key: string]: string | undefined
 }
 
 export function DevicesList() {

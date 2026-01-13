@@ -37,6 +37,7 @@ interface SubscriptionFilters {
   subscription_type?: string
   subscription_status?: string
   search?: string
+  [key: string]: string | undefined
 }
 
 export function SubscriptionsList() {

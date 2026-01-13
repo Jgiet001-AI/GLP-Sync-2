@@ -106,14 +106,22 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
     filters = {} as TFilters,
   } = config
 
+  // Define combined state type for URL synchronization
+  type CombinedState = {
+    page: number
+    page_size: number
+    sort_by: string
+    sort_order: 'asc' | 'desc'
+  } & TFilters
+
   // Combine all state into a single URL-synced object
-  const defaultState = {
+  const defaultState: CombinedState = {
     page,
     page_size,
     sort_by,
     sort_order,
     ...filters,
-  }
+  } as CombinedState
 
   const [urlState, setUrlState, clearUrlState] = useUrlState(defaultState)
 
@@ -124,7 +132,8 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
     sort_by: (urlState.sort_by as string) || sort_by,
     sort_order: (urlState.sort_order as 'asc' | 'desc') || sort_order,
     filters: Object.keys(filters).reduce((acc, key) => {
-      acc[key as keyof TFilters] = (urlState[key] as string | undefined) || undefined
+      const value = urlState[key] as string | undefined
+      acc[key as keyof TFilters] = value as TFilters[keyof TFilters]
       return acc
     }, {} as TFilters),
   }
@@ -132,14 +141,14 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
   // Pagination handlers
   const handlePageChange = useCallback(
     (newPage: number) => {
-      setUrlState({ page: newPage })
+      setUrlState({ page: newPage } as Partial<CombinedState>)
     },
     [setUrlState]
   )
 
   const handlePageSizeChange = useCallback(
     (newSize: number) => {
-      setUrlState({ page_size: newSize, page: 1 })
+      setUrlState({ page_size: newSize, page: 1 } as Partial<CombinedState>)
     },
     [setUrlState]
   )
@@ -152,7 +161,7 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
       setUrlState({
         sort_by: column,
         sort_order: newSortOrder,
-      })
+      } as Partial<CombinedState>)
     },
     [state.sort_by, state.sort_order, setUrlState]
   )
@@ -163,7 +172,7 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
       setUrlState({
         [key as string]: value || undefined,
         page: 1, // Reset to page 1 when filters change
-      })
+      } as Partial<CombinedState>)
     },
     [setUrlState]
   )
@@ -173,7 +182,7 @@ export function usePaginatedList<TFilters extends Record<string, string | undefi
       setUrlState({
         ...updates,
         page: 1, // Reset to page 1 when filters change
-      })
+      } as Partial<CombinedState>)
     },
     [setUrlState]
   )
