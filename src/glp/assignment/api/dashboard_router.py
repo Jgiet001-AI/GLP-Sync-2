@@ -479,7 +479,6 @@ async def run_greenlake_sync(pool) -> dict:
     Returns sync statistics for devices, subscriptions, and Central devices.
     """
     global _sync_status
-    import time
 
     try:
         from src.glp.api import (
@@ -696,6 +695,8 @@ async def list_devices(
     device_type: Optional[str] = Query(default=None, description="Filter by device type"),
     region: Optional[str] = Query(default=None, description="Filter by region"),
     assigned_state: Optional[str] = Query(default=None, description="Filter by assignment state"),
+    subscription_key: Optional[str] = Query(default=None, description="Filter by subscription key"),
+    include_archived: bool = Query(default=False, description="Include archived devices"),
     sort_by: str = Query(default="updated_at", description="Sort field"),
     sort_order: str = Query(default="desc", description="Sort order (asc/desc)"),
     pool=Depends(get_db_pool),
@@ -704,9 +705,13 @@ async def list_devices(
     """Get paginated list of devices with optional filtering and search."""
     async with pool.acquire() as conn:
         # Build the query dynamically
-        where_clauses = ["NOT d.archived"]
+        where_clauses = []
         params = []
         param_idx = 1
+
+        # Handle archived filter - by default exclude archived
+        if not include_archived:
+            where_clauses.append("NOT d.archived")
 
         if search:
             # Use full-text search if search term provided
@@ -729,7 +734,12 @@ async def list_devices(
             params.append(assigned_state)
             param_idx += 1
 
-        where_sql = " AND ".join(where_clauses)
+        if subscription_key:
+            where_clauses.append(f"s.key = ${param_idx}")
+            params.append(subscription_key)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
         # Validate sort column to prevent SQL injection
         valid_sort_cols = {"serial_number", "device_type", "model", "region", "device_name", "assigned_state", "updated_at", "created_at"}
@@ -737,8 +747,16 @@ async def list_devices(
             sort_by = "updated_at"
         sort_direction = "DESC" if sort_order.lower() == "desc" else "ASC"
 
-        # Count total
-        count_sql = f"SELECT COUNT(*) FROM devices d WHERE {where_sql}"
+        # Count total - need JOIN if filtering by subscription_key
+        if subscription_key:
+            count_sql = f"""
+                SELECT COUNT(*) FROM devices d
+                LEFT JOIN device_subscriptions ds ON d.id = ds.device_id
+                LEFT JOIN subscriptions s ON ds.subscription_id = s.id
+                WHERE {where_sql}
+            """
+        else:
+            count_sql = f"SELECT COUNT(*) FROM devices d WHERE {where_sql}"
         total = await conn.fetchval(count_sql, *params)
 
         # Calculate pagination

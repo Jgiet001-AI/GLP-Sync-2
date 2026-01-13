@@ -10,6 +10,7 @@ import {
   WorkflowSteps,
 } from '../components'
 import { useAssignment } from '../hooks/useAssignment'
+import { ReportButton } from '../components/reports/ReportButton'
 import { usePerTypeAssignment } from '../hooks/usePerTypeAssignment'
 import { useAssignmentProgress } from '../hooks/useAssignmentProgress'
 import type { DeviceAssignment as DeviceAssignmentType, ApplyRequest } from '../types'
@@ -272,6 +273,19 @@ export function DeviceAssignment() {
         {step === 'upload' && (
           <div className="flex flex-col items-center justify-center min-h-[400px]" data-testid="upload-step">
             <FileUpload onUpload={uploadFile} isUploading={isUploading} />
+
+            {/* Template Download Section */}
+            <div className="mt-8 pt-8 border-t border-slate-700 w-full max-w-md text-center">
+              <p className="text-sm text-slate-400 mb-4">
+                Need a template? Download a sample file to get started.
+              </p>
+              <ReportButton
+                reportType="assignment-template"
+                variant="ghost"
+                label="Download Template"
+                size="md"
+              />
+            </div>
           </div>
         )}
 

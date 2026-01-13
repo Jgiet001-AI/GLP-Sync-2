@@ -136,6 +136,8 @@ export interface DeviceListParams {
   device_type?: string
   region?: string
   assigned_state?: string
+  subscription_key?: string
+  include_archived?: boolean
   sort_by?: string
   sort_order?: 'asc' | 'desc'
 }

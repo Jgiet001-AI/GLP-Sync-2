@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, memo, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { dashboardApiClient, type DeviceListParams } from '../api/client'
 import type { DeviceListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
@@ -32,6 +32,7 @@ import {
   Activity,
   Tag,
 } from 'lucide-react'
+import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
 
 // Device type icon mapping
@@ -98,32 +99,42 @@ export function DevicesList() {
   const [params, setParams] = useState<DeviceListParams>(() => ({
     page: 1,
     page_size: 100,
-    sort_by: 'updated_at',
-    sort_order: 'desc',
+    sort_by: searchParams.get('sort_by') || 'updated_at',
+    sort_order: (searchParams.get('sort_order') as 'asc' | 'desc') || 'desc',
     device_type: searchParams.get('device_type') || undefined,
     region: searchParams.get('region') || undefined,
     assigned_state: searchParams.get('assigned_state') || undefined,
+    subscription_key: searchParams.get('subscription_key') || undefined,
+    include_archived: searchParams.get('include_archived') === 'true',
     search: searchParams.get('search') || undefined,
   }))
   const [searchInput, setSearchInput] = useState(searchParams.get('search') || '')
   const [showFilters, setShowFilters] = useState(
-    !!(searchParams.get('device_type') || searchParams.get('region') || searchParams.get('assigned_state'))
+    !!(searchParams.get('device_type') || searchParams.get('region') || searchParams.get('assigned_state') || searchParams.get('subscription_key'))
   )
   const [selectedDevice, setSelectedDevice] = useState<DeviceListItem | null>(null)
 
-  // Sync URL params to state on mount and when URL changes
+  // Sync URL params to state on mount and when URL changes (external navigation)
   useEffect(() => {
     const deviceType = searchParams.get('device_type')
     const region = searchParams.get('region')
     const assignedState = searchParams.get('assigned_state')
+    const subscriptionKey = searchParams.get('subscription_key')
+    const includeArchived = searchParams.get('include_archived') === 'true'
     const search = searchParams.get('search')
+    const sortBy = searchParams.get('sort_by')
+    const sortOrder = searchParams.get('sort_order') as 'asc' | 'desc' | null
 
     setParams((prev) => ({
       ...prev,
       device_type: deviceType || undefined,
       region: region || undefined,
       assigned_state: assignedState || undefined,
+      subscription_key: subscriptionKey || undefined,
+      include_archived: includeArchived,
       search: search || undefined,
+      sort_by: sortBy || prev.sort_by,
+      sort_order: sortOrder || prev.sort_order,
       page: 1,
     }))
 
@@ -131,7 +142,7 @@ export function DevicesList() {
       setSearchInput(search)
     }
 
-    if (deviceType || region || assignedState) {
+    if (deviceType || region || assignedState || subscriptionKey) {
       setShowFilters(true)
     }
   }, [searchParams])
@@ -176,7 +187,17 @@ export function DevicesList() {
 
   const handleFilterChange = useCallback((key: keyof DeviceListParams, value: string | undefined) => {
     setParams((prev) => ({ ...prev, [key]: value || undefined, page: 1 }))
-  }, [])
+    // Sync filter changes to URL
+    setSearchParams((prevParams) => {
+      const next = new URLSearchParams(prevParams)
+      if (value) {
+        next.set(key, value)
+      } else {
+        next.delete(key)
+      }
+      return next
+    })
+  }, [setSearchParams])
 
   const clearFilters = useCallback(() => {
     setParams({
@@ -194,11 +215,20 @@ export function DevicesList() {
     toast.success(`${label} copied to clipboard`)
   }, [])
 
-  const hasActiveFilters = params.device_type || params.region || params.assigned_state || params.search
+  const hasActiveFilters = params.device_type || params.region || params.assigned_state || params.search || params.subscription_key || params.include_archived
 
   // Generate filter chips from active params
   const filterChips = useMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = []
+    if (params.include_archived) {
+      chips.push({
+        key: 'include_archived',
+        label: 'Showing',
+        value: 'true',
+        displayValue: 'Archived Devices',
+        color: 'slate',
+      })
+    }
     if (params.device_type) {
       chips.push({
         key: 'device_type',
@@ -224,6 +254,14 @@ export function DevicesList() {
         color: params.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'emerald' : 'amber',
       })
     }
+    if (params.subscription_key) {
+      chips.push({
+        key: 'subscription_key',
+        label: 'Subscription',
+        value: params.subscription_key,
+        color: 'rose',
+      })
+    }
     if (params.search) {
       chips.push({
         key: 'search',
@@ -233,11 +271,16 @@ export function DevicesList() {
       })
     }
     return chips
-  }, [params.device_type, params.region, params.assigned_state, params.search])
+  }, [params.include_archived, params.device_type, params.region, params.assigned_state, params.subscription_key, params.search])
 
   // Remove a specific filter
   const removeFilter = useCallback((key: string) => {
-    setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
+    // Handle boolean filters specially
+    if (key === 'include_archived') {
+      setParams((prev) => ({ ...prev, include_archived: false, page: 1 }))
+    } else {
+      setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
+    }
     if (key === 'search') setSearchInput('')
     // Update URL params
     setSearchParams((prev) => {
@@ -291,20 +334,32 @@ export function DevicesList() {
                   {data ? `${data.total.toLocaleString()} devices` : 'Loading...'}
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  toast.promise(refetch(), {
-                    loading: 'Refreshing...',
-                    success: 'Devices updated',
-                    error: 'Failed to refresh',
-                  })
-                }}
-                disabled={isFetching}
-                className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-slate-700 disabled:opacity-50"
-              >
-                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
+              <div className="flex items-center gap-3">
+                <ReportButton
+                  reportType="devices"
+                  variant="secondary"
+                  filters={{
+                    device_type: params.device_type,
+                    region: params.region,
+                    assigned_state: params.assigned_state,
+                    search: params.search,
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    toast.promise(refetch(), {
+                      loading: 'Refreshing...',
+                      success: 'Devices updated',
+                      error: 'Failed to refresh',
+                    })
+                  }}
+                  disabled={isFetching}
+                  className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-slate-700 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
             </div>
           </div>
         </header>
@@ -1089,12 +1144,15 @@ const DeviceRow = memo(function DeviceRow({
           <span className="text-xs text-slate-500">Not in Central</span>
         )}
       </td>
-      <td className="whitespace-nowrap px-4 py-3">
+      <td className="whitespace-nowrap px-4 py-3" onClick={(e) => e.stopPropagation()}>
         {device.subscription_key ? (
-          <div>
-            <p className="font-mono text-xs text-slate-300">{device.subscription_key}</p>
+          <Link
+            to={`/subscriptions?search=${encodeURIComponent(device.subscription_key)}`}
+            className="block hover:bg-slate-700/30 rounded p-1 -m-1 transition-colors"
+          >
+            <p className="font-mono text-xs text-violet-400 hover:text-violet-300">{device.subscription_key}</p>
             <p className="text-xs text-slate-500">{device.subscription_type?.replace('CENTRAL_', '')}</p>
-          </div>
+          </Link>
         ) : (
           <span className="text-sm text-slate-500">-</span>
         )}

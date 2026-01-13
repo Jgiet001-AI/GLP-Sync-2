@@ -1,10 +1,11 @@
-import { useState, useCallback, useEffect, memo } from 'react'
+import { useState, useCallback, useEffect, memo, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { dashboardApiClient, type SubscriptionListParams } from '../api/client'
 import type { SubscriptionListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
 import { DropdownMenu } from '../components/ui/DropdownMenu'
+import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import {
   Shield,
   Search,
@@ -26,6 +27,7 @@ import {
   Eye,
   Calendar,
 } from 'lucide-react'
+import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
 
 // Format date
@@ -126,7 +128,18 @@ export function SubscriptionsList() {
 
   const handleFilterChange = useCallback((key: keyof SubscriptionListParams, value: string | undefined) => {
     setParams((prev) => ({ ...prev, [key]: value || undefined, page: 1 }))
-  }, [])
+    // Sync filter changes to URL - map subscription_status back to 'status' for URL
+    const urlKey = key === 'subscription_status' ? 'status' : key
+    setSearchParams((prevParams) => {
+      const next = new URLSearchParams(prevParams)
+      if (value) {
+        next.set(urlKey, value)
+      } else {
+        next.delete(urlKey)
+      }
+      return next
+    })
+  }, [setSearchParams])
 
   const clearFilters = useCallback(() => {
     setParams({
@@ -145,6 +158,50 @@ export function SubscriptionsList() {
   }, [])
 
   const hasActiveFilters = params.subscription_type || params.subscription_status || params.search
+
+  // Generate filter chips from active params
+  const filterChips = useMemo<FilterChip[]>(() => {
+    const chips: FilterChip[] = []
+    if (params.subscription_type) {
+      chips.push({
+        key: 'subscription_type',
+        label: 'Type',
+        value: params.subscription_type,
+        displayValue: params.subscription_type.replace('CENTRAL_', ''),
+        color: 'violet',
+      })
+    }
+    if (params.subscription_status) {
+      chips.push({
+        key: 'subscription_status',
+        label: 'Status',
+        value: params.subscription_status,
+        color: 'emerald',
+      })
+    }
+    if (params.search) {
+      chips.push({
+        key: 'search',
+        label: 'Search',
+        value: params.search,
+        color: 'slate',
+      })
+    }
+    return chips
+  }, [params.subscription_type, params.subscription_status, params.search])
+
+  // Remove a specific filter
+  const removeFilter = useCallback((key: string) => {
+    setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
+    if (key === 'search') setSearchInput('')
+    // Map key for URL - subscription_status uses 'status' in URL
+    const urlKey = key === 'subscription_status' ? 'status' : key
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete(urlKey)
+      return next
+    })
+  }, [setSearchParams])
 
   if (error) {
     return (
@@ -190,20 +247,31 @@ export function SubscriptionsList() {
                   {data ? `${data.total.toLocaleString()} subscription keys` : 'Loading...'}
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  toast.promise(refetch(), {
-                    loading: 'Refreshing...',
-                    success: 'Subscriptions updated',
-                    error: 'Failed to refresh',
-                  })
-                }}
-                disabled={isFetching}
-                className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-slate-700 disabled:opacity-50"
-              >
-                <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
+              <div className="flex items-center gap-3">
+                <ReportButton
+                  reportType="subscriptions"
+                  variant="secondary"
+                  filters={{
+                    subscription_type: params.subscription_type,
+                    status: params.subscription_status,
+                    search: params.search,
+                  }}
+                />
+                <button
+                  onClick={() => {
+                    toast.promise(refetch(), {
+                      loading: 'Refreshing...',
+                      success: 'Subscriptions updated',
+                      error: 'Failed to refresh',
+                    })
+                  }}
+                  disabled={isFetching}
+                  className="flex items-center gap-2 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-slate-700 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
             </div>
           </div>
         </header>
@@ -328,6 +396,16 @@ export function SubscriptionsList() {
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Active Filter Chips */}
+          {filterChips.length > 0 && (
+            <FilterChips
+              filters={filterChips}
+              onRemove={removeFilter}
+              onClear={clearFilters}
+              className="mb-6"
+            />
           )}
 
           {/* Table */}
@@ -850,13 +928,20 @@ const SubscriptionRow = memo(function SubscriptionRow({
         </div>
       </td>
       <td className="whitespace-nowrap px-4 py-3" onClick={(e) => e.stopPropagation()}>
-        <Link
-          to={`/devices?subscription_key=${encodeURIComponent(subscription.key)}`}
-          className="flex items-center gap-1.5 text-sm text-violet-400 hover:text-violet-300"
-        >
-          <Server className="h-3.5 w-3.5" />
-          <span className="font-mono">{subscription.device_count.toLocaleString()}</span>
-        </Link>
+        {subscription.device_count > 0 ? (
+          <Link
+            to={`/devices?subscription_key=${encodeURIComponent(subscription.key)}`}
+            className="flex items-center gap-1.5 text-sm text-violet-400 hover:text-violet-300"
+          >
+            <Server className="h-3.5 w-3.5" />
+            <span className="font-mono">{subscription.device_count.toLocaleString()}</span>
+          </Link>
+        ) : (
+          <span className="flex items-center gap-1.5 text-sm text-slate-500">
+            <Server className="h-3.5 w-3.5" />
+            <span className="font-mono">0</span>
+          </span>
+        )}
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-400">
         {formatDate(subscription.start_time)}

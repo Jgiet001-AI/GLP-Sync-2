@@ -326,7 +326,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           e.preventDefault()
           setSelectedIndex((prev) => Math.max(prev - 1, 0))
           break
-        case 'Enter':
+        case 'Enter': {
           e.preventDefault()
           const selected = allResults[selectedIndex]
           if (selected) {
@@ -346,16 +346,18 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
             }
           }
           break
+        }
         case 'Escape':
           onClose()
           break
-        case 'Tab':
+        case 'Tab': {
           e.preventDefault()
           // Cycle through sections
           const sections: (ResultType | 'all')[] = ['all', 'device', 'subscription', 'client', 'nav']
           const currentIdx = sections.indexOf(activeSection)
           setActiveSection(sections[(currentIdx + 1) % sections.length])
           break
+        }
       }
     },
     [allResults, selectedIndex, navigate, onClose, query, addSearch, deviceResults, subscriptionResults, clientResults, activeSection]

@@ -20,6 +20,7 @@ import {
   Database,
   CloudDownload,
 } from 'lucide-react'
+import { ReportButton } from '../components/reports/ReportButton'
 import type {
   DashboardResponse,
   DeviceTypeBreakdown,
@@ -577,6 +578,11 @@ export function Dashboard() {
                     <span className="h-2 w-2 rounded-full bg-emerald-500" />
                   )}
                 </div>
+                <ReportButton
+                  reportType="dashboard"
+                  variant="secondary"
+                  label="Export Report"
+                />
                 <button
                   onClick={handleSync}
                   disabled={isSyncing}
@@ -851,7 +857,7 @@ export function Dashboard() {
                     count={device_stats.archived}
                     colorClass="bg-slate-500/10 text-slate-400"
                     dotColor="bg-slate-500"
-                    href="/devices?assigned_state=ARCHIVED"
+                    href="/devices?include_archived=true"
                   />
                 </div>
               </section>

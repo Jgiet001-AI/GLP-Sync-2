@@ -25,6 +25,7 @@ import {
 import { clientsApiClient, type ClientItem, type SiteStats, type ClientsSummary } from '../api/client'
 import { useClientsFilters, type FilterPreset, filtersToQueryParams } from '../hooks/useClientsFilters'
 import { ClientsFilterPanel, ClientsFilterBar } from '../components/filters/ClientsFilterPanel'
+import { ReportButton } from '../components/reports/ReportButton'
 
 // Health color mapping
 const healthColors = {
@@ -830,6 +831,17 @@ export function ClientsPage() {
                     className="w-64 rounded-lg border border-slate-700 bg-slate-800/50 py-2 pl-10 pr-4 text-sm text-white placeholder-slate-400 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
                   />
                 </div>
+
+                {/* Export Report button */}
+                <ReportButton
+                  reportType="clients"
+                  variant="secondary"
+                  filters={{
+                    type: filters.type?.[0],
+                    health: filters.health?.[0],
+                    status: filters.status?.[0],
+                  }}
+                />
 
                 {/* Sync button */}
                 <button
