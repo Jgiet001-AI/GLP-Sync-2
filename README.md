@@ -60,6 +60,7 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Setup Wizard Issues](#setup-wizard-issues)
   - [Common Error Messages](#common-error-messages)
   - [Getting Help](#getting-help)
+- [Contributing](#contributing)
 - [License](#license)
 
 ## Features
@@ -937,6 +938,262 @@ If issues persist after troubleshooting:
 4. **Community Support** - Check existing issues:
    - [GitHub Issues](https://github.com/Jgiet001-AI/GLP-Sync-2/issues)
    - Search for similar problems and solutions
+
+## Contributing
+
+We welcome contributions from the community! Whether you're fixing bugs, adding features, improving documentation, or reporting issues, your help makes this project better.
+
+### Ways to Contribute
+
+- **Code Contributions** - Bug fixes, new features, performance improvements
+- **Documentation** - Improve guides, add examples, fix typos
+- **Bug Reports** - Detailed issue reports with reproduction steps
+- **Feature Requests** - Suggest new capabilities or enhancements
+- **Testing** - Write tests, improve test coverage
+- **Code Reviews** - Review pull requests and provide feedback
+
+### Getting Started
+
+#### 1. Fork and Clone
+
+```bash
+# Fork the repository on GitHub, then clone your fork
+git clone https://github.com/YOUR_USERNAME/GLP-Sync-2.git
+cd GLP-Sync-2
+
+# Add upstream remote
+git remote add upstream https://github.com/Jgiet001-AI/GLP-Sync-2.git
+```
+
+#### 2. Development Setup
+
+We use [uv](https://docs.astral.sh/uv/) for fast, reliable dependency management:
+
+```bash
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install all dependencies (including dev dependencies)
+uv sync --dev
+
+# Verify installation
+uv run python --version  # Should be 3.11+
+uv run pytest --version
+```
+
+#### 3. Create a Branch
+
+```bash
+# Create a descriptive branch name
+git checkout -b feature/your-feature-name
+# or
+git checkout -b fix/issue-description
+```
+
+### Development Workflow
+
+#### Running Tests
+
+We use `pytest` with separate test suites:
+
+```bash
+# Unit tests (no external dependencies)
+uv run pytest tests/test_auth.py tests/test_devices.py -v
+
+# Integration tests (requires PostgreSQL)
+docker compose up -d postgres
+uv run pytest tests/test_database.py -v
+
+# All tests
+uv run pytest tests/ -v
+
+# With coverage
+uv run pytest --cov=src tests/
+```
+
+**Important:** All pull requests must pass CI tests before merging.
+
+#### Code Style
+
+We use [Ruff](https://github.com/astral-sh/ruff) for linting and formatting:
+
+```bash
+# Check for linting issues
+uv run ruff check .
+
+# Auto-fix issues where possible
+uv run ruff check . --fix
+
+# Format code
+uv run ruff format .
+```
+
+**Code Standards:**
+- Python 3.11+ syntax and features
+- Line length: 100 characters max
+- Type hints encouraged for public APIs
+- Async/await for all I/O operations
+- Follow existing code patterns and architecture
+
+#### Running Locally
+
+```bash
+# Start database
+docker compose up -d postgres
+
+# Run API server
+uv run uvicorn src.glp.assignment.app:app --reload --port 8000
+
+# Run scheduler (in another terminal)
+uv run python scheduler.py
+
+# Run frontend (in another terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+### Pull Request Process
+
+1. **Update your branch** with the latest upstream changes:
+   ```bash
+   git fetch upstream
+   git rebase upstream/main
+   ```
+
+2. **Write clear commit messages**:
+   ```bash
+   # Good examples:
+   git commit -m "fix: resolve token refresh race condition"
+   git commit -m "feat: add Aruba Central device sync"
+   git commit -m "docs: update deployment guide with security hardening"
+
+   # Follow conventional commits format:
+   # <type>: <description>
+   # Types: feat, fix, docs, test, refactor, perf, chore
+   ```
+
+3. **Push your changes**:
+   ```bash
+   git push origin feature/your-feature-name
+   ```
+
+4. **Open a Pull Request**:
+   - Use a descriptive title
+   - Reference related issues (e.g., "Fixes #123")
+   - Describe what changed and why
+   - Include testing steps if applicable
+   - Add screenshots for UI changes
+
+5. **Code Review**:
+   - Address reviewer feedback promptly
+   - Keep discussions focused and constructive
+   - Update your PR based on comments
+   - Request re-review when ready
+
+### Code Review Guidelines
+
+**For Authors:**
+- Keep PRs focused and reasonably sized (<500 lines when possible)
+- Write clear descriptions and testing steps
+- Respond to feedback within 48 hours
+- Don't take criticism personally—we're all learning!
+
+**For Reviewers:**
+- Be respectful and constructive
+- Focus on code quality, not personal preferences
+- Suggest alternatives when requesting changes
+- Approve when requirements are met (CI passes, code quality good)
+
+### Testing Requirements
+
+All contributions should include appropriate tests:
+
+- **Unit Tests** - For business logic, utilities, and pure functions
+- **Integration Tests** - For database operations and API interactions
+- **Documentation** - For public APIs and complex logic
+
+**Example test structure:**
+```python
+import pytest
+from src.glp.api.auth import TokenManager
+
+@pytest.mark.asyncio
+async def test_token_refresh():
+    """Test that token manager refreshes expired tokens."""
+    manager = TokenManager(client_id="test", client_secret="test")
+    # ... test implementation
+```
+
+### Documentation
+
+When adding features or making changes:
+
+1. **Update README.md** - Add new sections for significant features
+2. **Code Comments** - Explain complex logic or design decisions
+3. **Docstrings** - Use clear docstrings for public functions
+4. **CLAUDE.md** - Update project guidance for AI assistants
+
+### Reporting Bugs
+
+**Before reporting:**
+- Search existing issues to avoid duplicates
+- Verify the bug exists on the latest version
+
+**When reporting, include:**
+- Clear, descriptive title
+- Steps to reproduce
+- Expected vs actual behavior
+- Environment details (OS, Docker version, Python version)
+- Relevant log output (redact secrets!)
+- Screenshots if applicable
+
+**Example:**
+```markdown
+**Bug:** Frontend fails to connect to API server
+
+**Environment:**
+- OS: macOS 14.2
+- Docker: 24.0.6
+- Browser: Chrome 120
+
+**Steps to Reproduce:**
+1. Start services with `docker compose up -d`
+2. Navigate to http://localhost
+3. Open browser console
+
+**Expected:** Dashboard loads successfully
+**Actual:** Error: "Failed to fetch /api/devices"
+
+**Logs:**
+```
+api-server | ERROR: Database connection failed
+```
+```
+
+### Feature Requests
+
+We love hearing your ideas! When suggesting features:
+
+1. **Check existing issues** - Your idea might already be planned
+2. **Describe the use case** - Why is this feature needed?
+3. **Propose a solution** - What would the implementation look like?
+4. **Consider alternatives** - Are there other approaches?
+
+### Community Guidelines
+
+- **Be respectful** - Treat others with kindness and professionalism
+- **Be patient** - Maintainers are volunteers with limited time
+- **Be collaborative** - We're building this together
+- **Be open** - Accept feedback and different perspectives
+
+### Questions?
+
+- **GitHub Discussions** - For general questions and ideas
+- **GitHub Issues** - For bug reports and feature requests
+- **Code Questions** - Comment on specific files or PRs
+
+Thank you for contributing to HPE GreenLake Device & Subscription Sync! 🎉
 
 ## License
 
