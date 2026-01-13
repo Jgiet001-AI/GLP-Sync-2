@@ -272,7 +272,7 @@ class AgentOrchestrator:
 
         try:
             # Get or create conversation
-            conversation = await self._get_or_create_conversation(
+            conversation = await self.conversation_manager.get_or_create(
                 conversation_id, context
             )
 
@@ -283,7 +283,7 @@ class AgentOrchestrator:
                 conversation_id=conversation.id,
             )
             if self.conversations:
-                await self.conversations.add_message(conversation.id, user_msg, context)
+                await self.conversation_manager.add_message(conversation.id, user_msg, context)
             conversation.messages.append(user_msg)
 
             # Search memory for context
@@ -400,7 +400,7 @@ class AgentOrchestrator:
 
                 # Store assistant message
                 if self.conversations:
-                    await self.conversations.add_message(
+                    await self.conversation_manager.add_message(
                         conversation.id, assistant_msg, context
                     )
                 conversation.messages.append(assistant_msg)
@@ -492,7 +492,7 @@ class AgentOrchestrator:
                         conversation_id=conversation.id,
                     )
                     if self.conversations:
-                        await self.conversations.add_message(
+                        await self.conversation_manager.add_message(
                             conversation.id, tool_msg, context
                         )
                     conversation.messages.append(tool_msg)
@@ -823,35 +823,6 @@ class AgentOrchestrator:
             logger.warning(f"Pattern search failed: {e}")
             return []
 
-    async def _get_or_create_conversation(
-        self,
-        conversation_id: Optional[UUID],
-        context: UserContext,
-    ) -> Conversation:
-        """Get existing or create new conversation.
-
-        Args:
-            conversation_id: Existing ID or None
-            context: User context
-
-        Returns:
-            Conversation object
-        """
-        if conversation_id and self.conversations:
-            conversation = await self.conversations.get(conversation_id, context)
-            if conversation:
-                return conversation
-
-        # Create new conversation
-        conversation = Conversation(
-            tenant_id=context.tenant_id,
-            user_id=context.user_id,
-        )
-
-        if self.conversations:
-            conversation = await self.conversations.create(conversation)
-
-        return conversation
 
     async def _get_memory_context(
         self,
@@ -999,10 +970,9 @@ class AgentOrchestrator:
         Returns:
             Conversation with messages
         """
-        if not self.conversations:
-            return None
-
-        return await self.conversations.get(conversation_id, context)
+        return await self.conversation_manager.get_history(
+            conversation_id, context, limit
+        )
 
     async def list_conversations(
         self,
@@ -1020,7 +990,6 @@ class AgentOrchestrator:
         Returns:
             List of conversations
         """
-        if not self.conversations:
-            return []
-
-        return await self.conversations.list(context, limit, offset)
+        return await self.conversation_manager.list_conversations(
+            context, limit, offset
+        )
