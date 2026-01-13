@@ -120,6 +120,14 @@ class IDeviceManager(Protocol):
         dry_run: bool = False,
     ) -> Any: ...
 
+    async def update_tags_batch(
+        self,
+        device_ids: list[str],
+        tags: dict[str, Optional[str]],
+        *,
+        dry_run: bool = False,
+    ) -> Any: ...
+
     async def assign_application(
         self,
         device_ids: list[str],
@@ -983,6 +991,12 @@ class WriteExecutor(IToolExecutor):
 
         elif op_type == WriteOperationType.UPDATE_TAGS:
             return await self.device_manager.update_tags(
+                device_ids=args["device_ids"],
+                tags=args["tags"],
+            )
+
+        elif op_type == WriteOperationType.BULK_UPDATE_TAGS:
+            return await self.device_manager.update_tags_batch(
                 device_ids=args["device_ids"],
                 tags=args["tags"],
             )
