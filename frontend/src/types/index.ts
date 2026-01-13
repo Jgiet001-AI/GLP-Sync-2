@@ -51,6 +51,21 @@ export class ApiError extends Error {
   }
 }
 
+// Circuit Breaker Status
+export interface CircuitBreakerStatus {
+  state: string
+  failure_count: number
+  last_failure_time: string | null
+  next_attempt_time: string | null
+}
+
+// Health Check Response
+export interface HealthCheckResponse {
+  status: string
+  timestamp: string
+  circuit_breaker: CircuitBreakerStatus | null
+}
+
 export interface DeviceAssignment {
   serial_number: string
   mac_address: string | null
