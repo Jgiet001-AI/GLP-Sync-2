@@ -8,12 +8,15 @@ Features:
 - Configurable limits per tenant
 - Sliding window rate limiting
 - Redis-backed for distributed deployments
-- Graceful degradation if Redis unavailable
+- Fail-closed behavior: Falls back to in-memory rate limiting when Redis unavailable
+- Configurable fail-open mode for high-availability scenarios
 
 Environment Variables:
 - TENANT_RATE_LIMIT_REQUESTS: Requests per window (default: 100)
 - TENANT_RATE_LIMIT_WINDOW_SECONDS: Window size in seconds (default: 60)
 - TENANT_RATE_LIMIT_ENABLED: Enable/disable (default: true)
+- TENANT_RATE_LIMIT_FAIL_CLOSED: Use in-memory fallback when Redis unavailable (default: true)
+  Set to "false" for fail-open behavior that allows requests when Redis is down.
 
 Example:
     # FastAPI dependency
