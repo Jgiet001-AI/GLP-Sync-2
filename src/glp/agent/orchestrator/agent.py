@@ -287,16 +287,27 @@ class AgentOrchestrator:
             conversation.messages.append(user_msg)
 
             # Search memory for context
-            memory_context = await self._get_memory_context(user_message, context)
+            memories = await self.memory_manager.search_memory(
+                query=user_message,
+                context=context,
+                embedding_model=self.llm.embedding_model if hasattr(self.llm, 'embedding_model') else "text-embedding-3-large",
+            )
 
             # Get pattern context (similar successful interactions)
-            pattern_context = await self._get_pattern_context(user_message, context)
+            patterns = await self.pattern_manager.find_similar_patterns(
+                query=user_message,
+                context=context,
+            )
 
             # Get available tools
             available_tools = await self.tools.get_all_tools()
 
             # Build system prompt with memory and patterns
-            system_prompt = self._build_system_prompt(memory_context, pattern_context)
+            system_prompt = self.prompt_builder.build(
+                base_prompt=self.config.system_prompt,
+                memories=memories,
+                patterns=patterns,
+            )
 
             # Main conversation loop
             while turn < self.config.max_turns:
@@ -471,16 +482,12 @@ class AgentOrchestrator:
                         and not result.error
                     ):
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_tool_success,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.TOOL_SUCCESS,
                             trigger=user_message,
-                            response=tc.name,
-                            context={
-                                "arguments": tc.arguments,
-                                "result_preview": str(result.result)[:100],
-                            },
-                            success=True,
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                            result_preview=str(result.result)[:100],
                             name=f"learn_pattern:{tc.name}",
                         )
 
@@ -501,11 +508,11 @@ class AgentOrchestrator:
             # Uses bounded queue with retries instead of fire-and-forget
             if self.config.enable_fact_extraction and response_text:
                 await get_background_worker().submit(
-                    self._extract_and_store_facts,
-                    response_text,
-                    conversation.id,
-                    assistant_msg.id,
-                    context,
+                    self.memory_manager.extract_and_store_facts,
+                    content=response_text,
+                    conversation_id=conversation.id,
+                    message_id=assistant_msg.id,
+                    context=context,
                     name="extract_facts",
                 )
 
@@ -675,13 +682,12 @@ class AgentOrchestrator:
                     # Learn from failure (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_error_recovery,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.ERROR_RECOVERY,
-                            trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
-                            response=f"Retry or escalate: {tool_call.name}",
-                            context={"error": operation.error, "tool": tool_call.name},
-                            success=False,
+                            error_trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
+                            recovery_action=f"Retry or escalate: {tool_call.name}",
+                            error_details=operation.error,
+                            tool_name=tool_call.name,
                             name=f"learn_failure:{tool_call.name}",
                         )
                 else:
@@ -697,13 +703,12 @@ class AgentOrchestrator:
                     # Learn from success (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_tool_success,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.TOOL_SUCCESS,
                             trigger=f"User requested: {tool_call.name} with {tool_call.arguments}",
-                            response=tool_call.name,
-                            context={"arguments": tool_call.arguments, "result": str(operation.result)[:200]},
-                            success=True,
+                            tool_name=tool_call.name,
+                            arguments=tool_call.arguments,
+                            result_preview=str(operation.result)[:200],
                             name=f"learn_success:{tool_call.name}",
                         )
 
@@ -751,142 +756,6 @@ class AgentOrchestrator:
 
         logger.info(f"Cancelled chat for conversation {conversation_id}")
 
-    async def _learn_pattern(
-        self,
-        tenant_id: str,
-        pattern_type: PatternType,
-        trigger: str,
-        response: str,
-        context: dict[str, Any],
-        success: bool,
-    ) -> None:
-        """Learn a pattern from an interaction.
-
-        Called asynchronously after tool executions to capture successful patterns.
-
-        Args:
-            tenant_id: Tenant identifier
-            pattern_type: Type of pattern
-            trigger: What triggered this pattern
-            response: The response/action taken
-            context: Additional context
-            success: Whether this was successful
-        """
-        if not self.agentdb:
-            return
-
-        try:
-            pattern = await self.agentdb.patterns.learn(
-                tenant_id=tenant_id,
-                pattern_type=pattern_type,
-                trigger=trigger,
-                response=response,
-                context=context,
-                success=success,
-            )
-            logger.debug(
-                f"Learned pattern {pattern_type.value}: "
-                f"confidence={pattern.confidence:.2f}, "
-                f"success_rate={pattern.success_rate:.2f}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to learn pattern: {e}")
-
-    async def _get_pattern_context(
-        self,
-        query: str,
-        context: UserContext,
-    ) -> list[tuple[Any, float]]:
-        """Get relevant patterns for context.
-
-        Searches for similar successful patterns to inform the response.
-
-        Args:
-            query: User's query
-            context: User context
-
-        Returns:
-            List of (pattern, similarity) tuples
-        """
-        if not self.agentdb or not self.config.enable_pattern_matching:
-            return []
-
-        try:
-            patterns = await self.agentdb.patterns.find_similar(
-                tenant_id=context.tenant_id,
-                query=query,
-                limit=3,
-                min_confidence=self.config.pattern_min_confidence,
-            )
-            return patterns
-        except Exception as e:
-            logger.warning(f"Pattern search failed: {e}")
-            return []
-
-
-    async def _get_memory_context(
-        self,
-        query: str,
-        context: UserContext,
-    ) -> list[Memory]:
-        """Search memory for relevant context.
-
-        Args:
-            query: User's query
-            context: User context
-
-        Returns:
-            List of relevant memories
-        """
-        if not self.config.enable_memory_search or not self.memory:
-            return []
-
-        try:
-            results = await self.memory.search(
-                query=query,
-                context=context,
-                embedding_model=self.llm.embedding_model if hasattr(self.llm, 'embedding_model') else "text-embedding-3-large",
-                limit=self.config.memory_search_limit,
-                min_confidence=self.config.memory_min_confidence,
-            )
-            return [memory for memory, _ in results]
-
-        except Exception as e:
-            logger.warning(f"Memory search failed: {e}")
-            return []
-
-    def _build_system_prompt(
-        self,
-        memories: list[Memory],
-        patterns: Optional[list[tuple[Any, float]]] = None,
-    ) -> str:
-        """Build system prompt with memory and pattern context.
-
-        Args:
-            memories: Relevant memories to include
-            patterns: Relevant learned patterns to include
-
-        Returns:
-            Complete system prompt
-        """
-        prompt = self.config.system_prompt
-
-        if memories:
-            memory_context = "\n\nRelevant context from previous conversations:\n"
-            for mem in memories:
-                memory_context += f"- [{mem.memory_type.value}] {mem.content}\n"
-            prompt += memory_context
-
-        if patterns:
-            pattern_context = "\n\nSuccessful patterns from previous interactions:\n"
-            for pattern, similarity in patterns:
-                if similarity > 0.7:  # Only include highly similar patterns
-                    pattern_context += f"- When asked similar to '{pattern.trigger[:50]}...', used '{pattern.response}' (confidence: {pattern.confidence:.0%})\n"
-            if pattern_context != "\n\nSuccessful patterns from previous interactions:\n":
-                prompt += pattern_context
-
-        return prompt
-
     async def _execute_tool_call(
         self,
         tool_call: ToolCall,
@@ -917,42 +786,6 @@ class AgentOrchestrator:
                 "recoverable": True,
             }
             return tool_call
-
-    async def _extract_and_store_facts(
-        self,
-        content: str,
-        conversation_id: UUID,
-        message_id: UUID,
-        context: UserContext,
-    ) -> None:
-        """Extract facts from content and store in memory.
-
-        Args:
-            content: Text to extract from
-            conversation_id: Source conversation
-            message_id: Source message
-            context: User context
-        """
-        if not self.fact_extractor or not self.memory:
-            return
-
-        try:
-            facts = await self.fact_extractor.extract(content)
-
-            for fact in facts:
-                memory = fact.to_memory(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    source_conversation_id=conversation_id,
-                    source_message_id=message_id,
-                )
-                await self.memory.store(memory)
-
-            if facts:
-                logger.info(f"Extracted and stored {len(facts)} facts")
-
-        except Exception as e:
-            logger.warning(f"Fact extraction failed: {e}")
 
     async def get_conversation_history(
         self,
