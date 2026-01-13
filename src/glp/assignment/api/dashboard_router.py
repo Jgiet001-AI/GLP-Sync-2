@@ -1224,3 +1224,44 @@ async def create_search_history(
             created_at=row['created_at'],
             metadata=row['metadata'] or {},
         )
+
+
+@router.delete("/search-history/{id}", status_code=204)
+async def delete_search_history(
+    id: str,
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Delete a search history record by ID.
+
+    Returns HTTP 204 No Content on successful deletion.
+    Raises 404 if the record doesn't exist.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            raise HTTPException(
+                status_code=503,
+                detail="Search history table not available. Run database migrations."
+            )
+
+        # Delete the search history record
+        result = await conn.execute("""
+            DELETE FROM search_history WHERE id = $1::uuid
+        """, id)
+
+        # Check if a record was actually deleted
+        # result is a string like "DELETE 1" or "DELETE 0"
+        rows_deleted = int(result.split()[-1])
+        if rows_deleted == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Search history record with id '{id}' not found"
+            )
