@@ -1,5 +1,12 @@
 # HPE GreenLake Device & Subscription Sync
 
+[![CI](https://github.com/Jgiet001-AI/GLP-Sync-2/actions/workflows/ci.yml/badge.svg)](https://github.com/Jgiet001-AI/GLP-Sync-2/actions/workflows/ci.yml)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
+[![Version](https://img.shields.io/badge/version-0.2.0-green)](https://github.com/Jgiet001-AI/GLP-Sync-2/releases)
+[![Docker Hub](https://img.shields.io/badge/docker-jgiet001%2Fglp--sync-blue?logo=docker)](https://hub.docker.com/r/jgiet001/glp-sync)
+[![Code style: Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A comprehensive platform for syncing device and subscription inventory from HPE GreenLake Platform to PostgreSQL, with a React dashboard, AI chatbot, and Aruba Central integration.
 
 ## Features
