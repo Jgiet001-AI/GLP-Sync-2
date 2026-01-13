@@ -91,6 +91,21 @@ class SyncHistoryItem(BaseModel):
     duration_ms: Optional[int] = None
 
 
+class CircuitBreakerStatus(BaseModel):
+    """Circuit breaker status."""
+    state: str
+    failure_count: int = 0
+    last_failure_time: Optional[datetime] = None
+    next_attempt_time: Optional[datetime] = None
+
+
+class HealthCheckResponse(BaseModel):
+    """Health check response."""
+    status: str
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    circuit_breaker: Optional[CircuitBreakerStatus] = None
+
+
 class DashboardResponse(BaseModel):
     """Complete dashboard data."""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
