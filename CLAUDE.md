@@ -205,8 +205,9 @@ Schema files: `db/schema.sql`, `db/subscriptions_schema.sql`, `db/migrations/`
 
 ### Optional - Agent
 - `JWT_SECRET` - JWT signing secret
-- `ANTHROPIC_API_KEY` - Claude API key
-- `OPENAI_API_KEY` - GPT API key
+- `ANTHROPIC_API_KEY` - Claude API key (primary chat provider)
+- `OPENAI_API_KEY` - GPT API key (fallback chat + embeddings)
+- `OPENAI_EMBEDDING_MODEL` - Embedding model (default: text-embedding-3-large)
 - `REDIS_URL` - WebSocket ticket store
 
 ### Optional - Aruba Central
@@ -224,18 +225,18 @@ Schema files: `db/schema.sql`, `db/subscriptions_schema.sql`, `db/migrations/`
 | mcp-server | 8010 | MCP for AI assistants |
 | frontend | 80 | React + nginx |
 
-### Compose Files
-- `docker-compose.yml` - Development with local builds
-- `docker-compose.prod.yml` - Production with pre-built images
-- `docker-compose.secure.yml` - Security-hardened
+### Docker Hub Images
+- `jgiet001/glp-sync` - Backend API server
+- `jgiet001/glp-frontend` - React dashboard
+- `jgiet001/glp-mcp-server` - MCP server for AI assistants
+- `jgiet001/glp-scheduler` - Automated sync scheduler
 
 ### Security Features
-- Base images pinned by SHA256 digest
+- Base images pinned by SHA256 digest (Python 3.12-alpine, Node 22-alpine, nginx 1-alpine)
 - Non-root users (appuser UID 1000, nginx)
-- Read-only filesystems (secure compose)
 - Dropped capabilities, no-new-privileges
 - Resource limits (CPU/memory)
-- Ports bound to localhost (prod/secure)
+- PyJWT for secure JWT handling (replaced python-jose)
 
 ## Testing Notes
 

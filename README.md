@@ -19,7 +19,8 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
 - **Command Palette** - Quick navigation (Cmd+K)
 
 ### AI Agent Chatbot
-- **Multi-Provider** - Anthropic Claude and OpenAI GPT support
+- **Multi-Provider** - Anthropic Claude (primary) and OpenAI GPT (fallback) support
+- **OpenAI Embeddings** - Semantic memory search with text-embedding-3-large
 - **MCP Tools** - 27 read-only database tools for AI assistants
 - **WebSocket Streaming** - Real-time chat with ticket authentication
 - **Memory Patterns** - Conversation history and semantic search
@@ -82,15 +83,14 @@ cd GLP-Sync-2
 cp .env.example .env
 nano .env  # Edit with your credentials
 
-# Start with pre-built images from Docker Hub (jgiet001/glp-sync, jgiet001/glp-frontend)
-docker compose -f docker-compose.prod.yml up -d
-```
+# Pull pre-built images from Docker Hub
+docker pull jgiet001/glp-sync:latest
+docker pull jgiet001/glp-frontend:latest
+docker pull jgiet001/glp-mcp-server:latest
+docker pull jgiet001/glp-scheduler:latest
 
-### Option 4: Security-Hardened Deployment
-
-```bash
-# Start with security features enabled
-docker compose -f docker-compose.secure.yml up -d
+# Start all services
+docker compose up -d
 ```
 
 ## Docker Architecture
@@ -106,24 +106,23 @@ docker compose -f docker-compose.secure.yml up -d
 | `mcp-server` | 8010 | MCP server for AI assistants |
 | `frontend` | 80 | React dashboard (nginx) |
 
-### Compose Files
+### Docker Hub Images
 
-| File | Purpose |
-|------|---------|
-| `docker-compose.yml` | Development with local builds |
-| `docker-compose.prod.yml` | Production with pre-built images |
-| `docker-compose.secure.yml` | Security-hardened with read-only filesystems |
+| Image | Description |
+|-------|-------------|
+| `jgiet001/glp-sync` | Backend API server |
+| `jgiet001/glp-frontend` | React dashboard |
+| `jgiet001/glp-mcp-server` | MCP server for AI assistants |
+| `jgiet001/glp-scheduler` | Automated sync scheduler |
 
 ### Security Features
 
-- Base images pinned by SHA256 digest
-- Non-root users (appuser, nginx)
-- Read-only filesystems (secure compose)
-- Dropped capabilities
-- No-new-privileges security option
+- Base images pinned by SHA256 digest (Python 3.12-alpine, Node 22-alpine, nginx 1-alpine)
+- Non-root users (appuser UID 1000, nginx)
+- Dropped capabilities and no-new-privileges
 - Resource limits (CPU/memory)
 - Internal network isolation
-- Ports bound to localhost (prod/secure)
+- PyJWT for secure token handling (no ecdsa vulnerability)
 
 ## Environment Variables
 
@@ -222,12 +221,11 @@ python main.py --backup devices.json --subscription-backup subs.json
 ```
 ├── main.py                      # CLI entry point
 ├── scheduler.py                 # Automated sync scheduler
-├── server.py                    # FastMCP server
-├── Dockerfile                   # Backend container
-├── docker-compose.yml           # Development stack
-├── docker-compose.prod.yml      # Production stack
-├── docker-compose.secure.yml    # Security-hardened stack
+├── server.py                    # FastMCP server with REST API bridge
+├── Dockerfile                   # Backend container (Python 3.12-alpine)
+├── docker-compose.yml           # Full stack with security features
 ├── nginx.conf                   # Reverse proxy config
+├── setup.sh                     # Interactive setup wizard
 │
 ├── frontend/
 │   ├── Dockerfile               # Frontend container
