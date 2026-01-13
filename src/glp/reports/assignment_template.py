@@ -104,6 +104,65 @@ class AssignmentTemplateGenerator(BaseReportGenerator):
 
         return output.getvalue()
 
+    def generate_json(
+        self,
+        data: dict[str, Any] | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate JSON template with structure and examples.
+
+        Returns a JSON object containing:
+        - Template schema with column definitions
+        - Example data
+        - Instructions and formatting rules
+        """
+        import json
+
+        # Build column schema
+        columns = []
+        for col_name, display_name, description, required in self.TEMPLATE_COLUMNS:
+            columns.append({
+                "field": col_name,
+                "label": display_name,
+                "description": description,
+                "required": required,
+            })
+
+        template = {
+            "template_version": "1.0",
+            "description": "Device assignment template for bulk subscription and tag assignments",
+            "instructions": {
+                "overview": "This template allows you to bulk assign subscriptions, applications, and tags to devices.",
+                "usage": [
+                    "Only the Serial Number field is required - all other fields are optional.",
+                    "Delete the example data and add your device information.",
+                    "Devices not found in the database will be flagged for review.",
+                    "You can assign the same subscription to multiple devices.",
+                    "Existing assignments will be updated, not duplicated.",
+                    "Leave fields empty to skip assignment for that attribute.",
+                ],
+                "tags_format": {
+                    "description": "Tags should be formatted as key:value pairs separated by semicolons",
+                    "example": "environment:production;team:networking;owner:john",
+                    "rules": [
+                        "Tag keys and values cannot contain colons or semicolons",
+                        "Multiple tags are separated by semicolons",
+                        "Each tag is a key:value pair",
+                    ],
+                },
+                "supported_device_types": [
+                    {"code": "AP", "name": "Access Point"},
+                    {"code": "IAP", "name": "Instant Access Point"},
+                    {"code": "SWITCH", "name": "Network Switch"},
+                    {"code": "GATEWAY", "name": "Gateway Device"},
+                ],
+            },
+            "columns": columns,
+            "examples": self.EXAMPLE_DATA,
+        }
+
+        return json.dumps(template, indent=2)
+
     def _create_instructions_sheet(self, ws) -> None:
         """Create instructions sheet with detailed guidance."""
         # Styling
