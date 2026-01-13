@@ -99,6 +99,17 @@ class DevicesReportGenerator(BaseReportGenerator):
         fieldnames = [field for field, _ in self.DEVICE_COLUMNS]
         return self._dict_to_csv(rows, fieldnames)
 
+    def generate_json(
+        self,
+        data: dict[str, Any],
+        filters: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate JSON with device inventory."""
+        items = data.get("items", [])
+
+        # Return JSON array of devices
+        return json.dumps(items, indent=2, default=str)
+
     def _create_summary_sheet(
         self,
         ws,
