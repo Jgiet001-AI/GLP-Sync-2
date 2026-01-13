@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Optional
 from uuid import UUID
 
+from ..background_worker import get_background_worker
 from ..domain.entities import (
     ChatEvent,
     ChatEventType,
@@ -407,24 +408,25 @@ class AgentOrchestrator:
                         content=str(result.result)[:1000],  # Truncate for event
                     )
 
-                    # Learn from successful tool execution (async, non-blocking)
+                    # Learn from successful tool execution (via background worker)
+                    # Uses bounded queue with retries instead of fire-and-forget
                     if (
                         self.agentdb
                         and self.config.enable_pattern_learning
                         and not result.error
                     ):
-                        asyncio.create_task(
-                            self._learn_pattern(
-                                tenant_id=context.tenant_id,
-                                pattern_type=PatternType.TOOL_SUCCESS,
-                                trigger=user_message,
-                                response=tc.name,
-                                context={
-                                    "arguments": tc.arguments,
-                                    "result_preview": str(result.result)[:100],
-                                },
-                                success=True,
-                            )
+                        await get_background_worker().submit(
+                            self._learn_pattern,
+                            tenant_id=context.tenant_id,
+                            pattern_type=PatternType.TOOL_SUCCESS,
+                            trigger=user_message,
+                            response=tc.name,
+                            context={
+                                "arguments": tc.arguments,
+                                "result_preview": str(result.result)[:100],
+                            },
+                            success=True,
+                            name=f"learn_pattern:{tc.name}",
                         )
 
                     # Add tool result as message
@@ -440,12 +442,16 @@ class AgentOrchestrator:
                         )
                     conversation.messages.append(tool_msg)
 
-            # Extract facts from response (async, don't block)
+            # Extract facts from response (via background worker)
+            # Uses bounded queue with retries instead of fire-and-forget
             if self.config.enable_fact_extraction and response_text:
-                asyncio.create_task(
-                    self._extract_and_store_facts(
-                        response_text, conversation.id, assistant_msg.id, context
-                    )
+                await get_background_worker().submit(
+                    self._extract_and_store_facts,
+                    response_text,
+                    conversation.id,
+                    assistant_msg.id,
+                    context,
+                    name="extract_facts",
                 )
 
             # Done
@@ -611,17 +617,17 @@ class AgentOrchestrator:
                         content=f"Operation failed: {operation.error}",
                         error_type=ErrorType.RECOVERABLE,
                     )
-                    # Learn from failure (if pattern learning enabled)
+                    # Learn from failure (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
-                        asyncio.create_task(
-                            self._learn_pattern(
-                                tenant_id=context.tenant_id,
-                                pattern_type=PatternType.ERROR_RECOVERY,
-                                trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
-                                response=f"Retry or escalate: {tool_call.name}",
-                                context={"error": operation.error, "tool": tool_call.name},
-                                success=False,
-                            )
+                        await get_background_worker().submit(
+                            self._learn_pattern,
+                            tenant_id=context.tenant_id,
+                            pattern_type=PatternType.ERROR_RECOVERY,
+                            trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
+                            response=f"Retry or escalate: {tool_call.name}",
+                            context={"error": operation.error, "tool": tool_call.name},
+                            success=False,
+                            name=f"learn_failure:{tool_call.name}",
                         )
                 else:
                     yield next_event(
@@ -633,17 +639,17 @@ class AgentOrchestrator:
                         ChatEventType.TEXT_DELTA,
                         content="Done! The operation completed successfully.",
                     )
-                    # Learn from success (if pattern learning enabled)
+                    # Learn from success (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
-                        asyncio.create_task(
-                            self._learn_pattern(
-                                tenant_id=context.tenant_id,
-                                pattern_type=PatternType.TOOL_SUCCESS,
-                                trigger=f"User requested: {tool_call.name} with {tool_call.arguments}",
-                                response=tool_call.name,
-                                context={"arguments": tool_call.arguments, "result": str(operation.result)[:200]},
-                                success=True,
-                            )
+                        await get_background_worker().submit(
+                            self._learn_pattern,
+                            tenant_id=context.tenant_id,
+                            pattern_type=PatternType.TOOL_SUCCESS,
+                            trigger=f"User requested: {tool_call.name} with {tool_call.arguments}",
+                            response=tool_call.name,
+                            context={"arguments": tool_call.arguments, "result": str(operation.result)[:200]},
+                            success=True,
+                            name=f"learn_success:{tool_call.name}",
                         )
 
             except Exception as e:

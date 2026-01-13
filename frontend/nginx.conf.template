@@ -11,6 +11,18 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
+# Rate limiting zones for security-sensitive endpoints
+# ticket_zone: 5 requests/minute for WebSocket ticket generation (prevents brute force)
+# auth_zone: 10 requests/minute for authentication endpoints
+# api_zone: 100 requests/minute general API rate limit (per IP)
+limit_req_zone $binary_remote_addr zone=ticket_zone:10m rate=5r/m;
+limit_req_zone $binary_remote_addr zone=auth_zone:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=api_zone:10m rate=100r/m;
+
+# Log rate limit hits
+limit_req_log_level warn;
+limit_req_status 429;
+
 server {
     # Use unprivileged port for non-root user
     listen 8080;
@@ -18,14 +30,40 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Security headers
+    # Security headers (comprehensive set per OWASP recommendations)
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    # CSP includes ws:/wss: for WebSocket support (agent chatbot)
+
+    # HSTS: Enforce HTTPS (1 year, include subdomains)
+    # Note: Only enable this if you have HTTPS configured
+    # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+
+    # Permissions Policy: Restrict browser features
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+
+    # Cross-Origin policies for additional isolation
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+
+    # Content Security Policy (CSP)
+    #
+    # Security Trade-offs:
+    #   - 'unsafe-inline' for scripts: Required by Vite/React build output which includes
+    #     inline module preload hints. To remove: implement nonce-based CSP with server-side
+    #     nonce generation injected into both HTML and this header on each request.
+    #   - 'unsafe-inline' for styles: Required for TailwindCSS and React inline styles.
+    #     Lower risk than script inline since style injection is harder to exploit.
+    #
+    # Future Hardening (requires code changes):
+    #   1. Generate per-request nonce: openssl rand -base64 16
+    #   2. Inject nonce into HTML: <script nonce="$NONCE">
+    #   3. Update CSP: script-src 'self' 'nonce-$NONCE' 'strict-dynamic';
+    #
+    # WebSocket support: ws:/wss: in connect-src for agent chatbot
     # 'self' covers proxied /api routes; no need to whitelist internal api-server
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss: https:;" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' ws: wss: https:; frame-ancestors 'self'; base-uri 'self'; form-action 'self';" always;
 
     # Gzip compression
     gzip on;
@@ -51,9 +89,40 @@ server {
         access_log off;
     }
 
-    # API proxy to backend service
+    # Rate-limited: WebSocket ticket endpoint (5 requests/minute)
+    # This endpoint creates short-lived tickets for WebSocket authentication
+    # Strict rate limiting prevents ticket brute-force attacks
+    location = /api/agent/ticket {
+        limit_req zone=ticket_zone burst=2 nodelay;
+
+        proxy_pass http://api-server:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-API-Key "${API_KEY}";
+    }
+
+    # Rate-limited: Authentication endpoints (10 requests/minute)
+    # Covers login, token refresh, and auth-related endpoints
+    location ~ ^/api/(auth|login|token) {
+        limit_req zone=auth_zone burst=5 nodelay;
+
+        proxy_pass http://api-server:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-API-Key "${API_KEY}";
+    }
+
+    # API proxy to backend service (general rate limit: 100 requests/minute)
     # API_KEY is injected server-side - never exposed to browser
     location /api/ {
+        limit_req zone=api_zone burst=20 nodelay;
+
         proxy_pass http://api-server:8000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

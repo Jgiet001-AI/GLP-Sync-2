@@ -2,7 +2,7 @@
 JWT Authentication for Agent API.
 
 Provides secure JWT validation for all agent endpoints.
-Supports both HS256 (symmetric) and RS256 (asymmetric) algorithms.
+Supports both symmetric (HS256) and asymmetric (RS256, ES256) algorithms.
 
 Security Features:
 - Full claim validation (iss, aud, exp, nbf)
@@ -10,14 +10,22 @@ Security Features:
 - Tenant/user extraction with validation
 - Dev mode toggle (REQUIRE_AUTH=false)
 - Comprehensive logging of auth failures
+- Public key support for RS/ES algorithms
 
 Environment Variables:
-- JWT_SECRET: Secret key for HS256 (required if using HS256)
+- JWT_SECRET: Secret key for HS* algorithms (required if using HMAC)
+- JWT_PUBLIC_KEY: Public key for RS*/ES*/PS* algorithms (PEM format or file path)
 - JWT_ALGORITHM: Algorithm to use (default: HS256)
 - JWT_ISSUER: Expected issuer claim (optional)
 - JWT_AUDIENCE: Expected audience claim (optional)
 - REQUIRE_AUTH: Enable/disable auth (default: true)
 - JWT_CLOCK_SKEW_SECONDS: Clock skew tolerance (default: 30)
+
+Key Configuration:
+- HS256/HS384/HS512: Requires JWT_SECRET (shared secret)
+- RS256/RS384/RS512: Requires JWT_PUBLIC_KEY (RSA public key)
+- ES256/ES384/ES512: Requires JWT_PUBLIC_KEY (ECDSA public key)
+- PS256/PS384/PS512: Requires JWT_PUBLIC_KEY (RSA-PSS public key)
 """
 
 from __future__ import annotations
@@ -40,6 +48,7 @@ class JWTConfig:
     """JWT configuration from environment variables."""
 
     SECRET: Optional[str] = os.getenv("JWT_SECRET")
+    PUBLIC_KEY: Optional[str] = os.getenv("JWT_PUBLIC_KEY")
     ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     ISSUER: Optional[str] = os.getenv("JWT_ISSUER")
     AUDIENCE: Optional[str] = os.getenv("JWT_AUDIENCE")
@@ -50,6 +59,112 @@ class JWTConfig:
     TENANT_ID_CLAIM: str = os.getenv("JWT_TENANT_ID_CLAIM", "tenant_id")
     USER_ID_CLAIM: str = os.getenv("JWT_USER_ID_CLAIM", "sub")
     SESSION_ID_CLAIM: str = os.getenv("JWT_SESSION_ID_CLAIM", "session_id")
+
+    # Security: Explicit allowlist of algorithms (prevents 'none' and unexpected algs)
+    # Only algorithms with proper cryptographic guarantees are allowed
+    ALLOWED_ALGORITHMS: frozenset[str] = frozenset({
+        "HS256", "HS384", "HS512",  # HMAC with SHA-2
+        "RS256", "RS384", "RS512",  # RSA with SHA-2
+        "ES256", "ES384", "ES512",  # ECDSA with SHA-2
+        "PS256", "PS384", "PS512",  # RSA-PSS with SHA-2
+    })
+
+    # Symmetric algorithms that use shared secret
+    SYMMETRIC_ALGORITHMS: frozenset[str] = frozenset({
+        "HS256", "HS384", "HS512",
+    })
+
+    # Asymmetric algorithms that use public/private keys
+    ASYMMETRIC_ALGORITHMS: frozenset[str] = frozenset({
+        "RS256", "RS384", "RS512",  # RSA
+        "ES256", "ES384", "ES512",  # ECDSA
+        "PS256", "PS384", "PS512",  # RSA-PSS
+    })
+
+    # Cache for loaded public key
+    _public_key_cache: Optional[str] = None
+
+    @classmethod
+    def validate_algorithm(cls) -> str:
+        """Validate that configured algorithm is in the allowlist.
+
+        Returns:
+            The validated algorithm
+
+        Raises:
+            ValueError: If algorithm is not allowed
+        """
+        alg = cls.ALGORITHM.upper()
+
+        # Explicitly reject 'none' algorithm (CVE-2015-2951)
+        if alg == "NONE":
+            raise ValueError(
+                "JWT algorithm 'none' is not allowed - this is a security vulnerability"
+            )
+
+        if alg not in cls.ALLOWED_ALGORITHMS:
+            raise ValueError(
+                f"JWT algorithm '{cls.ALGORITHM}' is not allowed. "
+                f"Allowed algorithms: {sorted(cls.ALLOWED_ALGORITHMS)}"
+            )
+
+        return alg
+
+    @classmethod
+    def is_symmetric_algorithm(cls) -> bool:
+        """Check if configured algorithm is symmetric (uses shared secret)."""
+        return cls.ALGORITHM.upper() in cls.SYMMETRIC_ALGORITHMS
+
+    @classmethod
+    def is_asymmetric_algorithm(cls) -> bool:
+        """Check if configured algorithm is asymmetric (uses public/private keys)."""
+        return cls.ALGORITHM.upper() in cls.ASYMMETRIC_ALGORITHMS
+
+    @classmethod
+    def get_verification_key(cls) -> str:
+        """Get the appropriate key for JWT verification.
+
+        For symmetric algorithms (HS*): Returns the secret
+        For asymmetric algorithms (RS*/ES*/PS*): Returns the public key
+
+        Returns:
+            The verification key
+
+        Raises:
+            ValueError: If required key is not configured
+        """
+        if cls.is_symmetric_algorithm():
+            if not cls.SECRET:
+                raise ValueError(
+                    f"JWT_SECRET required for symmetric algorithm {cls.ALGORITHM}"
+                )
+            return cls.SECRET
+
+        # Asymmetric algorithm - need public key
+        if cls._public_key_cache:
+            return cls._public_key_cache
+
+        if not cls.PUBLIC_KEY:
+            raise ValueError(
+                f"JWT_PUBLIC_KEY required for asymmetric algorithm {cls.ALGORITHM}. "
+                "Provide PEM-formatted key directly or path to key file."
+            )
+
+        # Check if PUBLIC_KEY is a file path
+        public_key = cls.PUBLIC_KEY
+        if os.path.isfile(public_key):
+            logger.info(f"Loading JWT public key from file: {public_key}")
+            with open(public_key, "r") as f:
+                public_key = f.read()
+
+        # Validate it looks like a PEM key
+        if not public_key.strip().startswith("-----BEGIN"):
+            raise ValueError(
+                "JWT_PUBLIC_KEY must be PEM format (starting with '-----BEGIN')"
+            )
+
+        cls._public_key_cache = public_key
+        return public_key
 
 
 class TokenPayload(BaseModel):
@@ -101,8 +216,21 @@ def _check_config() -> None:
         )
         return
 
-    if not JWTConfig.SECRET:
-        logger.error("JWT_SECRET not configured but REQUIRE_AUTH=true")
+    # Validate algorithm is in allowlist (prevents 'none' attack)
+    try:
+        JWTConfig.validate_algorithm()
+    except ValueError as e:
+        logger.error(f"Invalid JWT algorithm configuration: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server authentication misconfigured",
+        )
+
+    # Validate the appropriate key is configured for the algorithm
+    try:
+        JWTConfig.get_verification_key()
+    except ValueError as e:
+        logger.error(f"JWT key configuration error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Server authentication not configured",
@@ -160,11 +288,17 @@ def _validate_token(token: str) -> TokenPayload:
     if JWTConfig.AUDIENCE:
         options["verify_aud"] = True
 
+    # Use validated algorithm from allowlist
+    validated_alg = JWTConfig.validate_algorithm()
+
+    # Get the appropriate verification key (secret or public key)
+    verification_key = JWTConfig.get_verification_key()
+
     try:
         payload = jwt.decode(
             token,
-            JWTConfig.SECRET,
-            algorithms=[JWTConfig.ALGORITHM],
+            verification_key,
+            algorithms=[validated_alg],  # Only allow the single configured algorithm
             options=options,
             issuer=JWTConfig.ISSUER,
             audience=JWTConfig.AUDIENCE,

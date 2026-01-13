@@ -1,7 +1,11 @@
 """
 Tests for device array limit enforcement in WriteExecutor.
 
-Ensures the MAX_DEVICES_PER_OPERATION limit is properly enforced.
+Ensures tiered device limits by risk level are properly enforced:
+- LOW risk: 50 devices (e.g., UPDATE_TAGS)
+- MEDIUM risk: 25 devices (e.g., ASSIGN_APPLICATION)
+- HIGH risk: 10 devices (e.g., ARCHIVE_DEVICES)
+- CRITICAL risk: 5 devices (elevated when > 20 devices)
 """
 
 import os
@@ -13,6 +17,7 @@ import pytest
 from src.glp.agent.domain.entities import ToolCall, ToolDefinition, ToolResult, UserContext
 from src.glp.agent.tools.write_executor import (
     DeviceLimitExceededError,
+    RiskLevel,
     WriteExecutor,
     WriteOperationType,
 )
@@ -140,13 +145,15 @@ class TestPrepareOperationValidation:
 
     def test_prepare_deduplicates_before_check(self, executor):
         """prepare_operation deduplicates before limit check."""
-        # 40 total but only 20 unique
-        device_ids = [f"device-{i % 20}" for i in range(40)]
+        # 20 total but only 10 unique - stays under BULK_THRESHOLD (5) after dedup
+        # Note: Risk is assessed on original count, but limit is checked after dedup
+        # Use small numbers to avoid risk elevation
+        device_ids = [f"device-{i % 10}" for i in range(20)]
         operation = executor.prepare_operation(
             WriteOperationType.UPDATE_TAGS,
             {"device_ids": device_ids, "tags": {"key": "value"}},
         )
-        assert len(operation.arguments["device_ids"]) == 20
+        assert len(operation.arguments["device_ids"]) == 10
 
     def test_prepare_updates_arguments_with_deduped(self, executor):
         """prepare_operation updates arguments with deduplicated list."""
@@ -159,30 +166,47 @@ class TestPrepareOperationValidation:
 
 
 class TestConfigurableLimit:
-    """Tests for configurable MAX_DEVICES_PER_OPERATION."""
+    """Tests for configurable tiered device limits."""
 
-    def test_custom_limit_via_class_attribute(self, executor):
-        """Limit can be configured via class attribute."""
-        # Save original
-        original_limit = executor.MAX_DEVICES_PER_OPERATION
-        try:
-            # Set custom limit
-            executor.MAX_DEVICES_PER_OPERATION = 10
+    def test_tiered_limits_by_risk_level(self, executor):
+        """Limits vary by risk level."""
+        # LOW risk: 50 devices
+        result = executor._validate_device_ids(
+            [f"d-{i}" for i in range(50)], "test", risk_level=RiskLevel.LOW
+        )
+        assert len(result) == 50
 
-            # 10 devices should pass
-            result = executor._validate_device_ids([f"d-{i}" for i in range(10)], "test")
-            assert len(result) == 10
+        # MEDIUM risk: 25 devices
+        result = executor._validate_device_ids(
+            [f"d-{i}" for i in range(25)], "test", risk_level=RiskLevel.MEDIUM
+        )
+        assert len(result) == 25
 
-            # 11 devices should fail
-            with pytest.raises(DeviceLimitExceededError) as exc_info:
-                executor._validate_device_ids([f"d-{i}" for i in range(11)], "test")
-            assert exc_info.value.limit == 10
-        finally:
-            executor.MAX_DEVICES_PER_OPERATION = original_limit
+        # HIGH risk: 10 devices
+        result = executor._validate_device_ids(
+            [f"d-{i}" for i in range(10)], "test", risk_level=RiskLevel.HIGH
+        )
+        assert len(result) == 10
 
-    def test_default_limit_is_25(self, executor):
-        """Default limit is 25 if env var not set."""
+        # CRITICAL risk: 5 devices
+        result = executor._validate_device_ids(
+            [f"d-{i}" for i in range(5)], "test", risk_level=RiskLevel.CRITICAL
+        )
+        assert len(result) == 5
+
+    def test_exceeding_tiered_limit_raises_error(self, executor):
+        """Exceeding tiered limit raises DeviceLimitExceededError."""
+        # HIGH risk limit is 10
+        with pytest.raises(DeviceLimitExceededError) as exc_info:
+            executor._validate_device_ids(
+                [f"d-{i}" for i in range(11)], "test", risk_level=RiskLevel.HIGH
+            )
+        assert exc_info.value.limit == 10
+
+    def test_default_limit_is_25_for_medium_risk(self, executor):
+        """Default limit is 25 for MEDIUM risk (legacy fallback)."""
         assert executor.MAX_DEVICES_PER_OPERATION == 25
+        assert executor.DEVICE_LIMITS_BY_RISK[RiskLevel.MEDIUM] == 25
 
 
 class TestErrorMessageQuality:

@@ -5,16 +5,16 @@ This module provides secure, thread-safe OAuth2 token management for the
 Aruba Central API using the client credentials grant flow.
 
 Features:
-    - Automatic token caching with 5-minute expiration buffer
+    - Automatic token caching with dynamic expiration buffer (10% of TTL, max 5min)
     - Thread-safe token refresh using asyncio.Lock
-    - Exponential backoff retry on failures (1s, 2s, 4s)
+    - Exponential backoff retry on failures (1s, 2s, 4s) with jitter
     - Transparent token refresh on 401 responses
     - Comprehensive error handling with typed exceptions
 
 Security Notes:
     - Tokens are cached in memory only (never persisted to disk)
     - Client secrets should be provided via environment variables
-    - Token preview in debug output shows only first 20 characters
+    - Token ID in debug output uses SHA-256 hash (first 8 chars) - never shows actual token
 
 Environment Variables:
     - ARUBA_CLIENT_ID: OAuth2 client ID for Aruba Central
@@ -29,8 +29,10 @@ Example:
 Author: HPE GreenLake Team
 """
 import asyncio
+import hashlib
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -63,16 +65,44 @@ class CachedToken:
         access_token: The OAuth2 bearer token string.
         expires_at: Unix timestamp when the token expires.
         token_type: Token type, typically "Bearer".
+        expires_in: Original TTL in seconds (for dynamic buffer calculation).
     """
     access_token: str
     expires_at: float
     token_type: Optional[str] = "Bearer"
+    expires_in: int = 7200  # Original TTL for dynamic buffer
+
+    # Security: Maximum buffer is 5 minutes, minimum is 30 seconds
+    MAX_BUFFER_SECONDS = 300
+    MIN_BUFFER_SECONDS = 30
+
+    @property
+    def token_id(self) -> str:
+        """Get a safe identifier for logging (SHA-256 hash, first 8 chars).
+
+        Security: Never log actual tokens - use this ID instead.
+        """
+        return hashlib.sha256(self.access_token.encode()).hexdigest()[:8]
+
+    @property
+    def _buffer_seconds(self) -> float:
+        """Calculate dynamic buffer with jitter.
+
+        Uses 10% of TTL capped between MIN_BUFFER and MAX_BUFFER,
+        plus random jitter (±10%) to prevent herd refresh.
+        """
+        # 10% of TTL
+        base_buffer = self.expires_in * 0.1
+        # Clamp to min/max
+        buffer = max(self.MIN_BUFFER_SECONDS, min(base_buffer, self.MAX_BUFFER_SECONDS))
+        # Add ±10% jitter to prevent coordinated refresh across processes
+        jitter = buffer * random.uniform(-0.1, 0.1)
+        return buffer + jitter
 
     @property
     def is_expired(self) -> bool:
-        """Check if the token has expired (with 5-minute safety buffer)."""
-        buffer_seconds = 300  # Refresh token 5 minutes before expiration
-        return time.time() >= (self.expires_at - buffer_seconds)
+        """Check if the token has expired (with dynamic safety buffer + jitter)."""
+        return time.time() >= (self.expires_at - self._buffer_seconds)
 
     @property
     def time_remaining(self) -> float:
@@ -211,6 +241,7 @@ class ArubaTokenManager:
                                 access_token=data.get("access_token"),
                                 expires_at=expires_at,
                                 token_type=data.get("token_type", "Bearer"),
+                                expires_in=expires_in,
                             )
                             logger.info(
                                 f"Aruba Central token fetched successfully, "
@@ -306,13 +337,16 @@ class ArubaTokenManager:
 
     @property
     def token_info(self) -> Optional[dict]:
-        """Get info about the current cached token for debugging."""
+        """Get info about the current cached token for debugging.
+
+        Security: Uses token_id (SHA-256 hash) instead of actual token preview.
+        """
         if not self._cached_token:
             return None
         return {
             "is_expired": self._cached_token.is_expired,
             "time_remaining_seconds": self._cached_token.time_remaining,
-            "token_preview": self._cached_token.access_token[:20] + "...",
+            "token_id": self._cached_token.token_id,
         }
 
 
@@ -345,7 +379,8 @@ if __name__ == "__main__":
 
         print("First call (should fetch token):")
         t1 = await manager.get_token()
-        print(f"Token: {t1[:30]}...")
+        # Security: Use token_id (SHA-256 hash) instead of actual token
+        print(f"Token ID: {manager.token_info['token_id']}")
         print(f"Info: {manager.token_info}")
 
         print("\nSecond call (should return cached token):")

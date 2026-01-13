@@ -45,12 +45,39 @@ class TestCachedToken:
         assert token.time_remaining == 0
 
     def test_expired_within_buffer(self):
-        """Token expiring within 5-minute buffer should be considered expired."""
+        """Token expiring within dynamic buffer should be considered expired.
+
+        Dynamic buffer is 10% of TTL, capped between 30s and 300s, plus jitter.
+        Default expires_in=7200 gives buffer of 300s (max cap).
+        """
         token = CachedToken(
             access_token="test_token_123",
-            expires_at=time.time() + 200,  # 200 seconds from now (< 300 buffer)
+            expires_at=time.time() + 200,  # 200 seconds from now (< 300 max buffer)
+            expires_in=7200,  # Default TTL, 10% = 720s but capped at 300s
         )
         assert token.is_expired  # Should be considered expired due to buffer
+
+    def test_dynamic_buffer_short_ttl(self):
+        """Short TTL should use 10% buffer (not fixed 5 minutes)."""
+        # 600s TTL gives 60s base buffer (10%), plus ±10% jitter (54-66s)
+        token = CachedToken(
+            access_token="test_token_123",
+            expires_at=time.time() + 50,  # 50 seconds from now (< min jitter of 54s)
+            expires_in=600,  # 10 minute TTL → 60s buffer (± jitter)
+        )
+        # With 50s remaining and 54-66s buffer, token should be expired
+        assert token.is_expired
+
+    def test_token_id_is_sha256_hash(self):
+        """token_id should be SHA-256 hash prefix for safe logging."""
+        import hashlib
+        token = CachedToken(
+            access_token="my_secret_token_value",
+            expires_at=time.time() + 3600,
+        )
+        expected_hash = hashlib.sha256(b"my_secret_token_value").hexdigest()[:8]
+        assert token.token_id == expected_hash
+        assert "my_secret" not in token.token_id
 
     def test_default_token_type(self):
         """Token type should default to Bearer."""
@@ -156,10 +183,12 @@ class TestTokenManager:
         assert manager._cached_token is None
 
     def test_token_info_returns_debug_data(self, env_vars):
-        """token_info should return safe debug information."""
+        """token_info should return safe debug information with SHA-256 hash."""
+        import hashlib
         manager = TokenManager()
+        test_token = "a_very_long_token_that_should_be_hashed"
         manager._cached_token = CachedToken(
-            access_token="a_very_long_token_that_should_be_truncated",
+            access_token=test_token,
             expires_at=time.time() + 3600,
         )
 
@@ -167,8 +196,12 @@ class TestTokenManager:
 
         assert not info["is_expired"]
         assert info["time_remaining_seconds"] > 3500
-        assert "..." in info["token_preview"]  # Should be truncated
-        assert len(info["token_preview"]) == 23  # 20 chars + "..."
+        # Should use SHA-256 hash prefix instead of truncated token
+        expected_hash = hashlib.sha256(test_token.encode()).hexdigest()[:8]
+        assert info["token_id"] == expected_hash
+        # Verify actual token is not exposed
+        assert "a_very_long" not in str(info)
+        assert "token_preview" not in info  # Old field should not exist
 
 
 # ============================================

@@ -20,6 +20,9 @@ from .api.dependencies import (
 )
 from .api.router import router
 
+# Import reports router
+from ..reports.api import router as reports_router
+
 # Import agent router and components (optional - only if agent module exists)
 try:
     from ..agent import (
@@ -34,6 +37,10 @@ try:
     from ..agent.providers.base import LLMProviderConfig
     from ..agent.security import TicketAuth
     from ..agent.tools.mcp_client import MCPClient, MCPClientConfig
+    from ..agent.background_worker import (
+        init_background_worker,
+        shutdown_background_worker,
+    )
     AGENT_AVAILABLE = True
 except ImportError:
     AGENT_AVAILABLE = False
@@ -42,6 +49,8 @@ except ImportError:
     TicketAuth = None
     MCPClient = None
     MCPClientConfig = None
+    init_background_worker = None
+    shutdown_background_worker = None
 
 # Redis client (for WebSocket ticket auth)
 _redis_client = None
@@ -205,6 +214,14 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("REDIS_URL not configured - WebSocket ticket auth will be unavailable")
 
+    # Initialize background worker for async tasks (pattern learning, fact extraction)
+    if AGENT_AVAILABLE and init_background_worker:
+        try:
+            await init_background_worker(max_queue_size=100, max_concurrent=5)
+            logger.info("Background worker initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize background worker: {e}")
+
     # Initialize agent orchestrator with Redis
     _init_agent_orchestrator(_redis_client)
 
@@ -212,6 +229,14 @@ async def lifespan(app: FastAPI):
 
     # Shutdown (reverse order of initialization)
     logger.info("Shutting down Device Assignment API...")
+
+    # Shutdown background worker first (allow tasks to complete)
+    if AGENT_AVAILABLE and shutdown_background_worker:
+        try:
+            await shutdown_background_worker(timeout=30.0)
+            logger.info("Background worker stopped")
+        except Exception as e:
+            logger.warning(f"Error stopping background worker: {e}")
 
     # Close Redis
     if _redis_client:
@@ -265,6 +290,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(dashboard_router)
 app.include_router(clients_router)
+app.include_router(reports_router)
 
 # Include agent router if available
 if AGENT_AVAILABLE and agent_router:

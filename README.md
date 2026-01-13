@@ -5,7 +5,7 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
 ## Features
 
 ### Core Sync
-- **OAuth2 Authentication** - Automatic token refresh with 5-minute buffer
+- **OAuth2 Authentication** - Automatic token refresh with dynamic buffer (10% of TTL, 30s-5min)
 - **Paginated Fetching** - Devices: 2,000/page, Subscriptions: 50/page
 - **PostgreSQL Sync** - Upsert with JSONB storage + normalized tables
 - **Full-Text Search** - Search devices by serial, name, model

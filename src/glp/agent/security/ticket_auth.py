@@ -39,6 +39,10 @@ class IRedisClient(Protocol):
         """Get and delete a key atomically (Redis 6.2+)."""
         ...
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args) -> Optional[str]:
+        """Execute a Lua script atomically."""
+        ...
+
 
 @dataclass
 class WebSocketTicket:
@@ -154,8 +158,21 @@ class WebSocketTicketAuth:
 
         return ticket_str
 
+    # Lua script for atomic get-and-delete (used as fallback for Redis < 6.2)
+    # This ensures the ticket can only be consumed once, preventing race conditions
+    _ATOMIC_GETDEL_SCRIPT = """
+    local value = redis.call('GET', KEYS[1])
+    if value then
+        redis.call('DEL', KEYS[1])
+    end
+    return value
+    """
+
     async def validate_ticket(self, ticket: str) -> Optional[WebSocketTicket]:
         """Validate and consume a ticket (one-time use).
+
+        Uses atomic operations to prevent race conditions where two concurrent
+        requests could both validate the same ticket.
 
         Args:
             ticket: The ticket string from WebSocket query param
@@ -167,33 +184,28 @@ class WebSocketTicketAuth:
             return None
 
         key = f"{self.KEY_PREFIX}{ticket}"
+        data: Optional[str] = None
 
-        # Try atomic get-and-delete (Redis 6.2+)
+        # Strategy 1: Try GETDEL (Redis 6.2+) - most efficient
         try:
             data = await self.redis.getdel(key)
-        except AttributeError:
-            # Fallback for older Redis: use Lua script for atomicity
-            # This ensures the ticket can only be consumed once
-            lua_script = """
-            local value = redis.call('GET', KEYS[1])
-            if value then
-                redis.call('DEL', KEYS[1])
-            end
-            return value
-            """
+        except (AttributeError, Exception):
+            pass
+
+        # Strategy 2: Fall back to Lua script for atomicity (Redis 2.6+)
+        # This is the critical fix - NEVER use non-atomic get+delete
+        if data is None:
             try:
-                # Try using eval for atomic get-and-delete
-                data = await self.redis.eval(lua_script, 1, key)
-            except (AttributeError, Exception):
-                # Last resort fallback: get then delete (race condition possible)
-                # Log warning as this is not atomic
+                data = await self.redis.eval(self._ATOMIC_GETDEL_SCRIPT, 1, key)
+            except (AttributeError, Exception) as e:
+                # If neither GETDEL nor EVAL work, the Redis client is incompatible
+                # Fail closed - do NOT fall back to non-atomic operations
                 import logging
-                logging.getLogger(__name__).warning(
-                    "Using non-atomic ticket validation - upgrade Redis to 6.2+ for GETDEL"
+                logging.getLogger(__name__).error(
+                    f"Redis client does not support GETDEL or EVAL - "
+                    f"ticket validation unavailable: {e}"
                 )
-                data = await self.redis.get(key)
-                if data:
-                    await self.redis.delete(key)
+                return None
 
         if not data:
             return None
@@ -204,8 +216,8 @@ class WebSocketTicketAuth:
         except (json.JSONDecodeError, TypeError, KeyError):
             return None
 
-        # Verify ticket matches
-        if ticket_data.ticket != ticket:
+        # Verify ticket matches (defense in depth)
+        if not secrets.compare_digest(ticket_data.ticket, ticket):
             return None
 
         # Check expiration with clock skew tolerance
@@ -215,7 +227,10 @@ class WebSocketTicketAuth:
         return ticket_data
 
     async def revoke_ticket(self, ticket: str) -> bool:
-        """Revoke a ticket (e.g., on logout).
+        """Revoke a ticket atomically (e.g., on logout).
+
+        Uses atomic operations to ensure ticket is deleted exactly once,
+        preventing race conditions.
 
         Args:
             ticket: The ticket string to revoke
@@ -223,9 +238,29 @@ class WebSocketTicketAuth:
         Returns:
             True if ticket was revoked, False if not found
         """
+        if not ticket:
+            return False
+
         key = f"{self.KEY_PREFIX}{ticket}"
-        data = await self.redis.get(key)
-        if data:
+
+        # Strategy 1: Try GETDEL (Redis 6.2+) - atomic
+        try:
+            data = await self.redis.getdel(key)
+            return data is not None
+        except (AttributeError, Exception):
+            pass
+
+        # Strategy 2: Fall back to Lua script for atomicity
+        try:
+            data = await self.redis.eval(self._ATOMIC_GETDEL_SCRIPT, 1, key)
+            return data is not None
+        except (AttributeError, Exception):
+            pass
+
+        # If neither atomic method works, use delete directly
+        # (delete returns the number of keys deleted in most clients)
+        try:
             await self.redis.delete(key)
-            return True
-        return False
+            return True  # Assume success - delete is idempotent
+        except Exception:
+            return False

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional, Protocol
 from uuid import UUID, uuid4
@@ -167,12 +167,207 @@ class IDeviceManager(Protocol):
     ) -> Any: ...
 
 
+class TenantQuotaExceededError(ValueError):
+    """Raised when tenant exceeds daily operation quota.
+
+    This error should be mapped to HTTP 429 Too Many Requests.
+    """
+
+    def __init__(self, tenant_id: str, current: int, limit: int, reset_at: str):
+        self.tenant_id = tenant_id
+        self.current = current
+        self.limit = limit
+        self.reset_at = reset_at
+        super().__init__(
+            f"Daily operation quota exceeded for tenant. "
+            f"Used {current}/{limit} operations. Resets at {reset_at}."
+        )
+
+
+class IRedisClient(Protocol):
+    """Protocol for Redis client (for dependency injection)."""
+
+    async def get(self, key: str) -> Optional[str]:
+        """Get a key value."""
+        ...
+
+    async def setex(self, key: str, ttl: int, value: str) -> None:
+        """Set a key with expiration."""
+        ...
+
+    async def incrby(self, key: str, amount: int) -> int:
+        """Increment a key by amount."""
+        ...
+
+    async def expire(self, key: str, ttl: int) -> None:
+        """Set expiration on a key."""
+        ...
+
+
+@dataclass
+class TenantQuota:
+    """Tracks per-tenant operation quotas.
+
+    Supports both in-memory and Redis-backed storage for persistence
+    across restarts.
+    """
+
+    tenant_id: str
+    daily_limit: int
+    operations_today: int = 0
+    devices_today: int = 0
+    reset_date: str = ""  # YYYY-MM-DD
+
+    def check_and_increment(self, device_count: int = 1) -> None:
+        """Check quota and increment counters (in-memory).
+
+        Args:
+            device_count: Number of devices in this operation
+
+        Raises:
+            TenantQuotaExceededError: If quota exceeded
+        """
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+        # Reset if new day
+        if self.reset_date != today:
+            self.operations_today = 0
+            self.devices_today = 0
+            self.reset_date = today
+
+        if self.operations_today >= self.daily_limit:
+            raise TenantQuotaExceededError(
+                tenant_id=self.tenant_id,
+                current=self.operations_today,
+                limit=self.daily_limit,
+                reset_at=f"{today} 00:00:00 UTC (next day)",
+            )
+
+        self.operations_today += 1
+        self.devices_today += device_count
+
+
+class RedisQuotaStore:
+    """Redis-backed quota storage for persistence across restarts.
+
+    Keys are structured as:
+    - quota:{tenant_id}:ops:{date} - operations count
+    - quota:{tenant_id}:devices:{date} - devices count
+
+    Keys automatically expire at end of day (UTC).
+    """
+
+    KEY_PREFIX = "quota"
+
+    def __init__(self, redis: IRedisClient, default_limit: int = 100):
+        """Initialize Redis quota store.
+
+        Args:
+            redis: Redis client
+            default_limit: Default daily operation limit
+        """
+        self.redis = redis
+        self.default_limit = default_limit
+
+    def _get_keys(self, tenant_id: str) -> tuple[str, str]:
+        """Get Redis keys for a tenant's daily quota.
+
+        Returns:
+            Tuple of (operations_key, devices_key)
+        """
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        ops_key = f"{self.KEY_PREFIX}:{tenant_id}:ops:{today}"
+        devices_key = f"{self.KEY_PREFIX}:{tenant_id}:devices:{today}"
+        return ops_key, devices_key
+
+    def _seconds_until_midnight(self) -> int:
+        """Calculate seconds until midnight UTC."""
+        now = datetime.utcnow()
+        midnight = datetime(now.year, now.month, now.day) + timedelta(days=1)
+        return int((midnight - now).total_seconds())
+
+    async def check_and_increment(
+        self,
+        tenant_id: str,
+        device_count: int = 1,
+        daily_limit: Optional[int] = None,
+    ) -> tuple[int, int]:
+        """Check quota and increment atomically using Redis.
+
+        Args:
+            tenant_id: Tenant identifier
+            device_count: Number of devices in this operation
+            daily_limit: Override default daily limit
+
+        Returns:
+            Tuple of (new_ops_count, new_devices_count)
+
+        Raises:
+            TenantQuotaExceededError: If quota exceeded
+        """
+        limit = daily_limit or self.default_limit
+        ops_key, devices_key = self._get_keys(tenant_id)
+        ttl = self._seconds_until_midnight()
+
+        # Get current count first to check limit
+        current_str = await self.redis.get(ops_key)
+        current = int(current_str) if current_str else 0
+
+        if current >= limit:
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            raise TenantQuotaExceededError(
+                tenant_id=tenant_id,
+                current=current,
+                limit=limit,
+                reset_at=f"{today} 00:00:00 UTC (next day)",
+            )
+
+        # Increment atomically
+        new_ops = await self.redis.incrby(ops_key, 1)
+        new_devices = await self.redis.incrby(devices_key, device_count)
+
+        # Set expiration (idempotent if already set)
+        await self.redis.expire(ops_key, ttl)
+        await self.redis.expire(devices_key, ttl)
+
+        logger.debug(
+            f"Tenant {tenant_id} quota: {new_ops}/{limit} ops, "
+            f"{new_devices} devices today (Redis)"
+        )
+
+        return new_ops, new_devices
+
+    async def get_quota_info(self, tenant_id: str) -> dict:
+        """Get current quota usage for a tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+
+        Returns:
+            Dict with quota information
+        """
+        ops_key, devices_key = self._get_keys(tenant_id)
+
+        ops_str = await self.redis.get(ops_key)
+        devices_str = await self.redis.get(devices_key)
+
+        return {
+            "tenant_id": tenant_id,
+            "operations_today": int(ops_str) if ops_str else 0,
+            "devices_today": int(devices_str) if devices_str else 0,
+            "daily_limit": self.default_limit,
+            "reset_at": datetime.utcnow().strftime("%Y-%m-%d") + " 00:00:00 UTC (next day)",
+        }
+
+
 class WriteExecutor(IToolExecutor):
     """Executor for write operations through REST API.
 
     Provides:
     - Audit logging for all operations
     - Risk assessment and confirmation requirements
+    - Tiered device limits based on risk level
+    - Per-tenant daily quotas
     - Dry-run validation before execution
     - Rate limit awareness
     - Operation tracking
@@ -198,12 +393,25 @@ class WriteExecutor(IToolExecutor):
         - Wraps DeviceManager for actual API calls
         - Logs all operations to audit log
         - Assesses risk based on operation type and scope
+        - Enforces tiered device limits per risk level
+        - Tracks per-tenant quotas to prevent abuse
         - Supports dry-run for validation
     """
 
-    # Hard limit for device array size (configurable via env var)
-    # This prevents abuse and aligns with API batch limits
+    # Tiered device limits by risk level (more restrictive for higher risk)
+    # These can be overridden via environment variables
+    DEVICE_LIMITS_BY_RISK = {
+        RiskLevel.LOW: int(os.getenv("MAX_DEVICES_LOW_RISK", "50")),
+        RiskLevel.MEDIUM: int(os.getenv("MAX_DEVICES_MEDIUM_RISK", "25")),
+        RiskLevel.HIGH: int(os.getenv("MAX_DEVICES_HIGH_RISK", "10")),
+        RiskLevel.CRITICAL: int(os.getenv("MAX_DEVICES_CRITICAL_RISK", "5")),
+    }
+
+    # Legacy: fallback for old env var (uses MEDIUM risk limit)
     MAX_DEVICES_PER_OPERATION = int(os.getenv("MAX_DEVICES_PER_OPERATION", "25"))
+
+    # Per-tenant daily quota (configurable)
+    DEFAULT_DAILY_QUOTA = int(os.getenv("TENANT_DAILY_QUOTA", "100"))
 
     # Risk assessment configuration
     RISK_THRESHOLDS = {
@@ -225,33 +433,66 @@ class WriteExecutor(IToolExecutor):
         self,
         device_manager: IDeviceManager,
         audit_log: Optional[IAuditLog] = None,
+        daily_quota: Optional[int] = None,
+        redis_quota_store: Optional[RedisQuotaStore] = None,
     ):
         """Initialize the write executor.
 
         Args:
             device_manager: Device manager for API calls
             audit_log: Audit log for operation tracking
+            daily_quota: Override default daily quota per tenant
+            redis_quota_store: Optional Redis-backed quota store for persistence.
+                If provided, quotas persist across restarts. If None, uses
+                in-memory quota tracking (lost on restart).
         """
         self.device_manager = device_manager
         self.audit_log = audit_log
+        self.daily_quota = daily_quota or self.DEFAULT_DAILY_QUOTA
         self._pending_operations: dict[UUID, WriteOperation] = {}
+        self._tenant_quotas: dict[str, TenantQuota] = {}  # Per-tenant quota tracking (in-memory)
+        self._redis_quota_store = redis_quota_store  # Optional Redis persistence
+
+    def _get_tenant_quota(self, tenant_id: str) -> TenantQuota:
+        """Get or create quota tracker for a tenant (in-memory fallback).
+
+        Args:
+            tenant_id: Tenant identifier
+
+        Returns:
+            TenantQuota tracker for the tenant
+        """
+        if tenant_id not in self._tenant_quotas:
+            self._tenant_quotas[tenant_id] = TenantQuota(
+                tenant_id=tenant_id,
+                daily_limit=self.daily_quota,
+            )
+        return self._tenant_quotas[tenant_id]
 
     def _validate_device_ids(
         self,
         device_ids: list[str],
         operation_name: str,
+        risk_level: RiskLevel = RiskLevel.MEDIUM,
     ) -> list[str]:
         """Validate and deduplicate device IDs array.
+
+        Uses tiered limits based on operation risk level:
+        - LOW risk: up to 50 devices
+        - MEDIUM risk: up to 25 devices
+        - HIGH risk: up to 10 devices
+        - CRITICAL risk: up to 5 devices
 
         Args:
             device_ids: List of device UUIDs
             operation_name: Name of the operation (for error messages)
+            risk_level: Risk level of the operation (affects limit)
 
         Returns:
             Deduplicated list of device IDs
 
         Raises:
-            DeviceLimitExceededError: If count exceeds MAX_DEVICES_PER_OPERATION
+            DeviceLimitExceededError: If count exceeds limit for risk level
         """
         if not device_ids:
             return []
@@ -264,19 +505,52 @@ class WriteExecutor(IToolExecutor):
                 seen.add(device_id)
                 unique_ids.append(device_id)
 
+        # Get tiered limit based on risk level
+        limit = self.DEVICE_LIMITS_BY_RISK.get(risk_level, self.MAX_DEVICES_PER_OPERATION)
+
         # Check limit after deduplication
-        if len(unique_ids) > self.MAX_DEVICES_PER_OPERATION:
+        if len(unique_ids) > limit:
             logger.warning(
-                f"Device limit exceeded for {operation_name}: "
-                f"{len(unique_ids)} > {self.MAX_DEVICES_PER_OPERATION}"
+                f"Device limit exceeded for {operation_name} (risk={risk_level.value}): "
+                f"{len(unique_ids)} > {limit}"
             )
             raise DeviceLimitExceededError(
                 count=len(unique_ids),
-                limit=self.MAX_DEVICES_PER_OPERATION,
+                limit=limit,
                 operation=operation_name,
             )
 
         return unique_ids
+
+    async def _check_tenant_quota(self, tenant_id: str, device_count: int) -> None:
+        """Check and update tenant quota.
+
+        Uses Redis-backed storage if configured, otherwise falls back to
+        in-memory tracking.
+
+        Args:
+            tenant_id: Tenant identifier
+            device_count: Number of devices in the operation
+
+        Raises:
+            TenantQuotaExceededError: If daily quota exceeded
+        """
+        # Use Redis if available for persistence across restarts
+        if self._redis_quota_store:
+            await self._redis_quota_store.check_and_increment(
+                tenant_id=tenant_id,
+                device_count=device_count,
+                daily_limit=self.daily_quota,
+            )
+            return
+
+        # Fall back to in-memory tracking
+        quota = self._get_tenant_quota(tenant_id)
+        quota.check_and_increment(device_count)
+        logger.debug(
+            f"Tenant {tenant_id} quota: {quota.operations_today}/{quota.daily_limit} ops, "
+            f"{quota.devices_today} devices today (in-memory)"
+        )
 
     def get_tool_definitions(self) -> list[ToolDefinition]:
         """Get tool definitions for write operations.
@@ -327,7 +601,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 50 for low-risk operations)",
                         },
                         "tags": {
                             "type": "object",
@@ -348,7 +622,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 25 for medium-risk operations)",
                         },
                         "application_id": {
                             "type": "string",
@@ -373,7 +647,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 25 for medium-risk operations)",
                         },
                     },
                     "required": ["device_ids"],
@@ -390,7 +664,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 10 for high-risk operations)",
                         },
                     },
                     "required": ["device_ids"],
@@ -407,7 +681,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 25 for medium-risk operations)",
                         },
                     },
                     "required": ["device_ids"],
@@ -424,7 +698,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 25 for medium-risk operations)",
                         },
                         "subscription_key": {
                             "type": "string",
@@ -445,7 +719,7 @@ class WriteExecutor(IToolExecutor):
                         "device_ids": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "List of device UUIDs (max 25)",
+                            "description": "List of device UUIDs (max 10 for high-risk operations)",
                         },
                         "subscription_key": {
                             "type": "string",
@@ -547,6 +821,7 @@ class WriteExecutor(IToolExecutor):
         """Prepare a write operation for execution.
 
         Assesses risk and determines if confirmation is needed.
+        Uses tiered device limits based on assessed risk level.
 
         Args:
             operation_type: Type of operation
@@ -556,16 +831,18 @@ class WriteExecutor(IToolExecutor):
             WriteOperation ready for execution (may require confirmation)
 
         Raises:
-            DeviceLimitExceededError: If device_ids exceeds MAX_DEVICES_PER_OPERATION
+            DeviceLimitExceededError: If device_ids exceeds limit for risk level
         """
-        # Validate and deduplicate device_ids if present
+        # First assess risk to determine device limit
+        risk_level = self._assess_risk(operation_type, arguments)
+
+        # Validate and deduplicate device_ids with tiered limits
         if "device_ids" in arguments and isinstance(arguments["device_ids"], list):
             arguments["device_ids"] = self._validate_device_ids(
                 arguments["device_ids"],
                 operation_type.value,
+                risk_level=risk_level,  # Use tiered limits
             )
-
-        risk_level = self._assess_risk(operation_type, arguments)
 
         requires_confirmation = risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
         confirmation_message = None
@@ -609,6 +886,7 @@ class WriteExecutor(IToolExecutor):
 
         Raises:
             ValueError: If confirmation required but not given
+            TenantQuotaExceededError: If daily quota exceeded
         """
         if operation.requires_confirmation and not operation.confirmed:
             raise ValueError(
@@ -618,6 +896,10 @@ class WriteExecutor(IToolExecutor):
         if operation.executed:
             logger.warning(f"Operation {operation.id} already executed")
             return operation
+
+        # Check tenant quota before execution
+        device_count = len(operation.arguments.get("device_ids", [])) or 1
+        await self._check_tenant_quota(context.tenant_id, device_count)
 
         # Log operation start
         if self.audit_log:
