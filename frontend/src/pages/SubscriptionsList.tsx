@@ -9,10 +9,6 @@ import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import {
   Shield,
   Search,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Filter,
   X,
   RefreshCw,
@@ -29,8 +25,9 @@ import {
 import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
 import { formatDate } from '../utils/formatting'
-import { PAGE_SIZE_OPTIONS, generatePageNumbers } from '../utils/pagination'
+import { PAGE_SIZE_OPTIONS } from '../utils/pagination'
 import { SortableHeader } from '../components/shared/SortableHeader'
+import { PaginationControls } from '../components/shared/PaginationControls'
 
 export function SubscriptionsList() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -504,71 +501,16 @@ export function SubscriptionsList() {
 
             {/* Pagination */}
             {data && data.total_pages > 1 && (
-              <div className="border-t border-slate-700/50 px-4 py-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-400">
-                    Showing {((data.page - 1) * data.page_size) + 1} to{' '}
-                    {Math.min(data.page * data.page_size, data.total)} of {data.total.toLocaleString()} subscriptions
-                  </p>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handlePageChange(1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="First page"
-                    >
-                      <ChevronsLeft className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.page - 1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Previous page"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                    </button>
-
-                    <div className="flex items-center gap-1 px-2">
-                      {generatePageNumbers(data.page, data.total_pages).map((pageNum, idx) =>
-                        pageNum === '...' ? (
-                          <span key={`ellipsis-${idx}`} className="px-2 text-slate-500">
-                            ...
-                          </span>
-                        ) : (
-                          <button
-                            key={pageNum}
-                            onClick={() => handlePageChange(pageNum as number)}
-                            className={`min-w-[2rem] rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
-                              data.page === pageNum
-                                ? 'bg-hpe-purple text-white'
-                                : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-                            }`}
-                          >
-                            {pageNum}
-                          </button>
-                        )
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => handlePageChange(data.page + 1)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Next page"
-                    >
-                      <ChevronRight className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.total_pages)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Last page"
-                    >
-                      <ChevronsRight className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <PaginationControls
+                page={data.page}
+                totalPages={data.total_pages}
+                total={data.total}
+                pageSize={data.page_size}
+                itemName="subscriptions"
+                onPageChange={handlePageChange}
+                variant="icon"
+                theme="purple"
+              />
             )}
           </div>
         </main>
