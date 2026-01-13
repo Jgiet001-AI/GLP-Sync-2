@@ -1,4 +1,7 @@
 import { useState, useCallback, useEffect } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import axios, { AxiosError } from 'axios'
+import { ApiError, ApiErrorResponse } from '../types'
 
 /**
  * Search history management with tenant/user namespacing
@@ -12,6 +15,22 @@ interface SearchHistoryItem {
   resultCount?: number
 }
 
+interface SearchHistoryResponse {
+  items: SearchHistoryItem[]
+  total: number
+}
+
+interface AddSearchRequest {
+  query: string
+  type: SearchHistoryItem['type']
+  resultCount?: number
+}
+
+interface RemoveSearchRequest {
+  query: string
+  type: SearchHistoryItem['type']
+}
+
 interface UseSearchHistoryOptions {
   maxItems?: number
   namespace?: string // tenant:user namespace for isolation
@@ -19,6 +38,96 @@ interface UseSearchHistoryOptions {
 
 const DEFAULT_MAX_ITEMS = 20
 const STORAGE_KEY_PREFIX = 'glp_search_history'
+
+// API client for search history
+const searchHistoryApiClient = axios.create({
+  baseURL: '/api/search-history',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+})
+
+// Error interceptor - converts axios errors to structured ApiError
+searchHistoryApiClient.interceptors.response.use(
+  (response) => response,
+  (error: AxiosError<ApiErrorResponse>) => {
+    if (error.response) {
+      // Server responded with an error status
+      const data = error.response.data || { detail: 'An unknown error occurred' }
+      throw new ApiError(data, error.response.status)
+    } else if (error.request) {
+      // Request was made but no response received (network error)
+      throw new ApiError(
+        { detail: 'Network error: Unable to reach server' },
+        0
+      )
+    } else {
+      // Error in request setup
+      throw new ApiError(
+        { detail: error.message || 'Request configuration error' },
+        0
+      )
+    }
+  }
+)
+
+/**
+ * API client functions for search history persistence
+ */
+export const searchHistoryApi = {
+  /**
+   * Get search history for the current user
+   */
+  async getHistory(namespace?: string): Promise<SearchHistoryResponse> {
+    const params = namespace ? { namespace } : {}
+    const response = await searchHistoryApiClient.get<SearchHistoryResponse>('', { params })
+    return response.data
+  },
+
+  /**
+   * Add a search to history
+   */
+  async addSearch(request: AddSearchRequest, namespace?: string): Promise<SearchHistoryItem> {
+    const response = await searchHistoryApiClient.post<SearchHistoryItem>('', {
+      ...request,
+      namespace,
+    })
+    return response.data
+  },
+
+  /**
+   * Remove a specific search from history
+   */
+  async removeSearch(request: RemoveSearchRequest, namespace?: string): Promise<void> {
+    await searchHistoryApiClient.delete('', {
+      data: {
+        ...request,
+        namespace,
+      },
+    })
+  },
+
+  /**
+   * Clear all search history
+   */
+  async clearHistory(namespace?: string): Promise<void> {
+    const params = namespace ? { namespace } : {}
+    await searchHistoryApiClient.delete('/clear', { params })
+  },
+
+  /**
+   * Get recent searches, optionally filtered by type
+   */
+  async getRecent(type?: SearchHistoryItem['type'], limit = 5, namespace?: string): Promise<SearchHistoryItem[]> {
+    const params = {
+      ...(type && { type }),
+      limit,
+      ...(namespace && { namespace }),
+    }
+    const response = await searchHistoryApiClient.get<SearchHistoryItem[]>('/recent', { params })
+    return response.data
+  },
+}
 
 /**
  * Get namespaced storage key
