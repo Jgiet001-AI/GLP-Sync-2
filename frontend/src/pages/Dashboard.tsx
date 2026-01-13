@@ -27,6 +27,8 @@ import type {
   SubscriptionTypeBreakdown,
   ExpiringItem,
   SyncHistoryItem,
+  HealthCheckResponse,
+  CircuitBreakerStatus,
 } from '../types'
 
 // Device type icon mapping
@@ -427,6 +429,60 @@ function DeviceStatusRow({
   )
 }
 
+// Circuit Breaker Indicator Component
+function CircuitBreakerIndicator({ status }: { status: CircuitBreakerStatus | null }) {
+  if (!status) return null
+
+  const stateColors = {
+    closed: {
+      bg: 'bg-emerald-500/10',
+      text: 'text-emerald-400',
+      dot: 'bg-emerald-500',
+      label: 'Healthy',
+    },
+    half_open: {
+      bg: 'bg-amber-500/10',
+      text: 'text-amber-400',
+      dot: 'bg-amber-500',
+      label: 'Testing',
+    },
+    open: {
+      bg: 'bg-rose-500/10',
+      text: 'text-rose-400',
+      dot: 'bg-rose-500',
+      label: 'Failing',
+    },
+  }
+
+  const colors = stateColors[status.state as keyof typeof stateColors] || stateColors.closed
+
+  const tooltipContent = (
+    <div className="space-y-1">
+      <p className="font-medium">Circuit Breaker Status</p>
+      <p>State: {status.state}</p>
+      <p>Failures: {status.failure_count}</p>
+      {status.last_failure_time && (
+        <p>Last Failure: {formatRelativeTime(status.last_failure_time)}</p>
+      )}
+      {status.next_attempt_time && (
+        <p>Next Attempt: {formatRelativeTime(status.next_attempt_time)}</p>
+      )}
+    </div>
+  )
+
+  return (
+    <Tooltip content={tooltipContent} position="bottom">
+      <div className={`flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2 ${colors.bg}`}>
+        <Shield className={`h-4 w-4 ${colors.text}`} />
+        <span className={`h-2 w-2 rounded-full ${colors.dot}`} />
+        <span className={`font-mono text-sm ${colors.text}`}>
+          {colors.label}
+        </span>
+      </div>
+    </Tooltip>
+  )
+}
+
 // Main Dashboard Component
 export function Dashboard() {
   const queryClient = useQueryClient()
@@ -439,6 +495,12 @@ export function Dashboard() {
     queryKey: ['dashboard'],
     queryFn: () => dashboardApiClient.getDashboard(),
     refetchInterval: 60000, // Refresh every minute
+  })
+
+  const { data: healthData } = useQuery<HealthCheckResponse>({
+    queryKey: ['health'],
+    queryFn: () => dashboardApiClient.getHealth(),
+    refetchInterval: 30000, // Refresh every 30 seconds
   })
 
   // Sync mutation - triggers GreenLake sync then refreshes dashboard
@@ -569,6 +631,7 @@ export function Dashboard() {
                 </p>
               </div>
               <div className="flex items-center gap-4">
+                <CircuitBreakerIndicator status={healthData?.circuit_breaker || null} />
                 <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800/50 px-4 py-2">
                   <Clock className="h-4 w-4 text-slate-400" />
                   <span className="font-mono text-sm text-slate-300">

@@ -7,6 +7,7 @@ import type {
   DashboardResponse,
   DeviceListResponse,
   FilterOptions,
+  HealthCheckResponse,
   OptionsResponse,
   ProcessResponse,
   ReportResponse,
@@ -383,6 +384,14 @@ export const dashboardApiClient = {
     const response = await dashboardApi.get<DashboardResponse>('', {
       params: { expiring_days: expiringDays },
     })
+    return response.data
+  },
+
+  /**
+   * Get health status including circuit breaker states
+   */
+  async getHealth(): Promise<HealthCheckResponse> {
+    const response = await dashboardApi.get<HealthCheckResponse>('/health')
     return response.data
   },
 
