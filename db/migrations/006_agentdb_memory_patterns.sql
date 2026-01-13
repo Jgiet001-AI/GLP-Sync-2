@@ -89,13 +89,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_patterns_type_confidence
 CREATE INDEX IF NOT EXISTS idx_agent_patterns_active
     ON agent_patterns(tenant_id, is_active, last_used_at DESC);
 
--- Per-model partial index for semantic pattern search
+-- Per-model partial index for semantic pattern search (using HNSW for high-dimensional vectors)
 CREATE INDEX IF NOT EXISTS idx_agent_patterns_embedding_openai
-    ON agent_patterns USING ivfflat (trigger_embedding vector_cosine_ops) WITH (lists = 100)
+    ON agent_patterns USING hnsw (trigger_embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
     WHERE embedding_model = 'text-embedding-3-large' AND trigger_embedding IS NOT NULL AND is_active = TRUE;
 
 CREATE INDEX IF NOT EXISTS idx_agent_patterns_embedding_openai_small
-    ON agent_patterns USING ivfflat (trigger_embedding vector_cosine_ops) WITH (lists = 100)
+    ON agent_patterns USING hnsw (trigger_embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
     WHERE embedding_model = 'text-embedding-3-small' AND trigger_embedding IS NOT NULL AND is_active = TRUE;
 
 -- ============================================
