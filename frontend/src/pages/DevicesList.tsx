@@ -6,6 +6,7 @@ import type { DeviceListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
 import { DropdownMenu } from '../components/ui/DropdownMenu'
 import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
+import { SortableHeader } from '../components/shared/SortableHeader'
 import {
   Server,
   Search,
@@ -18,7 +19,6 @@ import {
   HardDrive,
   Filter,
   X,
-  ArrowUpDown,
   RefreshCw,
   Check,
   AlertCircle,
@@ -906,50 +906,6 @@ function DeviceDetailContent({
     </div>
   )
 }
-
-// Sortable Header Component
-const SortableHeader = memo(function SortableHeader({
-  column,
-  label,
-  currentSort,
-  sortOrder,
-  onSort,
-}: {
-  column: string
-  label: string
-  currentSort?: string
-  sortOrder?: string
-  onSort: (column: string) => void
-}) {
-  const isActive = currentSort === column
-
-  return (
-    <th
-      className="cursor-pointer px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400 transition-colors hover:text-white"
-      onClick={() => onSort(column)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSort(column)
-        }
-      }}
-      tabIndex={0}
-      role="button"
-      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <div className="flex items-center gap-1">
-        {label}
-        <ArrowUpDown
-          className={`h-3.5 w-3.5 ${isActive ? 'text-hpe-green' : 'text-slate-600'}`}
-          aria-hidden="true"
-        />
-        {isActive && (
-          <span className="text-hpe-green" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
-        )}
-      </div>
-    </th>
-  )
-})
 
 // Device Row Component with actions
 const DeviceRow = memo(function DeviceRow({
