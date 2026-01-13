@@ -569,10 +569,10 @@ async def export_clients(
 
 @router.get("/assignment/template")
 async def download_assignment_template(
-    format: str = Query("xlsx", regex="^(csv|xlsx)$"),
+    format: str = Query("xlsx", regex="^(csv|xlsx|json)$", description="Export format"),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Download sample CSV/Excel template for device assignments.
+    """Download sample CSV/Excel/JSON template for device assignments.
 
     The template includes:
     - Column headers with descriptions
@@ -586,10 +586,14 @@ async def download_assignment_template(
     if format == "xlsx":
         content = await generator.generate_excel_async({})
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    else:
+    elif format == "csv":
         content = await generator.generate_csv_async({})
         content = content.encode("utf-8")
         media_type = "text/csv"
+    else:  # json
+        content = await generator.generate_json_async({})
+        content = content.encode("utf-8")
+        media_type = "application/json"
 
     headers = {
         **DOWNLOAD_HEADERS,
