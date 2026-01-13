@@ -12,6 +12,12 @@ erDiagram
     subscriptions ||--o{ subscription_tags : "has many"
     sites ||--o{ clients : "has many"
     devices ||--o{ clients : "connected via serial"
+    agent_conversations ||--o{ agent_messages : "has many"
+    agent_conversations ||--o{ agent_memory : "source tracking"
+    agent_messages ||--o{ agent_memory : "source tracking"
+    agent_memory ||--o{ agent_memory_revisions : "has many"
+    agent_embedding_jobs ||--|| agent_messages : "targets (polymorphic)"
+    agent_embedding_jobs ||--|| agent_memory : "targets (polymorphic)"
 
     devices {
         UUID id PK "Device UUID from GreenLake API"
@@ -160,6 +166,137 @@ erDiagram
         TIMESTAMPTZ updated_at "Record update timestamp"
         TIMESTAMPTZ synced_at "Last sync timestamp"
     }
+
+    agent_conversations {
+        UUID id PK "Conversation UUID"
+        TEXT tenant_id "Tenant identifier for multi-tenancy"
+        TEXT user_id "User who owns this conversation"
+        TEXT title "Conversation title"
+        TEXT summary "Auto-generated summary for long conversations"
+        INTEGER message_count "Count of messages in conversation"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ updated_at "Updated timestamp"
+        JSONB metadata "Additional conversation metadata"
+    }
+
+    agent_messages {
+        UUID id PK "Message UUID"
+        UUID conversation_id FK "References agent_conversations.id"
+        TEXT role "user, assistant, system, tool"
+        TEXT content "Message content"
+        TEXT thinking_summary "Redacted CoT summary (raw CoT never stored)"
+        JSONB tool_calls "Tool call details with correlation IDs"
+        VECTOR_3072 embedding "🔷 pgvector: Semantic embedding for search"
+        TEXT embedding_model "Model used (e.g., text-embedding-3-large)"
+        INTEGER embedding_dimension "Actual dimension used"
+        TEXT embedding_status "pending, processing, completed, failed"
+        TEXT model_used "LLM model used for this message"
+        INTEGER tokens_used "Token count for this message"
+        INTEGER latency_ms "Response latency in milliseconds"
+        TIMESTAMPTZ created_at "Created timestamp"
+    }
+
+    agent_memory {
+        UUID id PK "Memory UUID"
+        TEXT tenant_id "Tenant identifier"
+        TEXT user_id "User identifier"
+        TEXT memory_type "fact, preference, entity, procedure"
+        TEXT content "Memory content"
+        TEXT content_hash "SHA-256 hash for deduplication"
+        VECTOR_3072 embedding "🔷 pgvector: Semantic embedding for search"
+        TEXT embedding_model "Model used for embedding"
+        INTEGER embedding_dimension "Actual dimension used"
+        INTEGER access_count "Number of times accessed"
+        TIMESTAMPTZ last_accessed_at "Last access timestamp"
+        UUID source_conversation_id FK "References agent_conversations.id (nullable)"
+        UUID source_message_id FK "References agent_messages.id (nullable)"
+        TIMESTAMPTZ valid_from "Valid from timestamp"
+        TIMESTAMPTZ valid_until "Valid until timestamp (NULL = forever)"
+        FLOAT confidence "Confidence score 0-1"
+        BOOLEAN is_invalidated "Soft delete flag"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ updated_at "Updated timestamp"
+        JSONB metadata "Additional memory metadata"
+    }
+
+    agent_embedding_jobs {
+        UUID id PK "Job UUID"
+        TEXT tenant_id "Tenant identifier"
+        TEXT target_table "agent_messages or agent_memory"
+        UUID target_id "ID of target record"
+        TEXT status "pending, processing, completed, failed, dead"
+        INTEGER retries "Retry count"
+        INTEGER max_retries "Maximum retries (default 3)"
+        TEXT error_message "Error details if failed"
+        TIMESTAMPTZ locked_at "Lock timestamp for SKIP LOCKED pattern"
+        TEXT locked_by "Worker ID for debugging"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ processed_at "Processed timestamp"
+    }
+
+    agent_audit_log {
+        UUID id PK "Audit log UUID"
+        TEXT tenant_id "Tenant identifier"
+        TEXT user_id "User identifier"
+        TEXT action "Action performed (e.g., add_device)"
+        TEXT resource_type "Resource type (e.g., device, subscription)"
+        TEXT resource_id "ID of affected resource"
+        JSONB payload "Request payload"
+        JSONB result "Response/result"
+        TEXT status "pending, completed, failed, conflict"
+        TEXT error_message "Error details if failed"
+        TEXT idempotency_key "Client-provided key for retry safety"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ completed_at "Completed timestamp"
+    }
+
+    agent_sessions {
+        UUID id PK "Session UUID"
+        TEXT tenant_id "Tenant identifier"
+        TEXT user_id "User identifier"
+        TEXT session_type "confirmation, operation, context, cache"
+        TEXT key "Unique key within session type"
+        JSONB data "Session data"
+        TIMESTAMPTZ expires_at "Expiration timestamp (NULL = no expiration)"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ updated_at "Updated timestamp"
+    }
+
+    agent_patterns {
+        UUID id PK "Pattern UUID"
+        TEXT tenant_id "Tenant identifier"
+        TEXT pattern_type "tool_success, query_response, error_recovery, workflow"
+        TEXT trigger_text "What triggers this pattern"
+        TEXT trigger_hash "SHA-256 hash for deduplication"
+        VECTOR_3072 trigger_embedding "🔷 pgvector: Semantic embedding for pattern matching"
+        TEXT embedding_model "Model used for embedding"
+        INTEGER embedding_dimension "Actual dimension used"
+        TEXT response "Expected response/action"
+        JSONB context "Additional context"
+        INTEGER success_count "Number of successes"
+        INTEGER failure_count "Number of failures"
+        FLOAT confidence "Success rate confidence score"
+        TIMESTAMPTZ last_used_at "Last use timestamp"
+        BOOLEAN is_active "Active flag"
+        TIMESTAMPTZ created_at "Created timestamp"
+        TIMESTAMPTZ updated_at "Updated timestamp"
+    }
+
+    agent_memory_revisions {
+        UUID id PK "Revision UUID"
+        UUID memory_id FK "References agent_memory.id"
+        TEXT tenant_id "Tenant identifier"
+        TEXT user_id "User identifier"
+        INTEGER version "Version number"
+        TEXT version_state "current, superseded, corrected, merged"
+        TEXT content "Revision content"
+        TEXT previous_content "Previous content for diff"
+        TEXT change_reason "Reason for change"
+        TEXT changed_by "User who made change (null = system)"
+        FLOAT confidence "Confidence score 0-1"
+        JSONB metadata "Additional revision metadata"
+        TIMESTAMPTZ created_at "Created timestamp"
+    }
 ```
 
 ## Key Relationships
@@ -210,6 +347,52 @@ erDiagram
 - Enables firmware compliance monitoring and update planning
 - View **devices_firmware_status** provides computed upgrade status
 
+### Agent Chatbot Relationships
+
+#### One-to-Many: Conversations ↔ Messages
+- **agent_conversations** represents a chat session between a user and the AI agent
+- **agent_messages** stores individual messages within a conversation
+- Foreign key: `agent_messages.conversation_id` references `agent_conversations.id`
+- Cascading delete: removing a conversation removes all its messages
+- Trigger automatically updates `message_count` in conversations table
+
+#### One-to-Many: Conversations/Messages ↔ Memory
+- **agent_memory** stores long-term extracted facts, preferences, entities, and procedures
+- Source tracking via nullable foreign keys to conversations and messages
+- `source_conversation_id` references `agent_conversations.id` (ON DELETE SET NULL)
+- `source_message_id` references `agent_messages.id` (ON DELETE SET NULL)
+- Allows memories to persist even after source conversations are deleted
+
+#### One-to-Many: Memory ↔ Memory Revisions
+- **agent_memory_revisions** tracks version history for memories
+- Foreign key: `agent_memory_revisions.memory_id` references `agent_memory.id`
+- Cascading delete: removing a memory removes all its revisions
+- Partial unique index ensures only one "current" version per memory
+- Enables correction, rollback, and audit trails for memory changes
+
+#### Polymorphic Relationship: Embedding Jobs ↔ Messages/Memory
+- **agent_embedding_jobs** is a work queue for background embedding generation
+- `target_table` + `target_id` creates a polymorphic relationship
+- Can target either `agent_messages` or `agent_memory` tables
+- Unique constraint prevents duplicate jobs for the same target
+- Uses SKIP LOCKED pattern for concurrent worker processing
+
+#### Independent Tables
+- **agent_sessions** - Persistent session storage (no foreign keys, TTL-based cleanup)
+- **agent_patterns** - Learned interaction patterns (tenant-scoped, no foreign keys)
+- **agent_audit_log** - Write operation audit trail (tenant-scoped, no foreign keys)
+
+#### pgvector Embedding Columns 🔷
+Three tables use **pgvector** for semantic search with vector(3072) dimension:
+- **agent_messages.embedding** - Message semantic embeddings for conversational context retrieval
+- **agent_memory.embedding** - Memory semantic embeddings for long-term knowledge retrieval
+- **agent_patterns.trigger_embedding** - Pattern trigger embeddings for learned behavior matching
+
+All embedding columns include:
+- `embedding_model` - Tracks which model generated the embedding (e.g., "text-embedding-3-large")
+- `embedding_dimension` - Actual dimension used (supports multiple models with different dimensions)
+- **Note**: Column dimension is 3072 to support multiple models, but pgvector indexes only support up to 2000 dimensions. Sequential scan is used for similarity searches, which is acceptable for moderate data sizes.
+
 ## Important Views
 
 The schema includes several materialized views for common queries:
@@ -227,6 +410,12 @@ The schema includes several materialized views for common queries:
 - **sites_with_stats** - Sites with dynamic client and device counts (connected, wired, wireless, health)
 - **clients_health_summary** - Aggregated client statistics across all sites (status, type, health)
 - **devices_firmware_status** - Devices with firmware information and computed upgrade status
+- **agent_active_conversations** - Active conversations (updated in last 30 days) with message counts and last message
+- **agent_memory_stats** - Memory statistics per user grouped by memory type (total, active, confidence)
+- **agent_embedding_queue_status** - Embedding job queue status by tenant, target table, and status
+- **agent_active_sessions** - Active sessions with TTL remaining calculations
+- **agent_pattern_summary** - Pattern learning summary by tenant and pattern type
+- **agent_memory_revision_stats** - Memory revision statistics by tenant and user
 
 ## Important Functions
 
@@ -234,6 +423,11 @@ The schema includes several materialized views for common queries:
 - **get_devices_by_tag(key, value)** - Tag-based device lookup
 - **search_clients(query, limit)** - Search clients by MAC address, name, or IP
 - **get_clients_by_device(serial)** - Get all clients connected to a specific device
+- **agent_memory_cleanup(tenant_id)** - Lifecycle management: invalidates expired memories, decays unused, deletes old
+- **agent_track_memory_access(memory_id)** - Updates access count and timestamp when memory is retrieved
+- **agent_cleanup_expired_sessions(tenant_id)** - Removes expired session data (run periodically)
+- **agent_decay_pattern_confidence(days_unused, decay_factor, tenant_id)** - Decays confidence for unused patterns
+- **agent_pattern_stats(tenant_id)** - Returns pattern learning statistics by type
 
 ## Data Storage Philosophy
 
