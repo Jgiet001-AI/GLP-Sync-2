@@ -772,20 +772,9 @@ class AgentOrchestrator:
         Returns:
             Tool call with result
         """
-        logger.info(f"Executing tool: {tool_call.name}")
-
-        try:
-            result = await self.tools.execute_tool_call(tool_call, context)
-            logger.debug(f"Tool {tool_call.name} result: {result.result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
-            tool_call.result = {
-                "error": str(e),
-                "recoverable": True,
-            }
-            return tool_call
+        return await self.tool_executor.execute_tool_call(
+            tool_call, context, conversation_id
+        )
 
     async def get_conversation_history(
         self,
