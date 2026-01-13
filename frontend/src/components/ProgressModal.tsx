@@ -218,7 +218,7 @@ export function ProgressModal({
                   ? 'bg-rose-500'
                   : isComplete
                     ? 'bg-emerald-500'
-                    : 'bg-gradient-to-r from-hpe-green to-hpe-blue animate-pulse'
+                    : 'bg-gradient-to-r from-hpe-green to-hpe-blue animate-pulse progress-shine'
               )}
               style={{ width: `${progressPercent}%` }}
             />
