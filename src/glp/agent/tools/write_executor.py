@@ -426,6 +426,7 @@ class WriteExecutor(IToolExecutor):
     RISK_THRESHOLDS = {
         WriteOperationType.ADD_DEVICE: RiskLevel.LOW,
         WriteOperationType.UPDATE_TAGS: RiskLevel.LOW,
+        WriteOperationType.BULK_UPDATE_TAGS: RiskLevel.MEDIUM,
         WriteOperationType.ASSIGN_APPLICATION: RiskLevel.MEDIUM,
         WriteOperationType.UNASSIGN_APPLICATION: RiskLevel.MEDIUM,
         WriteOperationType.ARCHIVE_DEVICES: RiskLevel.HIGH,
