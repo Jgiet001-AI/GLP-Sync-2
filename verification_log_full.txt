@@ -1,0 +1,52 @@
+============================================================
+HPE GreenLake Sync Scheduler
+============================================================
+[Scheduler] Config: SchedulerConfig(interval=999m, devices=True, subscriptions=True, central=True, startup=True, health_port=8080)
+[Scheduler] GreenLake TokenManager initialized
+[Scheduler] ArubaTokenManager initialized
+[Scheduler] Connected to PostgreSQL
+[Scheduler] Health check server listening on port 8080
+[Scheduler] Running initial sync on startup...
+[Scheduler] Step 1/2: Syncing subscriptions (sequential, required for FK constraints)...
+2026-01-13 16:16:37 - src.glp.api.subscriptions - INFO - Using Clean Architecture use case for subscription sync
+2026-01-13 16:16:37 - src.glp.sync.use_cases.sync_subscriptions - INFO - Starting subscription sync at 2026-01-13T22:16:37.704486+00:00
+2026-01-13 16:16:38 - src.glp.api.auth - INFO - Token fetched (id=3675c1ee), expires in 899s
+2026-01-13 16:16:38 - src.glp.api.client - INFO - Paginating /subscriptions/v1/subscriptions: 27 total items
+2026-01-13 16:16:38 - src.glp.api.client - INFO - Pagination complete: 27 items in 1 pages
+2026-01-13 16:16:38 - src.glp.sync.use_cases.sync_subscriptions - INFO - Fetched 27 subscriptions from API
+2026-01-13 16:16:38 - src.glp.sync.use_cases.sync_subscriptions - INFO - Mapped 27 subscriptions, 2 tags
+2026-01-13 16:16:38 - src.glp.sync.use_cases.sync_subscriptions - INFO - Upserted 27 subscriptions to database
+2026-01-13 16:16:39 - src.glp.sync.use_cases.sync_subscriptions - INFO - Synced subscription tags
+2026-01-13 16:16:39 - src.glp.sync.use_cases.sync_subscriptions - INFO - Subscription sync completed in 1.31s: 27 upserted, 0 errors
+2026-01-13 16:16:39 - __main__ - INFO - Subscription sync completed successfully (sequential phase)
+[Scheduler] ✓ Subscriptions synced successfully
+[Scheduler] Step 2/2: Preparing parallel sync tasks...
+[Scheduler] ⚡ Running 2 sync tasks in parallel: devices and central
+[Scheduler]   → GreenLake devices sync started (parallel task)
+2026-01-13 16:16:39 - src.glp.api.devices - INFO - Using Clean Architecture use case for sync
+2026-01-13 16:16:39 - src.glp.sync.use_cases.sync_devices - INFO - Starting device sync at 2026-01-13T22:16:39.022394+00:00
+[Scheduler]   → Aruba Central sync started (parallel task)
+2026-01-13 16:16:39 - src.glp.api.aruba_devices - INFO - Starting Aruba Central device sync at 2026-01-13T22:16:39.022894
+2026-01-13 16:16:39 - src.glp.api.aruba_auth - INFO - Aruba Central token fetched successfully, expires in 7199s
+2026-01-13 16:16:39 - src.glp.api.aruba_client - INFO - Paginating Aruba Central /network-monitoring/v1alpha1/device-inventory: 8,978 total items
+2026-01-13 16:16:40 - src.glp.api.client - INFO - Paginating /devices/v1/devices: 11,727 total items
+2026-01-13 16:16:50 - src.glp.api.client - INFO - Pagination complete: 11,727 items in 6 pages
+2026-01-13 16:16:50 - src.glp.sync.use_cases.sync_devices - INFO - Fetched 11727 devices from API
+2026-01-13 16:16:50 - src.glp.sync.use_cases.sync_devices - INFO - Mapped 11727 devices, 9099 subscriptions, 8736 tags
+2026-01-13 16:17:47 - src.glp.api.aruba_client - INFO - Aruba Central pagination complete: 8,978 items in 90 pages
+2026-01-13 16:17:47 - src.glp.api.aruba_devices - INFO - Aruba Central sync complete: 8978 devices upserted, 0 skipped, 0 errors
+2026-01-13 16:17:49 - src.glp.sync.use_cases.sync_devices - INFO - Upserted 11727 devices to database
+2026-01-13 16:17:50 - src.glp.sync.use_cases.sync_devices - INFO - Synced subscriptions and tags
+2026-01-13 16:17:50 - src.glp.sync.use_cases.sync_devices - INFO - Device sync completed in 71.15s: 11727 upserted, 0 errors
+2026-01-13 16:17:50 - __main__ - INFO - Parallel sync task 'devices' completed successfully
+[Scheduler]   ✓ Devices sync completed successfully
+2026-01-13 16:17:50 - __main__ - INFO - Parallel sync task 'central' completed successfully
+[Scheduler]   ✓ Central sync completed successfully
+[Scheduler] ✓ All parallel sync tasks completed successfully
+[Scheduler] Initial sync complete: {'started_at': '2026-01-13T22:16:37.704285+00:00', 'devices': {'total': 11727, 'upserted': 11727, 'errors': 0, 'synced_at': '2026-01-13T22:16:39.022394+00:00'}, 'subscriptions': {'total': 27, 'upserted': 27, 'errors': 0, 'synced_at': '2026-01-13T22:16:37.704486+00:00'}, 'central': {'source': 'aruba_central', 'total_pages': 90, 'total_upserted': 8978, 'total_skipped': 0, 'unique_serials': 8978, 'errors': 0, 'synced_at': '2026-01-13T22:17:47.475129'}, 'success': True, 'error': None, 'completed_at': '2026-01-13T22:17:50.184715+00:00', 'duration_seconds': 72.48043}
+[Scheduler] Next sync at 2026-01-14T14:56:50.184790+00:00 (in 999 minutes)
+
+[Scheduler] Received signal 15, initiating shutdown...
+[Scheduler] Shutdown requested, exiting loop
+[Scheduler] Cleaning up...
+[Scheduler] Shutdown complete
