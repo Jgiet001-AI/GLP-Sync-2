@@ -7,6 +7,7 @@ import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
 import { DropdownMenu } from '../components/ui/DropdownMenu'
 import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import { SortableHeader } from '../components/shared/SortableHeader'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
 import {
   Server,
   Search,
@@ -99,12 +100,11 @@ export function DevicesList() {
   }, [searchParams])
 
   // Debounced search
+  const debouncedSearch = useDebouncedSearch(searchInput, 300)
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setParams((prev) => ({ ...prev, search: searchInput || undefined, page: 1 }))
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchInput])
+    setParams((prev) => ({ ...prev, search: debouncedSearch || undefined, page: 1 }))
+  }, [debouncedSearch])
 
   // Fetch devices
   const { data, isLoading, error, refetch, isFetching } = useQuery({
