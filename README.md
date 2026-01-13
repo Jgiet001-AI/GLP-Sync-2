@@ -16,6 +16,10 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Web Dashboard](#web-dashboard)
   - [AI Agent Chatbot](#ai-agent-chatbot)
   - [Integrations](#integrations)
+- [Screenshots](#screenshots)
+  - [Dashboard Overview](#dashboard-overview)
+  - [Device Assignment Workflow](#device-assignment-workflow)
+  - [AI Chatbot Interface](#ai-chatbot-interface)
 - [Quick Start](#quick-start)
   - [Option 1: Interactive Setup Wizard](#option-1-interactive-setup-wizard-recommended)
   - [Option 2: Manual Docker Compose](#option-2-manual-docker-compose)
@@ -75,6 +79,52 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
 - **Aruba Central** - Device and client sync from Aruba
 - **Docker Hub** - Automated multi-arch image publishing
 - **GitHub Actions** - CI/CD with vulnerability scanning
+
+## Screenshots
+
+### Dashboard Overview
+<!--
+Screenshot placeholder: Dashboard Overview
+- Show the main dashboard with device/subscription counts
+- Include filter panel and search functionality
+- Display device cards with status indicators
+Path: docs/screenshots/dashboard-overview.png
+-->
+
+<div align="center">
+  <img src="docs/screenshots/dashboard-overview.png" alt="Dashboard Overview" width="800">
+  <p><em>Modern React dashboard with device inventory, filters, and real-time search</em></p>
+</div>
+
+### Device Assignment Workflow
+<!--
+Screenshot placeholder: Device Assignment Workflow
+- Show Excel upload interface
+- Display assignment preview with validation
+- Include SSE progress streaming
+Path: docs/screenshots/device-assignment.png
+-->
+
+<div align="center">
+  <img src="docs/screenshots/device-assignment.png" alt="Device Assignment Workflow" width="800">
+  <p><em>Bulk device assignment with Excel upload and real-time progress tracking</em></p>
+</div>
+
+### AI Chatbot Interface
+<!--
+Screenshot placeholder: AI Chatbot Interface
+- Show chat widget with conversation history
+- Display MCP tool integration
+- Include example queries and responses
+Path: docs/screenshots/ai-chatbot.png
+-->
+
+<div align="center">
+  <img src="docs/screenshots/ai-chatbot.png" alt="AI Chatbot Interface" width="800">
+  <p><em>AI-powered chatbot with semantic memory and 27 database tools</em></p>
+</div>
+
+> **Note:** Screenshots will be added once the feature is fully deployed. The placeholders above indicate the planned visual documentation.
 
 ## Quick Start
 
