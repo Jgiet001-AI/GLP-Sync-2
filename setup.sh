@@ -137,6 +137,74 @@ print_success "Docker found: $(docker --version)"
 echo ""
 
 # ============================================
+# Check for Existing Installation
+# ============================================
+EXISTING_ENV=false
+EXISTING_VOLUMES=false
+RESET_DATABASE=false
+
+if [ -f ".env" ]; then
+    EXISTING_ENV=true
+    print_warning "Existing .env file found!"
+    echo ""
+    echo "  1) Update existing configuration"
+    echo "  2) Start fresh (overwrite .env)"
+    echo "  3) Cancel setup"
+    echo ""
+    echo -ne "${CYAN}Select option (1-3)${NC} [${YELLOW}1${NC}]: "
+    read env_choice
+
+    if [ -z "$env_choice" ]; then
+        env_choice="1"
+    fi
+
+    case $env_choice in
+        1)
+            print_step "Will update existing .env file"
+            ;;
+        2)
+            print_step "Will create fresh .env file"
+            RESET_DATABASE=true
+            ;;
+        3)
+            print_warning "Setup cancelled."
+            exit 0
+            ;;
+    esac
+    echo ""
+fi
+
+# Check for existing Docker volumes
+if docker volume ls | grep -q "postgres_data\|glp.*postgres"; then
+    EXISTING_VOLUMES=true
+    print_warning "Existing database volume detected!"
+    echo ""
+    echo "  If you're having database errors (missing tables, schema issues),"
+    echo "  you should reset the database to apply the latest schema."
+    echo ""
+    echo "  1) Keep existing data (may cause schema errors)"
+    echo "  2) Reset database (recommended for fresh install)"
+    echo ""
+    echo -ne "${CYAN}Select option (1-2)${NC} [${YELLOW}2${NC}]: "
+    read vol_choice
+
+    if [ -z "$vol_choice" ]; then
+        vol_choice="2"
+    fi
+
+    case $vol_choice in
+        1)
+            print_step "Keeping existing database"
+            ;;
+        2)
+            RESET_DATABASE=true
+            print_step "Will reset database after configuration"
+            ;;
+    esac
+    echo ""
+fi
+
+# ============================================
 # GreenLake API Credentials (Required)
 # ============================================
 print_header "Step 1: GreenLake API Credentials"
@@ -561,12 +629,46 @@ echo ""
 # ============================================
 print_header "Step 8: Building & Starting Containers"
 
+# Reset database if requested
+if [ "$RESET_DATABASE" = "true" ]; then
+    print_step "Stopping existing containers..."
+    docker compose down 2>/dev/null || true
+
+    print_step "Removing database volume to apply fresh schema..."
+    docker volume rm $(docker volume ls -q | grep -E "postgres_data|glp.*postgres") 2>/dev/null || true
+
+    print_success "Database will be initialized with latest schema"
+    echo ""
+fi
+
 print_step "Building Docker images..."
 docker compose build
 
 echo ""
 print_step "Starting containers..."
 docker compose up -d
+
+# Wait for database to be ready
+print_step "Waiting for database initialization..."
+sleep 5
+
+# Check if postgres is healthy
+max_attempts=30
+attempt=1
+while [ $attempt -le $max_attempts ]; do
+    if docker compose exec -T postgres pg_isready -U ${POSTGRES_USER:-glp} -d ${POSTGRES_DB:-greenlake} > /dev/null 2>&1; then
+        print_success "Database is ready!"
+        break
+    fi
+    echo -ne "\r  Waiting for database... ($attempt/$max_attempts)"
+    sleep 2
+    attempt=$((attempt + 1))
+done
+
+if [ $attempt -gt $max_attempts ]; then
+    print_warning "Database may still be initializing. Check logs with: docker compose logs postgres"
+fi
+echo ""
 
 echo ""
 print_success "Containers started!"
