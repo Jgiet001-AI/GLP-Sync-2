@@ -276,6 +276,75 @@ class DeviceManager:
             params=params,
         )
 
+    async def update_tags_batch(
+        self,
+        device_ids: list[str],
+        tags: dict[str, Optional[str]],
+        *,
+        dry_run: bool = False,
+    ) -> list[AsyncOperationResult]:
+        """Add, update, or remove tags on any number of devices (batched).
+
+        This method handles large device lists by automatically splitting them
+        into batches of MAX_DEVICES_PER_REQUEST (25) and making multiple API calls.
+
+        Args:
+            device_ids: List of device UUIDs (any size)
+            tags: Tag key-value pairs. Set value to None to remove a tag.
+            dry_run: If True, validate without executing
+
+        Returns:
+            List of AsyncOperationResult, one per batch
+
+        Raises:
+            ValidationError: If device_ids is empty
+
+        Example:
+            # Update tags on 100 devices (will be split into 4 batches of 25)
+            results = await manager.update_tags_batch(
+                device_ids=list_of_100_device_ids,
+                tags={
+                    "location": "San Jose",    # Add or update
+                    "old_tag": None,           # Remove
+                },
+            )
+            # Returns 4 AsyncOperationResult objects
+        """
+        if not device_ids:
+            raise ValidationError(
+                "At least one device ID is required",
+                field="device_ids",
+            )
+
+        # Split device_ids into batches of MAX_DEVICES_PER_REQUEST
+        batches = [
+            device_ids[i:i + self.MAX_DEVICES_PER_REQUEST]
+            for i in range(0, len(device_ids), self.MAX_DEVICES_PER_REQUEST)
+        ]
+
+        total_batches = len(batches)
+        logger.info(
+            f"Updating tags on {len(device_ids)} device(s) in {total_batches} batch(es)"
+        )
+
+        results: list[AsyncOperationResult] = []
+
+        for batch_num, batch in enumerate(batches, start=1):
+            logger.info(
+                f"Processing batch {batch_num}/{total_batches} "
+                f"({len(batch)} device(s))"
+            )
+
+            result = await self.update_tags(
+                device_ids=batch,
+                tags=tags,
+                dry_run=dry_run,
+            )
+            results.append(result)
+
+        logger.info(f"Completed {total_batches} batch(es)")
+        return results
+
     # ----------------------------------------
     # Application Assignment (PATCH)
     # ----------------------------------------
