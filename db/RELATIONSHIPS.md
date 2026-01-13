@@ -7,12 +7,13 @@ This guide explains the core table relationships in the HPE GreenLake Device & S
 ## Table of Contents
 1. [Core Relationships](#core-relationships)
 2. [Network Clients & Sites Relationships](#network-clients--sites-relationships)
-3. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
-4. [Tag Relationships](#tag-relationships)
-5. [JSONB Querying](#jsonb-querying)
-6. [Full-Text Search](#full-text-search)
-7. [Common Query Patterns](#common-query-patterns)
-8. [Performance Tips](#performance-tips)
+3. [Agent Chatbot Relationships & Special Features](#agent-chatbot-relationships--special-features)
+4. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
+5. [Tag Relationships](#tag-relationships)
+6. [JSONB Querying](#jsonb-querying)
+7. [Full-Text Search](#full-text-search)
+8. [Common Query Patterns](#common-query-patterns)
+9. [Performance Tips](#performance-tips)
 
 ---
 
@@ -483,6 +484,669 @@ idx_clients_raw_data ON clients USING gin(raw_data jsonb_path_ops)
 -- Firmware status
 idx_devices_firmware_status ON devices(firmware_upgrade_status)
   WHERE firmware_upgrade_status IS NOT NULL
+```
+
+---
+
+## Agent Chatbot Relationships & Special Features
+
+The agent chatbot system uses a sophisticated multi-table architecture with **pgvector semantic search**, **Row-Level Security (RLS)** for multi-tenancy, and **background embedding generation**. This section explains the core relationships and advanced features.
+
+### Architecture Overview
+
+```
+agent_conversations (1) ←→ (M) agent_messages
+                ↓                     ↓
+           tenant_id            tenant_id (RLS)
+                               embedding vector(3072)
+                                     ↓
+                            agent_embedding_jobs (queue)
+
+agent_memory ←→ agent_memory_revisions (versioning)
+     ↓
+tenant_id (RLS)
+embedding vector(3072)
+
+agent_sessions (persistent state)
+agent_patterns (learned patterns)
+agent_audit_log (write operations)
+```
+
+### 1. Conversation → Messages Hierarchy
+
+The **agent_conversations** and **agent_messages** tables implement a **one-to-many parent-child relationship** with automatic message counting and cascading deletes.
+
+**Schema:**
+```sql
+-- Parent: Conversations (chat sessions)
+agent_conversations (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,              -- Multi-tenancy isolation
+  user_id TEXT NOT NULL,                -- User who owns this conversation
+  title TEXT,
+  summary TEXT,                         -- Auto-generated summary for long conversations
+  message_count INTEGER DEFAULT 0,      -- Maintained by trigger
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'
+)
+
+-- Child: Messages (individual chat messages)
+agent_messages (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL REFERENCES agent_conversations(id) ON DELETE CASCADE,
+  tenant_id TEXT NOT NULL,              -- Denormalized for RLS performance
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system', 'tool')),
+  content TEXT NOT NULL,
+
+  -- Chain of Thought: ONLY redacted summary, never raw reasoning
+  thinking_summary TEXT,
+
+  -- Tool calls with correlation IDs
+  tool_calls JSONB,                     -- [{tool_call_id, name, arguments, result}]
+
+  -- Embeddings for semantic search
+  embedding vector(3072),               -- Max dimension for multi-provider support
+  embedding_model TEXT,                 -- e.g., 'text-embedding-3-large'
+  embedding_dimension INTEGER,          -- Actual dimension used
+  embedding_status TEXT DEFAULT 'pending',
+
+  -- Model and performance metadata
+  model_used TEXT,
+  tokens_used INTEGER,
+  latency_ms INTEGER,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+)
+```
+
+**Key Points:**
+- **Cascading Deletes:** Deleting a conversation automatically deletes all its messages
+- **Message Count Trigger:** `message_count` is maintained automatically by `agent_update_conversation_count()` trigger
+- **Denormalized tenant_id:** Messages store `tenant_id` from their parent conversation for RLS performance
+- **Chain of Thought Security:** Only redacted `thinking_summary` is stored; raw CoT is NEVER persisted
+- **Tool Call Tracking:** All tool invocations are logged in JSONB with correlation IDs for debugging
+
+**Example Query: Get Full Conversation Thread**
+```sql
+SELECT
+  c.id as conversation_id,
+  c.title,
+  c.message_count,
+  m.id as message_id,
+  m.role,
+  m.content,
+  m.thinking_summary,
+  m.tool_calls,
+  m.created_at
+FROM agent_conversations c
+LEFT JOIN agent_messages m ON c.id = m.conversation_id
+WHERE c.tenant_id = 'acme-corp'
+  AND c.user_id = 'user-123'
+ORDER BY c.created_at DESC, m.created_at ASC
+LIMIT 100;
+```
+
+---
+
+### 2. Memory System with Semantic Search
+
+The **agent_memory** table provides **long-term persistent memory** with semantic search capabilities using **pgvector**. Memories are categorized, deduplicated, and have confidence scores that decay over time.
+
+**Schema:**
+```sql
+agent_memory (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  memory_type TEXT NOT NULL CHECK (memory_type IN ('fact', 'preference', 'entity', 'procedure')),
+  content TEXT NOT NULL,
+  content_hash TEXT NOT NULL,           -- SHA-256 for deduplication
+
+  -- Embeddings for semantic search
+  embedding vector(3072),
+  embedding_model TEXT,
+  embedding_dimension INTEGER,
+
+  -- Usage and relevance tracking
+  access_count INTEGER DEFAULT 0,
+  last_accessed_at TIMESTAMPTZ,
+
+  -- Source tracking (optional)
+  source_conversation_id UUID REFERENCES agent_conversations(id) ON DELETE SET NULL,
+  source_message_id UUID REFERENCES agent_messages(id) ON DELETE SET NULL,
+
+  -- Lifecycle management
+  valid_from TIMESTAMPTZ DEFAULT NOW(),
+  valid_until TIMESTAMPTZ,              -- NULL = forever valid
+  confidence FLOAT DEFAULT 1.0,         -- Decays for unused memories
+  is_invalidated BOOLEAN DEFAULT FALSE, -- Soft delete
+
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}',
+
+  UNIQUE(tenant_id, user_id, content_hash)
+)
+```
+
+**Memory Types:**
+- **fact:** Objective information (e.g., "User's office is in San Francisco")
+- **preference:** User preferences (e.g., "User prefers detailed responses")
+- **entity:** Named entities (e.g., "John Smith is the IT director")
+- **procedure:** How-to knowledge (e.g., "To restart device, run command X")
+
+**Key Points:**
+- **Deduplication:** SHA-256 hash prevents duplicate memories within tenant+user scope
+- **Confidence Decay:** Unused memories (30+ days) have confidence multiplied by 0.9 via `agent_memory_cleanup()` function
+- **Soft Delete:** `is_invalidated` flag marks memories for deletion without immediate removal
+- **Source Tracking:** Optional links back to originating conversation/message
+- **TTL Support:** `valid_until` timestamp for time-limited memories
+
+**Example Query: Semantic Memory Search**
+```sql
+-- Find similar memories using cosine similarity
+-- Note: Searches use sequential scan due to vector(3072) dimension > 2000 pgvector limit
+SELECT
+  id,
+  memory_type,
+  content,
+  confidence,
+  access_count,
+  1 - (embedding <=> '[0.1, 0.2, ...]'::vector) as similarity
+FROM agent_memory
+WHERE tenant_id = 'acme-corp'
+  AND user_id = 'user-123'
+  AND NOT is_invalidated
+  AND (valid_until IS NULL OR valid_until > NOW())
+  AND embedding_model = 'text-embedding-3-large'  -- Filter by model
+ORDER BY embedding <=> '[0.1, 0.2, ...]'::vector
+LIMIT 10;
+```
+
+**Memory Lifecycle Management:**
+```sql
+-- Run periodically to maintain memory health
+SELECT * FROM agent_memory_cleanup('acme-corp');
+-- Returns: (invalidated_count, decayed_count, deleted_count)
+-- 1. Invalidates expired memories (valid_until < NOW)
+-- 2. Decays confidence for unused memories (30+ days)
+-- 3. Hard deletes very old invalidated memories (90+ days)
+```
+
+---
+
+### 3. pgvector Semantic Search
+
+**pgvector** is a PostgreSQL extension that enables **semantic similarity search** using vector embeddings. All agent tables use **vector(3072)** columns to support multiple embedding models.
+
+**Key Features:**
+- **Multi-Provider Support:** Stores embeddings from OpenAI (`text-embedding-3-large`), Claude, or other models
+- **Model Tracking:** `embedding_model` and `embedding_dimension` columns track which model generated each embedding
+- **Similarity Operators:**
+  - `<->` Euclidean distance (L2)
+  - `<#>` Negative inner product
+  - `<=>` **Cosine distance** (most common, used for semantic search)
+
+**Why vector(3072)?**
+- OpenAI's `text-embedding-3-large` produces 3072-dimensional embeddings
+- Claude's embeddings may use different dimensions
+- Flexible column size supports multiple providers without schema changes
+
+**Index Limitation:**
+```sql
+-- pgvector's HNSW and IVFFlat indexes only support up to 2000 dimensions
+-- Since our vector(3072) > 2000, we cannot create vector indexes
+-- Sequential scan is used for similarity searches (fine for moderate data sizes)
+-- For production with millions of messages, consider:
+--   1. Using a separate vector(2000) column for indexed searches
+--   2. Dimensionality reduction (PCA/UMAP)
+--   3. External vector search engine (Pinecone, Weaviate)
+```
+
+**Example: Semantic Search with Model Filtering**
+```sql
+-- Search for similar messages, filtering by embedding model
+WITH query_embedding AS (
+  SELECT '[0.1, 0.2, ...]'::vector(3072) as vec
+)
+SELECT
+  m.id,
+  m.content,
+  m.embedding_model,
+  1 - (m.embedding <=> q.vec) as similarity
+FROM agent_messages m, query_embedding q
+WHERE m.tenant_id = 'acme-corp'
+  AND m.conversation_id = 'conv-abc'
+  AND m.embedding_status = 'completed'
+  AND m.embedding_model = 'text-embedding-3-large'  -- CRITICAL: filter by model
+ORDER BY m.embedding <=> q.vec
+LIMIT 5;
+```
+
+---
+
+### 4. Embedding Job Queue
+
+The **agent_embedding_jobs** table implements a **background job queue** for asynchronous embedding generation. Workers use the **SKIP LOCKED** pattern for concurrent processing without conflicts.
+
+**Schema:**
+```sql
+agent_embedding_jobs (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  target_table TEXT NOT NULL CHECK (target_table IN ('agent_messages', 'agent_memory')),
+  target_id UUID NOT NULL,
+  status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed', 'dead')),
+  retries INTEGER DEFAULT 0,
+  max_retries INTEGER DEFAULT 3,
+  error_message TEXT,
+  locked_at TIMESTAMPTZ,                -- For SKIP LOCKED pattern
+  locked_by TEXT,                       -- Worker ID for debugging
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  processed_at TIMESTAMPTZ,
+
+  UNIQUE(target_table, target_id)       -- Prevent duplicate jobs
+)
+```
+
+**Job States:**
+- **pending:** Waiting for worker to pick up
+- **processing:** Currently being processed by a worker
+- **completed:** Successfully processed
+- **failed:** Processing failed, will retry
+- **dead:** Max retries exceeded, manual intervention needed
+
+**Automatic Job Creation:**
+```sql
+-- Triggers automatically create jobs when new messages/memories are inserted
+CREATE TRIGGER agent_messages_embedding_trigger
+  AFTER INSERT ON agent_messages
+  FOR EACH ROW
+  EXECUTE FUNCTION agent_queue_embedding_job();
+
+CREATE TRIGGER agent_memory_embedding_trigger
+  AFTER INSERT ON agent_memory
+  FOR EACH ROW
+  EXECUTE FUNCTION agent_queue_memory_embedding_job();
+```
+
+**Worker Pattern: Claim and Process Jobs**
+```sql
+-- Worker claims a job using SKIP LOCKED (prevents conflicts)
+UPDATE agent_embedding_jobs
+SET
+  status = 'processing',
+  locked_at = NOW(),
+  locked_by = 'worker-1234'
+WHERE id = (
+  SELECT id
+  FROM agent_embedding_jobs
+  WHERE status = 'pending'
+    AND tenant_id = 'acme-corp'
+  ORDER BY created_at ASC
+  FOR UPDATE SKIP LOCKED  -- Critical: allows concurrent workers
+  LIMIT 1
+)
+RETURNING *;
+
+-- After processing, update status
+UPDATE agent_embedding_jobs
+SET
+  status = 'completed',
+  processed_at = NOW()
+WHERE id = :job_id;
+
+-- On failure, increment retries
+UPDATE agent_embedding_jobs
+SET
+  status = CASE WHEN retries + 1 >= max_retries THEN 'dead' ELSE 'failed' END,
+  retries = retries + 1,
+  error_message = :error
+WHERE id = :job_id;
+```
+
+**Monitoring Queue Health:**
+```sql
+-- View queue status by tenant and target table
+SELECT * FROM agent_embedding_queue_status;
+
+-- Returns:
+-- tenant_id | target_table    | status      | count | oldest_job | newest_job
+-- acme-corp | agent_messages  | pending     | 42    | 2026-01-12 | 2026-01-13
+-- acme-corp | agent_messages  | completed   | 9384  | 2026-01-01 | 2026-01-13
+-- acme-corp | agent_memory    | failed      | 3     | 2026-01-12 | 2026-01-13
+```
+
+---
+
+### 5. Row-Level Security (RLS) for Multi-Tenancy
+
+**All agent tables** use **Row-Level Security (RLS)** to enforce **tenant isolation** at the database level. This provides defense-in-depth security beyond application-level checks.
+
+**How RLS Works:**
+```sql
+-- 1. Application sets tenant context before queries
+SET app.tenant_id = 'acme-corp';
+
+-- 2. RLS policies automatically filter all queries
+SELECT * FROM agent_conversations;  -- Only returns acme-corp conversations
+
+-- 3. Policies enforce both reads (USING) and writes (WITH CHECK)
+CREATE POLICY agent_conversations_tenant_isolation ON agent_conversations
+  FOR ALL
+  USING (tenant_id = current_setting('app.tenant_id', true))
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+```
+
+**Tables with RLS Enabled:**
+- `agent_conversations`
+- `agent_messages` (with denormalized `tenant_id` for performance)
+- `agent_memory`
+- `agent_embedding_jobs`
+- `agent_audit_log`
+- `agent_sessions`
+- `agent_patterns`
+- `agent_memory_revisions`
+
+**Performance Considerations:**
+- **Denormalized tenant_id:** `agent_messages.tenant_id` is copied from parent conversation to avoid joins in RLS checks
+- **Indexed tenant_id:** All RLS tables have indexes on `tenant_id` for fast filtering
+- **Current Setting Caching:** `current_setting('app.tenant_id', true)` is evaluated once per query
+
+**Example: Application Usage**
+```python
+# Python example with asyncpg
+async with pool.acquire() as conn:
+    # Set tenant context for this connection
+    await conn.execute("SET app.tenant_id = $1", tenant_id)
+
+    # All subsequent queries are automatically filtered
+    conversations = await conn.fetch("SELECT * FROM agent_conversations")
+    # Only returns conversations for the set tenant
+```
+
+**Security Benefits:**
+- **Defense in Depth:** Even if application code has bugs, database enforces isolation
+- **Audit-Friendly:** RLS policies are visible in schema and audit logs
+- **Zero Trust:** No trust in application layer to filter data correctly
+
+---
+
+### 6. Audit Logging for Write Operations
+
+The **agent_audit_log** table tracks **all write operations** performed by the agent chatbot, providing a complete audit trail with idempotency support.
+
+**Schema:**
+```sql
+agent_audit_log (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  action TEXT NOT NULL,                 -- e.g., 'add_device', 'assign_subscription'
+  resource_type TEXT,                   -- e.g., 'device', 'subscription'
+  resource_id TEXT,                     -- ID of affected resource
+  payload JSONB,                        -- Request payload
+  result JSONB,                         -- Response/result
+  status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'conflict')),
+  error_message TEXT,
+  idempotency_key TEXT,                 -- For retry safety
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+
+  UNIQUE(tenant_id, idempotency_key)    -- Prevent duplicate operations
+)
+```
+
+**Audit Log States:**
+- **pending:** Operation started but not completed
+- **completed:** Successfully completed
+- **failed:** Operation failed (error logged in `error_message`)
+- **conflict:** Idempotency key conflict (duplicate request)
+
+**Idempotency Support:**
+```sql
+-- Client provides idempotency key for retry safety
+INSERT INTO agent_audit_log (
+  tenant_id,
+  user_id,
+  action,
+  resource_type,
+  payload,
+  status,
+  idempotency_key
+) VALUES (
+  'acme-corp',
+  'user-123',
+  'assign_subscription',
+  'device',
+  '{"device_id": "dev-abc", "subscription_id": "sub-xyz"}',
+  'pending',
+  'req-20260113-001'
+)
+ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+RETURNING *;
+
+-- If conflict, return existing result
+SELECT * FROM agent_audit_log
+WHERE tenant_id = 'acme-corp'
+  AND idempotency_key = 'req-20260113-001';
+```
+
+**Example Query: View User's Operation History**
+```sql
+SELECT
+  action,
+  resource_type,
+  resource_id,
+  status,
+  created_at,
+  completed_at,
+  (completed_at - created_at) as duration
+FROM agent_audit_log
+WHERE tenant_id = 'acme-corp'
+  AND user_id = 'user-123'
+ORDER BY created_at DESC
+LIMIT 50;
+```
+
+---
+
+### 7. Advanced Features
+
+#### 7.1 Persistent Sessions (AgentDB Pattern)
+
+The **agent_sessions** table provides **persistent state storage** that survives server restarts and supports multi-instance deployments.
+
+**Schema:**
+```sql
+agent_sessions (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  session_type TEXT NOT NULL CHECK (session_type IN ('confirmation', 'operation', 'context', 'cache')),
+  key TEXT NOT NULL,                    -- Unique key within session type
+  data JSONB NOT NULL DEFAULT '{}',
+  expires_at TIMESTAMPTZ,               -- NULL = no expiration
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  UNIQUE(tenant_id, user_id, session_type, key)
+)
+```
+
+**Session Types:**
+- **confirmation:** Pending operations awaiting user confirmation
+- **operation:** In-flight operation state
+- **context:** Conversation context and working memory
+- **cache:** Temporary cached data
+
+**Example: Store Pending Confirmation**
+```sql
+INSERT INTO agent_sessions (tenant_id, user_id, session_type, key, data, expires_at)
+VALUES (
+  'acme-corp',
+  'user-123',
+  'confirmation',
+  'conv-abc:op-assign-device',
+  '{"device_id": "dev-123", "subscription_id": "sub-456", "confirmed": false}',
+  NOW() + INTERVAL '15 minutes'
+)
+ON CONFLICT (tenant_id, user_id, session_type, key)
+DO UPDATE SET data = EXCLUDED.data, updated_at = NOW();
+```
+
+**Cleanup Expired Sessions:**
+```sql
+SELECT agent_cleanup_expired_sessions('acme-corp');
+-- Returns count of deleted sessions
+```
+
+#### 7.2 Pattern Learning
+
+The **agent_patterns** table stores **successful interaction patterns** for future retrieval and application.
+
+**Schema:**
+```sql
+agent_patterns (
+  id UUID PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  pattern_type TEXT NOT NULL CHECK (pattern_type IN ('tool_success', 'query_response', 'error_recovery', 'workflow')),
+  trigger_text TEXT NOT NULL,
+  trigger_hash TEXT NOT NULL,           -- SHA-256 for deduplication
+  trigger_embedding vector(3072),       -- For semantic pattern matching
+  response TEXT NOT NULL,
+  context JSONB DEFAULT '{}',
+  success_count INTEGER DEFAULT 1,
+  failure_count INTEGER DEFAULT 0,
+  confidence FLOAT DEFAULT 1.0,         -- success_count / (success + failure)
+  last_used_at TIMESTAMPTZ,
+  is_active BOOLEAN DEFAULT TRUE,
+
+  UNIQUE(tenant_id, trigger_hash)
+)
+```
+
+**Pattern Types:**
+- **tool_success:** Successful tool call patterns
+- **query_response:** Q&A patterns
+- **error_recovery:** Error handling patterns
+- **workflow:** Multi-step workflow patterns
+
+**Example: Record Successful Pattern**
+```sql
+INSERT INTO agent_patterns (tenant_id, pattern_type, trigger_text, trigger_hash, response, context)
+VALUES (
+  'acme-corp',
+  'tool_success',
+  'find devices without subscriptions',
+  encode(sha256('tool_success:find devices without subscriptions'), 'hex'),
+  'Use get_devices_without_subscriptions tool',
+  '{"tool": "get_devices_without_subscriptions", "args": {}}'
+)
+ON CONFLICT (tenant_id, trigger_hash)
+DO UPDATE SET
+  success_count = agent_patterns.success_count + 1,
+  confidence = (agent_patterns.success_count + 1.0) / (agent_patterns.success_count + agent_patterns.failure_count + 1.0),
+  last_used_at = NOW();
+```
+
+#### 7.3 Memory Versioning
+
+The **agent_memory_revisions** table tracks **changes to memories** over time for correction and audit.
+
+**Schema:**
+```sql
+agent_memory_revisions (
+  id UUID PRIMARY KEY,
+  memory_id UUID NOT NULL REFERENCES agent_memory(id) ON DELETE CASCADE,
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  version_state TEXT NOT NULL CHECK (version_state IN ('current', 'superseded', 'corrected', 'merged')),
+  content TEXT NOT NULL,
+  previous_content TEXT,
+  change_reason TEXT,
+  changed_by TEXT,                      -- User who made the change (null = system)
+  confidence FLOAT DEFAULT 1.0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+)
+
+-- Each memory can have only one current version
+CREATE UNIQUE INDEX idx_agent_memory_revisions_unique_current
+  ON agent_memory_revisions(memory_id)
+  WHERE version_state = 'current';
+```
+
+**Version States:**
+- **current:** Active version
+- **superseded:** Replaced by newer version
+- **corrected:** User-corrected version
+- **merged:** Combined from multiple memories
+
+---
+
+### 8. Query Patterns
+
+#### Get Conversation with Semantic Context
+```sql
+-- Get conversation with semantically similar past messages
+WITH current_conversation AS (
+  SELECT id, tenant_id FROM agent_conversations WHERE id = 'conv-abc'
+),
+query_embedding AS (
+  SELECT embedding FROM agent_messages
+  WHERE id = (SELECT MAX(id) FROM agent_messages WHERE conversation_id = 'conv-abc')
+)
+SELECT
+  m.id,
+  m.role,
+  m.content,
+  c.title,
+  1 - (m.embedding <=> q.embedding) as similarity
+FROM agent_messages m
+JOIN agent_conversations c ON m.conversation_id = c.id
+JOIN current_conversation cc ON m.tenant_id = cc.tenant_id
+CROSS JOIN query_embedding q
+WHERE m.embedding_status = 'completed'
+  AND m.embedding IS NOT NULL
+  AND m.conversation_id != 'conv-abc'  -- Exclude current conversation
+ORDER BY m.embedding <=> q.embedding
+LIMIT 10;
+```
+
+#### Get Active Memories for User
+```sql
+SELECT
+  id,
+  memory_type,
+  content,
+  confidence,
+  access_count,
+  last_accessed_at,
+  EXTRACT(EPOCH FROM (NOW() - last_accessed_at))/86400 as days_since_access
+FROM agent_memory
+WHERE tenant_id = 'acme-corp'
+  AND user_id = 'user-123'
+  AND NOT is_invalidated
+  AND (valid_until IS NULL OR valid_until > NOW())
+  AND confidence > 0.5
+ORDER BY confidence DESC, access_count DESC
+LIMIT 20;
+```
+
+#### Monitor Embedding Queue Backlog
+```sql
+SELECT
+  tenant_id,
+  target_table,
+  COUNT(*) FILTER (WHERE status = 'pending') as pending_jobs,
+  COUNT(*) FILTER (WHERE status = 'failed') as failed_jobs,
+  COUNT(*) FILTER (WHERE status = 'dead') as dead_jobs,
+  MIN(created_at) FILTER (WHERE status = 'pending') as oldest_pending,
+  AVG(EXTRACT(EPOCH FROM (processed_at - created_at))) FILTER (WHERE status = 'completed') as avg_processing_seconds
+FROM agent_embedding_jobs
+GROUP BY tenant_id, target_table
+ORDER BY pending_jobs DESC;
 ```
 
 ---
