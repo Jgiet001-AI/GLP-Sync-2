@@ -10,6 +10,8 @@ erDiagram
     subscriptions ||--o{ device_subscriptions : "has many"
     devices ||--o{ device_tags : "has many"
     subscriptions ||--o{ subscription_tags : "has many"
+    sites ||--o{ clients : "has many"
+    devices ||--o{ clients : "connected via serial"
 
     devices {
         UUID id PK "Device UUID from GreenLake API"
@@ -41,6 +43,12 @@ erDiagram
         TIMESTAMPTZ created_at "Created timestamp from API"
         TIMESTAMPTZ updated_at "Updated timestamp from API"
         TIMESTAMPTZ synced_at "Last sync timestamp"
+        TEXT firmware_version "Current firmware version"
+        TEXT firmware_recommended_version "Recommended firmware version"
+        TEXT firmware_upgrade_status "Firmware upgrade status"
+        TEXT firmware_classification "Firmware version classification"
+        TIMESTAMPTZ firmware_last_upgraded_at "Last firmware upgrade timestamp"
+        TIMESTAMPTZ firmware_synced_at "Firmware info last sync timestamp"
         JSONB raw_data "Full API response for flexibility"
         TSVECTOR search_vector "Auto-generated FTS vector"
     }
@@ -114,6 +122,44 @@ erDiagram
         TEXT sql_query "SQL query template"
         TIMESTAMPTZ created_at "Record creation timestamp"
     }
+
+    sites {
+        TEXT site_id PK "Unique site identifier from Aruba Central"
+        TEXT site_name "Human-readable site name"
+        TIMESTAMPTZ last_synced_at "Last sync timestamp"
+        TIMESTAMPTZ created_at "Record creation timestamp"
+        TIMESTAMPTZ updated_at "Record update timestamp"
+    }
+
+    clients {
+        BIGINT id PK "Auto-increment ID"
+        TEXT site_id FK "References sites.site_id"
+        MACADDR mac UK "Client MAC address (unique per site)"
+        TEXT name "Client device name"
+        TEXT health "Good, Fair, Poor, Unknown"
+        TEXT status "Connected, Disconnected, Failed, Blocked, REMOVED"
+        TEXT status_reason "Reason for current status"
+        TEXT type "Wired or Wireless"
+        INET ipv4 "IPv4 address"
+        INET ipv6 "IPv6 address"
+        TEXT network "Network name"
+        TEXT vlan_id "VLAN identifier"
+        TEXT port "Connected port"
+        TEXT role "Client role/profile"
+        TEXT connected_device_serial "Serial number of connected device"
+        TEXT connected_to "Name of connected device"
+        TIMESTAMPTZ connected_since "Connection start timestamp"
+        TIMESTAMPTZ last_seen_at "Last seen timestamp"
+        TEXT tunnel "Port-based, User-based, Overlay"
+        INTEGER tunnel_id "Tunnel identifier"
+        TEXT key_management "Security key management method"
+        TEXT authentication "Authentication method"
+        TEXT capabilities "Client capabilities"
+        JSONB raw_data "Full API response from Aruba Central"
+        TIMESTAMPTZ created_at "Record creation timestamp"
+        TIMESTAMPTZ updated_at "Record update timestamp"
+        TIMESTAMPTZ synced_at "Last sync timestamp"
+    }
 ```
 
 ## Key Relationships
@@ -144,6 +190,26 @@ erDiagram
 - Stores example SQL queries for LLM/AI assistants
 - Categorized by query type (search, filter, expiring, etc.)
 
+### One-to-Many: Sites ↔ Clients
+- **sites** table represents physical locations from Aruba Central
+- Each site can have multiple network clients (WiFi/Wired devices)
+- **clients** table stores devices connected to network equipment
+- Foreign key: `clients.site_id` references `sites.site_id`
+- Cascading delete: removing a site removes all associated clients
+
+### One-to-Many: Devices ↔ Clients
+- Network clients connect to network devices (APs, switches, gateways)
+- Relationship via **clients.connected_device_serial** column
+- Links to **devices.serial_number** (not enforced as FK for flexibility)
+- Enables queries like "show all clients connected to device X"
+- Function `get_clients_by_device(serial)` provides convenient lookup
+
+### Firmware Enrichment for Devices
+- Devices table enhanced with firmware tracking columns
+- Tracks current version, recommended version, upgrade status
+- Enables firmware compliance monitoring and update planning
+- View **devices_firmware_status** provides computed upgrade status
+
 ## Important Views
 
 The schema includes several materialized views for common queries:
@@ -157,11 +223,17 @@ The schema includes several materialized views for common queries:
 - **subscription_summary** - Aggregated subscription counts by type and status
 - **schema_info** - Schema metadata for LLM understanding
 - **valid_column_values** - Valid categorical values with occurrence counts
+- **active_clients** - Network clients excluding removed/deleted clients, joined with site names
+- **sites_with_stats** - Sites with dynamic client and device counts (connected, wired, wireless, health)
+- **clients_health_summary** - Aggregated client statistics across all sites (status, type, health)
+- **devices_firmware_status** - Devices with firmware information and computed upgrade status
 
 ## Important Functions
 
 - **search_devices(query, limit)** - Full-text search with ranking
 - **get_devices_by_tag(key, value)** - Tag-based device lookup
+- **search_clients(query, limit)** - Search clients by MAC address, name, or IP
+- **get_clients_by_device(serial)** - Get all clients connected to a specific device
 
 ## Data Storage Philosophy
 
