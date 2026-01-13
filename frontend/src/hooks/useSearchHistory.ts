@@ -315,6 +315,35 @@ export function useSearchHistory(options: UseSearchHistoryOptions = {}) {
     [history]
   )
 
+  // Get search suggestions based on partial query match
+  const getSuggestions = useCallback(
+    (partialQuery: string, type?: SearchHistoryItem['type'], limit = 5): SearchHistoryItem[] => {
+      if (!partialQuery.trim()) return []
+
+      const query = partialQuery.toLowerCase().trim()
+      const filtered = history.filter((item) => {
+        const matchesQuery = item.query.toLowerCase().includes(query)
+        const matchesType = !type || item.type === type
+        return matchesQuery && matchesType
+      })
+
+      // Sort by relevance: exact matches first, then by recency
+      return filtered
+        .sort((a, b) => {
+          const aStartsWith = a.query.toLowerCase().startsWith(query)
+          const bStartsWith = b.query.toLowerCase().startsWith(query)
+
+          if (aStartsWith && !bStartsWith) return -1
+          if (!aStartsWith && bStartsWith) return 1
+
+          // If both start with query or neither does, sort by recency
+          return b.timestamp - a.timestamp
+        })
+        .slice(0, limit)
+    },
+    [history]
+  )
+
   // Format relative time for display
   const formatRelativeTime = useCallback((timestamp: number): string => {
     const now = Date.now()
@@ -336,6 +365,7 @@ export function useSearchHistory(options: UseSearchHistoryOptions = {}) {
     removeSearch,
     clearHistory,
     getRecent,
+    getSuggestions,
     formatRelativeTime,
     isEmpty: history.length === 0,
     isLoading,
