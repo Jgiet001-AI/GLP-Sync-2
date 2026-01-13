@@ -6,12 +6,13 @@ This guide explains the core table relationships in the HPE GreenLake Device & S
 
 ## Table of Contents
 1. [Core Relationships](#core-relationships)
-2. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
-3. [Tag Relationships](#tag-relationships)
-4. [JSONB Querying](#jsonb-querying)
-5. [Full-Text Search](#full-text-search)
-6. [Common Query Patterns](#common-query-patterns)
-7. [Performance Tips](#performance-tips)
+2. [Network Clients & Sites Relationships](#network-clients--sites-relationships)
+3. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
+4. [Tag Relationships](#tag-relationships)
+5. [JSONB Querying](#jsonb-querying)
+6. [Full-Text Search](#full-text-search)
+7. [Common Query Patterns](#common-query-patterns)
+8. [Performance Tips](#performance-tips)
 
 ---
 
@@ -93,6 +94,396 @@ subscription_tags (
 - Each device/subscription can have multiple tags, but only one value per tag key
 - Tags are also available in `devices.raw_data->'tags'` and `subscriptions.raw_data->'tags'` as JSONB
 - Use normalized tables for filtering; use JSONB for ad-hoc queries
+
+### 3. Network Clients & Sites Relationships
+
+Network clients (WiFi/wired devices connected to network equipment) are organized using a **two-level hierarchy**: Sites → Clients, with clients linked to network devices via serial numbers.
+
+```
+sites (1) ←→ (M) clients
+clients (M) ←→ (1) devices [via serial_number]
+devices (1) ←→ (1) firmware information
+```
+
+**Schema:**
+```sql
+-- sites table (physical locations)
+sites (
+  site_id TEXT PRIMARY KEY,          -- Unique site identifier from Aruba Central
+  site_name TEXT,                    -- Human-readable site name
+  last_synced_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+)
+
+-- clients table (network clients connected to equipment)
+clients (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(site_id) ON DELETE CASCADE,
+
+  -- Client identifiers
+  mac MACADDR NOT NULL,              -- Normalized MAC address
+  name TEXT,
+
+  -- Health & Status
+  health TEXT CHECK (health IN ('Good', 'Fair', 'Poor', 'Unknown')),
+  status TEXT CHECK (status IN ('Connected', 'Failed', 'Connecting',
+                                 'Disconnected', 'Blocked', 'Unknown', 'REMOVED')),
+  type TEXT CHECK (type IN ('Wired', 'Wireless')),
+
+  -- Network information
+  ipv4 INET,                         -- IPv4 address (INET type for validation)
+  ipv6 INET,
+  vlan_id TEXT,
+  port TEXT,
+
+  -- Connected device info (links to devices table)
+  connected_device_serial TEXT,      -- Foreign key to devices.serial_number
+  connected_to TEXT,                 -- Device name
+  connected_since TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ,
+
+  -- Full API response
+  raw_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+  UNIQUE(site_id, mac)               -- One MAC per site
+)
+
+-- devices table firmware enrichment
+ALTER TABLE devices ADD COLUMN firmware_version TEXT;
+ALTER TABLE devices ADD COLUMN firmware_recommended_version TEXT;
+ALTER TABLE devices ADD COLUMN firmware_upgrade_status TEXT;
+ALTER TABLE devices ADD COLUMN firmware_classification TEXT;
+ALTER TABLE devices ADD COLUMN firmware_last_upgraded_at TIMESTAMPTZ;
+ALTER TABLE devices ADD COLUMN firmware_synced_at TIMESTAMPTZ;
+```
+
+**Key Points:**
+
+1. **Sites Hierarchy:**
+   - Sites represent physical locations where network devices are deployed
+   - Each site can have multiple clients and devices
+   - Sites are synced from Aruba Central
+
+2. **Clients Connection to Sites:**
+   - Each client **must** belong to exactly one site (`site_id` is NOT NULL)
+   - `ON DELETE CASCADE` - deleting a site removes all its clients
+   - `UNIQUE(site_id, mac)` - a MAC address can appear once per site (but can reappear at different sites)
+
+3. **Clients Connection to Devices (via Serial Number):**
+   - `clients.connected_device_serial` links to `devices.serial_number` (soft foreign key)
+   - This is **not a database FK constraint** to allow flexibility when devices are removed
+   - Use `get_clients_by_device(serial)` function to find all clients on a device
+   - The `connected_to` field stores the device name for convenience
+
+4. **Firmware Tracking:**
+   - Firmware information is enriched **directly on the devices table**
+   - `firmware_version` - Current version running on device
+   - `firmware_recommended_version` - Recommended version from Aruba Central
+   - `firmware_upgrade_status` - Current upgrade status
+   - `firmware_classification` - Classification of firmware version
+   - `firmware_last_upgraded_at` - Last upgrade timestamp
+   - `firmware_synced_at` - When firmware info was last synced
+   - Use `devices_firmware_status` view for firmware analysis
+
+---
+
+## Network Clients & Sites Relationships
+
+### Understanding the Hierarchy
+
+The network clients data model follows a **two-level organizational hierarchy**:
+
+```
+Site (e.g., "San Francisco HQ")
+  ├── Client 1 (MAC: aa:bb:cc:dd:ee:01, Connected to: Switch-01)
+  ├── Client 2 (MAC: aa:bb:cc:dd:ee:02, Connected to: AP-01)
+  └── Client 3 (MAC: aa:bb:cc:dd:ee:03, Connected to: AP-02)
+
+Devices (network equipment)
+  ├── Switch-01 (Serial: SN12345, Firmware: 10.2.1)
+  ├── AP-01 (Serial: SN67890, Firmware: 8.5.3)
+  └── AP-02 (Serial: SN11111, Firmware: 8.5.3)
+```
+
+### Query Pattern: Get All Clients for a Site
+
+```sql
+-- Get all clients at a specific site with health and status
+SELECT
+  c.mac,
+  c.name,
+  c.health,
+  c.status,
+  c.type,
+  c.ipv4,
+  c.connected_to,
+  c.last_seen_at
+FROM clients c
+WHERE c.site_id = 'site-sf-hq'
+  AND (c.status IS NULL OR c.status != 'REMOVED')
+ORDER BY c.status, c.last_seen_at DESC;
+
+-- Using the pre-built view (includes site name)
+SELECT
+  mac,
+  name,
+  site_name,
+  health,
+  status,
+  type,
+  connected_to
+FROM active_clients
+WHERE site_id = 'site-sf-hq'
+ORDER BY status, last_seen_at DESC;
+```
+
+### Query Pattern: Get All Clients Connected to a Device
+
+```sql
+-- Find all clients connected to a specific device by serial number
+SELECT
+  c.mac,
+  c.name,
+  c.health,
+  c.status,
+  c.type,
+  c.ipv4,
+  c.vlan_id,
+  c.port,
+  c.connected_since,
+  s.site_name
+FROM clients c
+JOIN sites s ON c.site_id = s.site_id
+WHERE c.connected_device_serial = 'SN12345'
+  AND (c.status IS NULL OR c.status != 'REMOVED')
+ORDER BY c.connected_since DESC;
+
+-- Using the built-in function
+SELECT * FROM get_clients_by_device('SN12345');
+```
+
+### Query Pattern: Site Summary with Client Counts
+
+```sql
+-- Get site summary with dynamic client counts
+SELECT
+  site_id,
+  site_name,
+  client_count,
+  connected_count,
+  wired_count,
+  wireless_count,
+  good_health_count,
+  fair_health_count,
+  poor_health_count,
+  device_count
+FROM sites_with_stats
+ORDER BY client_count DESC;
+
+-- Filter to sites with issues
+SELECT *
+FROM sites_with_stats
+WHERE poor_health_count > 0 OR (connected_count / NULLIF(client_count, 0)) < 0.9
+ORDER BY poor_health_count DESC, connected_count ASC;
+```
+
+### Query Pattern: Client Health Summary
+
+```sql
+-- Overall client health across all sites
+SELECT * FROM clients_health_summary;
+
+-- Returns:
+-- total_clients, connected, disconnected, failed, blocked,
+-- wired, wireless, health_good, health_fair, health_poor, health_unknown
+```
+
+### Query Pattern: Search Clients
+
+```sql
+-- Search by MAC address, name, or IP
+SELECT * FROM search_clients('aa:bb:cc', 50);
+
+-- Search by IP address
+SELECT * FROM search_clients('192.168.1', 50);
+
+-- Search by client name
+SELECT * FROM search_clients('iPhone', 50);
+
+-- Manual search with site info
+SELECT
+  c.mac,
+  c.name,
+  s.site_name,
+  c.health,
+  c.status,
+  c.type,
+  c.ipv4,
+  c.connected_to
+FROM clients c
+JOIN sites s ON c.site_id = s.site_id
+WHERE (c.status IS NULL OR c.status != 'REMOVED')
+  AND (
+    c.mac::TEXT ILIKE '%aa:bb:cc%'
+    OR c.name ILIKE '%iPhone%'
+    OR c.ipv4::TEXT LIKE '%192.168.1%'
+  )
+ORDER BY
+  CASE WHEN c.status = 'Connected' THEN 0 ELSE 1 END,
+  c.last_seen_at DESC NULLS LAST
+LIMIT 50;
+```
+
+### Query Pattern: Clients with Device Details
+
+```sql
+-- Join clients with their connected network devices
+SELECT
+  c.mac,
+  c.name as client_name,
+  c.health,
+  c.status,
+  c.type,
+  c.ipv4,
+  c.connected_since,
+  c.last_seen_at,
+  -- Device details
+  d.serial_number,
+  COALESCE(d.central_device_name, d.device_name) as device_name,
+  COALESCE(d.central_device_type, d.device_type) as device_type,
+  d.model,
+  d.central_status as device_status,
+  -- Site info
+  s.site_name
+FROM clients c
+JOIN sites s ON c.site_id = s.site_id
+LEFT JOIN devices d ON c.connected_device_serial = d.serial_number
+WHERE (c.status IS NULL OR c.status != 'REMOVED')
+ORDER BY c.last_seen_at DESC
+LIMIT 100;
+```
+
+### Query Pattern: Firmware Status Analysis
+
+```sql
+-- View all devices with firmware information
+SELECT * FROM devices_firmware_status
+ORDER BY firmware_status, serial_number;
+
+-- Find devices needing firmware updates
+SELECT
+  serial_number,
+  device_name,
+  device_type,
+  model,
+  central_site_name,
+  firmware_version,
+  firmware_recommended_version,
+  firmware_upgrade_status
+FROM devices_firmware_status
+WHERE firmware_status = 'UPDATE_AVAILABLE'
+ORDER BY central_site_name, device_type;
+
+-- Group firmware status by device type
+SELECT
+  device_type,
+  COUNT(*) as total_devices,
+  COUNT(*) FILTER (WHERE firmware_version = firmware_recommended_version) as up_to_date,
+  COUNT(*) FILTER (WHERE firmware_version != firmware_recommended_version) as needs_update,
+  COUNT(*) FILTER (WHERE firmware_upgrade_status IS NOT NULL) as upgrade_in_progress
+FROM devices
+WHERE firmware_version IS NOT NULL AND NOT archived
+GROUP BY device_type
+ORDER BY device_type;
+```
+
+### Query Pattern: Device Firmware with Connected Clients
+
+```sql
+-- Find devices with outdated firmware and count connected clients
+SELECT
+  d.serial_number,
+  COALESCE(d.central_device_name, d.device_name) as device_name,
+  COALESCE(d.central_device_type, d.device_type) as device_type,
+  d.firmware_version,
+  d.firmware_recommended_version,
+  d.firmware_upgrade_status,
+  COUNT(c.id) as connected_clients,
+  COUNT(c.id) FILTER (WHERE c.status = 'Connected') as active_connections
+FROM devices d
+LEFT JOIN clients c ON d.serial_number = c.connected_device_serial
+  AND (c.status IS NULL OR c.status != 'REMOVED')
+WHERE NOT d.archived
+  AND d.firmware_version IS NOT NULL
+  AND d.firmware_version != d.firmware_recommended_version
+GROUP BY
+  d.serial_number,
+  d.central_device_name,
+  d.device_name,
+  d.central_device_type,
+  d.device_type,
+  d.firmware_version,
+  d.firmware_recommended_version,
+  d.firmware_upgrade_status
+HAVING COUNT(c.id) > 0  -- Only devices with clients
+ORDER BY connected_clients DESC;
+```
+
+### Important Data Type Notes
+
+1. **MAC Address Storage:**
+   - Stored as `MACADDR` type (PostgreSQL native)
+   - Automatically normalizes format: `aa:bb:cc:dd:ee:ff` → `aa:bb:cc:dd:ee:ff`
+   - Enables MAC address operations and comparisons
+   - Search using text cast: `mac::TEXT ILIKE '%aa:bb%'`
+
+2. **IP Address Storage:**
+   - Stored as `INET` type (validates both IPv4 and IPv6)
+   - Supports subnet operations and IP range queries
+   - Cast to text for pattern matching: `ipv4::TEXT LIKE '192.168.%'`
+
+3. **Firmware Timestamps:**
+   - `firmware_last_upgraded_at` - When device was last upgraded
+   - `firmware_synced_at` - When firmware data was last fetched from API
+   - Use `firmware_synced_at` to detect stale data
+
+### Performance Indexes
+
+The following indexes optimize network client queries:
+
+```sql
+-- Site lookup (primary access pattern)
+idx_clients_site_id ON clients(site_id)
+
+-- MAC address search
+idx_clients_mac ON clients(mac)
+
+-- Status and health filtering (partial indexes)
+idx_clients_status ON clients(status) WHERE status IS NOT NULL AND status != 'REMOVED'
+idx_clients_health ON clients(health) WHERE health IS NOT NULL
+
+-- Device connection lookup
+idx_clients_connected_device ON clients(connected_device_serial)
+  WHERE connected_device_serial IS NOT NULL
+
+-- Time-based queries
+idx_clients_last_seen ON clients(last_seen_at DESC NULLS LAST)
+
+-- Composite index for filtered listing
+idx_clients_site_status_health ON clients(site_id, status, health)
+  WHERE status != 'REMOVED'
+
+-- Full-text search on names
+idx_clients_name_trgm ON clients USING gin(name gin_trgm_ops)
+
+-- JSONB advanced queries
+idx_clients_raw_data ON clients USING gin(raw_data jsonb_path_ops)
+
+-- Firmware status
+idx_devices_firmware_status ON devices(firmware_upgrade_status)
+  WHERE firmware_upgrade_status IS NOT NULL
+```
 
 ---
 
