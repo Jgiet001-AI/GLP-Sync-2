@@ -91,10 +91,10 @@ function Navigation({ onOpenSearch }: { onOpenSearch: () => void }) {
                   end={item.path === '/'}
                   data-testid={`nav-${item.label.toLowerCase()}`}
                   className={({ isActive }) =>
-                    `flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                    `flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all border-b-2 ${
                       isActive
-                        ? 'bg-hpe-green/10 text-hpe-green'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                        ? 'bg-hpe-green/10 text-hpe-green border-hpe-green'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-white border-transparent'
                     }`
                   }
                 >
