@@ -501,19 +501,9 @@ async def run_greenlake_sync(pool) -> dict:
             token_manager = TokenManager()
 
             async with GLPClient(token_manager) as client:
-                # Sync devices
-                _sync_status["progress"] = "Syncing devices from GreenLake..."
-                device_started = datetime.now(timezone.utc)
-                device_syncer = DeviceSyncer(client=client, db_pool=pool)
-                results["devices"] = await device_syncer.sync()
-                logger.info(f"Device sync complete: {results['devices']}")
-
-                # Record device sync history (duration_ms computed from timestamps)
-                await _record_sync_history(
-                    pool, "devices", device_started, results["devices"], "completed"
-                )
-
-                # Sync subscriptions
+                # Sync subscriptions FIRST (before devices)
+                # This ensures subscription records exist before device_subscriptions
+                # foreign key references are created during device sync
                 _sync_status["progress"] = "Syncing subscriptions from GreenLake..."
                 sub_started = datetime.now(timezone.utc)
                 sub_syncer = SubscriptionSyncer(client=client, db_pool=pool)
@@ -523,6 +513,18 @@ async def run_greenlake_sync(pool) -> dict:
                 # Record subscription sync history (duration_ms computed from timestamps)
                 await _record_sync_history(
                     pool, "subscriptions", sub_started, results["subscriptions"], "completed"
+                )
+
+                # Sync devices AFTER subscriptions exist
+                _sync_status["progress"] = "Syncing devices from GreenLake..."
+                device_started = datetime.now(timezone.utc)
+                device_syncer = DeviceSyncer(client=client, db_pool=pool)
+                results["devices"] = await device_syncer.sync()
+                logger.info(f"Device sync complete: {results['devices']}")
+
+                # Record device sync history (duration_ms computed from timestamps)
+                await _record_sync_history(
+                    pool, "devices", device_started, results["devices"], "completed"
                 )
         except ValueError as e:
             logger.warning(f"GreenLake sync skipped (missing credentials): {e}")
