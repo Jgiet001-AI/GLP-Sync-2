@@ -82,15 +82,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_messages_embedding_status
     WHERE embedding_status IN ('pending', 'failed');
 
 -- Per-model partial indexes for embedding search
--- Using HNSW instead of ivfflat because text-embedding-3-large has 3072 dimensions
--- and ivfflat only supports up to 2000 dimensions
-CREATE INDEX IF NOT EXISTS idx_agent_messages_embedding_openai
-    ON agent_messages USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
-    WHERE embedding_model = 'text-embedding-3-large' AND embedding IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS idx_agent_messages_embedding_openai_small
-    ON agent_messages USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
-    WHERE embedding_model = 'text-embedding-3-small' AND embedding IS NOT NULL;
+-- NOTE: pgvector HNSW/IVFFlat indexes only support up to 2000 dimensions
+-- Our embedding column is vector(3072) to support multiple models
+-- Since the column dimension > 2000, we cannot create vector indexes
+-- Searches will use sequential scan which is fine for moderate data sizes
+-- For production with millions of messages, consider using a separate 2000-dim column
 
 -- ============================================
 -- AGENT MEMORY TABLE (Long-term + Semantic)
@@ -158,14 +154,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_memory_last_accessed
     ON agent_memory(last_accessed_at)
     WHERE last_accessed_at IS NOT NULL;
 
--- Per-model partial indexes for embedding search (using HNSW for high-dimensional vectors)
-CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding_openai
-    ON agent_memory USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
-    WHERE embedding_model = 'text-embedding-3-large' AND embedding IS NOT NULL AND NOT is_invalidated;
-
-CREATE INDEX IF NOT EXISTS idx_agent_memory_embedding_openai_small
-    ON agent_memory USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
-    WHERE embedding_model = 'text-embedding-3-small' AND embedding IS NOT NULL AND NOT is_invalidated;
+-- Per-model partial indexes for embedding search
+-- NOTE: pgvector indexes only support up to 2000 dimensions
+-- Column is vector(3072), so we skip creating vector indexes
+-- Sequential scan will be used for similarity searches
 
 -- ============================================
 -- EMBEDDING JOBS QUEUE
