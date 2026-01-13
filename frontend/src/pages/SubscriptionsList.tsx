@@ -29,17 +29,7 @@ import {
 } from 'lucide-react'
 import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
-
-// Format date
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
-}
+import { formatDate } from '../utils/formatting'
 
 // Page size options
 const PAGE_SIZE_OPTIONS = [10, 100, 500, 1000]
