@@ -35,6 +35,7 @@ import {
 import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
 import { formatDate, formatDateTime, formatUptime } from '../utils/formatting'
+import { PAGE_SIZE_OPTIONS, generatePageNumbers } from '../utils/pagination'
 
 // Device type icon mapping
 const deviceIcons: Record<string, typeof Server> = {
@@ -46,9 +47,6 @@ const deviceIcons: Record<string, typeof Server> = {
   STORAGE: HardDrive,
   UNKNOWN: Server,
 }
-
-// Page size options
-const PAGE_SIZE_OPTIONS = [10, 100, 500, 1000]
 
 export function DevicesList() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1122,36 +1120,3 @@ const DeviceRow = memo(function DeviceRow({
     </tr>
   )
 })
-
-// Generate page numbers for pagination
-function generatePageNumbers(currentPage: number, totalPages: number): (number | string)[] {
-  const pages: (number | string)[] = []
-  const delta = 2
-
-  if (totalPages <= 7) {
-    for (let i = 1; i <= totalPages; i++) {
-      pages.push(i)
-    }
-  } else {
-    pages.push(1)
-
-    if (currentPage > delta + 2) {
-      pages.push('...')
-    }
-
-    const rangeStart = Math.max(2, currentPage - delta)
-    const rangeEnd = Math.min(totalPages - 1, currentPage + delta)
-
-    for (let i = rangeStart; i <= rangeEnd; i++) {
-      pages.push(i)
-    }
-
-    if (currentPage < totalPages - delta - 1) {
-      pages.push('...')
-    }
-
-    pages.push(totalPages)
-  }
-
-  return pages
-}
