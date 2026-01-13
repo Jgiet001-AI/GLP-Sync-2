@@ -144,6 +144,9 @@ async def run_sync(
 ) -> dict:
     """Run a single sync cycle.
 
+    Subscriptions are synced first (sequential) to satisfy FK constraints,
+    then GreenLake devices and Aruba Central are synced in parallel.
+
     Args:
         config: Scheduler configuration
         token_manager: TokenManager instance for GreenLake
@@ -164,11 +167,10 @@ async def run_sync(
     }
 
     try:
-        # GreenLake sync
+        # Step 1: Sync subscriptions FIRST (before devices)
+        # This ensures subscription records exist before device_subscriptions
+        # foreign key references are created during device sync
         async with GLPClient(token_manager) as client:
-            # Sync subscriptions FIRST (before devices)
-            # This ensures subscription records exist before device_subscriptions
-            # foreign key references are created during device sync
             if config.sync_subscriptions:
                 print("[Scheduler] Syncing subscriptions...")
                 syncer = SubscriptionSyncer(client=client, db_pool=db_pool)
@@ -179,33 +181,75 @@ async def run_sync(
                     subs = await syncer.fetch_all_subscriptions()
                     results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
 
-            # Sync devices AFTER subscriptions exist
-            if config.sync_devices:
+        # Step 2: Run GreenLake device sync and Aruba Central sync in PARALLEL
+        # These are independent operations writing to different columns
+        parallel_tasks = []
+        task_names = []
+
+        # Define GreenLake device sync task
+        async def sync_glp_devices():
+            async with GLPClient(token_manager) as client:
                 print("[Scheduler] Syncing GreenLake devices...")
                 syncer = DeviceSyncer(client=client, db_pool=db_pool)
 
                 if db_pool:
-                    results["devices"] = await syncer.sync()
+                    return await syncer.sync()
                 else:
                     devices = await syncer.fetch_all_devices()
-                    results["devices"] = {"fetched": len(devices), "mode": "fetch-only"}
+                    return {"fetched": len(devices), "mode": "fetch-only"}
 
-        # Aruba Central sync (separate client/token)
-        if config.sync_central and aruba_token_manager:
-            print("[Scheduler] Syncing Aruba Central devices...")
+        # Define Aruba Central sync task
+        async def sync_aruba_central():
             async with ArubaCentralClient(aruba_token_manager) as central_client:
+                print("[Scheduler] Syncing Aruba Central devices...")
                 syncer = ArubaCentralSyncer(client=central_client, db_pool=db_pool)
 
                 if db_pool:
-                    results["central"] = await syncer.sync()
+                    return await syncer.sync()
                 else:
-                    devices = await syncer.fetch_all_devices()
-                    results["central"] = {"fetched": len(devices), "mode": "fetch-only"}
-        elif config.sync_central and not aruba_token_manager:
+                    central_devices = await syncer.fetch_all_devices()
+                    return {"fetched": len(central_devices), "mode": "fetch-only"}
+
+        # Build task list
+        if config.sync_devices:
+            parallel_tasks.append(sync_glp_devices())
+            task_names.append("devices")
+
+        if config.sync_central and aruba_token_manager:
+            parallel_tasks.append(sync_aruba_central())
+            task_names.append("central")
+
+        # Handle missing credentials warning
+        if config.sync_central and not aruba_token_manager:
             print("[Scheduler] WARNING: SYNC_CENTRAL enabled but Aruba credentials not configured")
             results["central"] = {"skipped": True, "reason": "credentials_missing"}
 
-        results["success"] = True
+        # Execute parallel tasks if any
+        if parallel_tasks:
+            if len(parallel_tasks) > 1:
+                print("[Scheduler] Running GreenLake devices and Aruba Central sync in parallel...")
+
+            # Use return_exceptions=True to handle partial failures
+            parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+
+            # Process results and handle exceptions
+            has_errors = False
+            for i, result in enumerate(parallel_results):
+                task_name = task_names[i]
+
+                if isinstance(result, Exception):
+                    print(f"[Scheduler] ERROR: {task_name} sync failed: {result}")
+                    results[task_name] = {"error": str(result)}
+                    has_errors = True
+                else:
+                    results[task_name] = result
+
+            # Only mark success if no errors occurred
+            if not has_errors:
+                results["success"] = True
+        else:
+            # No parallel tasks to run, mark as successful
+            results["success"] = True
 
     except Exception as e:
         results["error"] = str(e)
