@@ -1068,3 +1068,83 @@ async def get_filter_options(
             subscription_types=[r['subscription_type'] for r in sub_types],
             subscription_statuses=[r['subscription_status'] for r in sub_statuses],
         )
+
+
+@router.get("/search-history", response_model=SearchHistoryResponse)
+async def get_search_history(
+    tenant_id: str = Query(..., description="Tenant identifier for multi-tenancy isolation"),
+    user_id: str = Query(..., description="User identifier"),
+    search_type: Optional[str] = Query(default=None, description="Filter by search type (device or subscription)"),
+    limit: int = Query(default=50, ge=1, le=200, description="Maximum number of search history items to return"),
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Get search history for a specific tenant and user.
+
+    Returns recent search queries filtered by tenant_id and user_id,
+    sorted by created_at DESC (most recent first).
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            # Return empty response if table doesn't exist yet
+            return SearchHistoryResponse(items=[], total=0)
+
+        # Build the query dynamically
+        where_clauses = ["tenant_id = $1", "user_id = $2"]
+        params = [tenant_id, user_id]
+        param_idx = 3
+
+        if search_type:
+            where_clauses.append(f"search_type = ${param_idx}")
+            params.append(search_type)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Count total matching records
+        count_sql = f"SELECT COUNT(*) FROM search_history WHERE {where_sql}"
+        total = await conn.fetchval(count_sql, *params)
+
+        # Fetch search history items
+        query_sql = f"""
+            SELECT
+                id::text,
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                created_at,
+                metadata
+            FROM search_history
+            WHERE {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ${param_idx}
+        """
+        params.append(limit)
+
+        rows = await conn.fetch(query_sql, *params)
+
+        items = [
+            SearchHistoryItem(
+                id=row['id'],
+                tenant_id=row['tenant_id'],
+                user_id=row['user_id'],
+                query=row['query'],
+                search_type=row['search_type'],
+                result_count=row['result_count'],
+                created_at=row['created_at'],
+                metadata=row['metadata'] or {},
+            )
+            for row in rows
+        ]
+
+        return SearchHistoryResponse(items=items, total=total)
