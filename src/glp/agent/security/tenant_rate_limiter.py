@@ -100,6 +100,9 @@ class RateLimitConfig:
     # Enable/disable rate limiting
     enabled: bool = os.getenv("TENANT_RATE_LIMIT_ENABLED", "true").lower() == "true"
 
+    # Fail-closed behavior (use in-memory fallback when Redis unavailable)
+    fail_closed: bool = os.getenv("TENANT_RATE_LIMIT_FAIL_CLOSED", "true").lower() == "true"
+
     # Key prefix for Redis
     key_prefix: str = "rate_limit:tenant"
 
