@@ -176,7 +176,7 @@ const TaskCard = memo(function TaskCard({ task, onDismiss }: TaskCardProps) {
           {/* Progress bar */}
           <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden">
             <div
-              className="h-full bg-gradient-to-r from-hpe-green to-hpe-blue transition-all duration-300"
+              className="h-full progress-shine animate-shimmer transition-all duration-300"
               style={{ width: `${Math.min(task.progress.percentage, 100)}%` }}
             />
           </div>
