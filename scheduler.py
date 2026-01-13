@@ -48,7 +48,7 @@ import asyncio
 import os
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -153,7 +153,7 @@ async def run_sync(
     Returns:
         Dict with sync results
     """
-    start_time = datetime.utcnow()
+    start_time = datetime.now(UTC)
     results = {
         "started_at": start_time.isoformat(),
         "devices": None,
@@ -166,18 +166,9 @@ async def run_sync(
     try:
         # GreenLake sync
         async with GLPClient(token_manager) as client:
-            # Sync devices
-            if config.sync_devices:
-                print("[Scheduler] Syncing GreenLake devices...")
-                syncer = DeviceSyncer(client=client, db_pool=db_pool)
-
-                if db_pool:
-                    results["devices"] = await syncer.sync()
-                else:
-                    devices = await syncer.fetch_all_devices()
-                    results["devices"] = {"fetched": len(devices), "mode": "fetch-only"}
-
-            # Sync subscriptions
+            # Sync subscriptions FIRST (before devices)
+            # This ensures subscription records exist before device_subscriptions
+            # foreign key references are created during device sync
             if config.sync_subscriptions:
                 print("[Scheduler] Syncing subscriptions...")
                 syncer = SubscriptionSyncer(client=client, db_pool=db_pool)
@@ -187,6 +178,17 @@ async def run_sync(
                 else:
                     subs = await syncer.fetch_all_subscriptions()
                     results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
+
+            # Sync devices AFTER subscriptions exist
+            if config.sync_devices:
+                print("[Scheduler] Syncing GreenLake devices...")
+                syncer = DeviceSyncer(client=client, db_pool=db_pool)
+
+                if db_pool:
+                    results["devices"] = await syncer.sync()
+                else:
+                    devices = await syncer.fetch_all_devices()
+                    results["devices"] = {"fetched": len(devices), "mode": "fetch-only"}
 
         # Aruba Central sync (separate client/token)
         if config.sync_central and aruba_token_manager:
@@ -209,7 +211,7 @@ async def run_sync(
         results["error"] = str(e)
         print(f"[Scheduler] ERROR during sync: {e}")
 
-    end_time = datetime.utcnow()
+    end_time = datetime.now(UTC)
     results["completed_at"] = end_time.isoformat()
     results["duration_seconds"] = (end_time - start_time).total_seconds()
 
@@ -266,7 +268,7 @@ class HealthState:
         self.last_sync_success: bool = False
         self.total_syncs: int = 0
         self.failed_syncs: int = 0
-        self.started_at: datetime = datetime.utcnow()
+        self.started_at: datetime = datetime.now(UTC)
 
 
 async def health_check_handler(reader, writer, state: HealthState):
@@ -275,7 +277,7 @@ async def health_check_handler(reader, writer, state: HealthState):
     await reader.read(1024)
 
     # Build response
-    uptime = (datetime.utcnow() - state.started_at).total_seconds()
+    uptime = (datetime.now(UTC) - state.started_at).total_seconds()
     status = "healthy" if state.last_sync_success or state.total_syncs == 0 else "unhealthy"
 
     body = (
@@ -344,14 +346,14 @@ async def scheduler_loop(
         print("[Scheduler] Running initial sync on startup...")
         results = await run_sync_with_retry(config, token_manager, db_pool, aruba_token_manager)
         health_state.total_syncs += 1
-        health_state.last_sync_at = datetime.utcnow()
+        health_state.last_sync_at = datetime.now(UTC)
         health_state.last_sync_success = results["success"]
         if not results["success"]:
             health_state.failed_syncs += 1
         print(f"[Scheduler] Initial sync complete: {results}")
 
     # Calculate next run time
-    next_run = datetime.utcnow() + timedelta(seconds=interval_seconds)
+    next_run = datetime.now(UTC) + timedelta(seconds=interval_seconds)
     print(f"[Scheduler] Next sync at {next_run.isoformat()} (in {config.interval_minutes} minutes)")
 
     while not shutdown_event.is_set():
@@ -369,12 +371,12 @@ async def scheduler_loop(
 
         # Run sync
         print("\n[Scheduler] ========== SCHEDULED SYNC ==========")
-        print(f"[Scheduler] Time: {datetime.utcnow().isoformat()}")
+        print(f"[Scheduler] Time: {datetime.now(UTC).isoformat()}")
 
         results = await run_sync_with_retry(config, token_manager, db_pool, aruba_token_manager)
 
         health_state.total_syncs += 1
-        health_state.last_sync_at = datetime.utcnow()
+        health_state.last_sync_at = datetime.now(UTC)
         health_state.last_sync_success = results["success"]
         if not results["success"]:
             health_state.failed_syncs += 1
@@ -382,7 +384,7 @@ async def scheduler_loop(
         print(f"[Scheduler] Sync complete: success={results['success']}, duration={results.get('duration_seconds', 0):.1f}s")
 
         # Calculate next run
-        next_run = datetime.utcnow() + timedelta(seconds=interval_seconds)
+        next_run = datetime.now(UTC) + timedelta(seconds=interval_seconds)
         print(f"[Scheduler] Next sync at {next_run.isoformat()} (in {config.interval_minutes} minutes)")
 
     print("[Scheduler] Shutdown requested, exiting loop")
@@ -406,6 +408,20 @@ async def main():
     if not config.sync_devices and not config.sync_subscriptions and not config.sync_central:
         print("[Scheduler] ERROR: Nothing to sync (SYNC_DEVICES, SYNC_SUBSCRIPTIONS, and SYNC_CENTRAL are all false)")
         sys.exit(1)
+
+    # Block invalid configuration: devices without subscriptions when DB is configured
+    # The device_subscriptions table has a FK constraint to subscriptions table
+    # so devices must be synced AFTER subscriptions (which we do), but both must be enabled
+    if config.sync_devices and not config.sync_subscriptions:
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            print("[Scheduler] ERROR: SYNC_DEVICES=true but SYNC_SUBSCRIPTIONS=false with DATABASE_URL set")
+            print("[Scheduler] ERROR: Device sync requires subscriptions to be synced first (FK constraint)")
+            print("[Scheduler] ERROR: Please set SYNC_SUBSCRIPTIONS=true or disable DATABASE_URL for fetch-only mode")
+            sys.exit(1)
+        else:
+            # In fetch-only mode (no DB), this is allowed
+            print("[Scheduler] INFO: SYNC_DEVICES=true but SYNC_SUBSCRIPTIONS=false (fetch-only mode, no DB)")
 
     # Initialize GreenLake token manager (required for devices/subscriptions)
     token_manager = None
