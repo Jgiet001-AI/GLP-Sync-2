@@ -342,6 +342,8 @@ class TenantRateLimiter:
         """
         self.redis = redis
         self.config = config or RateLimitConfig()
+        # Lazy-initialized in-memory fallback for fail-closed behavior
+        self._in_memory_fallback: Optional[InMemoryRateLimiter] = None
 
     def _get_key(self, tenant_id: str) -> str:
         """Get Redis key for a tenant's rate limit.
@@ -404,8 +406,20 @@ class TenantRateLimiter:
         except RateLimitExceededError:
             raise
         except Exception as e:
-            # Fail open - allow request if Redis is unavailable
-            logger.warning(f"Rate limit check failed (allowing request): {e}")
+            # Check fail_closed config to determine behavior
+            if self.config.fail_closed:
+                # Fail closed - use in-memory fallback
+                logger.warning(
+                    f"Redis unavailable, using in-memory fallback for tenant {tenant_id}: {e}"
+                )
+                # Lazy-initialize in-memory fallback
+                if self._in_memory_fallback is None:
+                    self._in_memory_fallback = InMemoryRateLimiter(config=self.config)
+                # Delegate to in-memory rate limiter
+                await self._in_memory_fallback.check_rate_limit(tenant_id)
+            else:
+                # Fail open - allow request if Redis is unavailable
+                logger.warning(f"Rate limit check failed (allowing request): {e}")
 
     async def get_rate_limit_info(self, tenant_id: str) -> dict:
         """Get current rate limit status for a tenant.
