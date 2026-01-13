@@ -410,7 +410,7 @@ class AgentOrchestrator:
 
                 # Execute tool calls
                 for tc in tool_calls[:self.config.max_tool_calls_per_turn]:
-                    result = await self._execute_tool_call(tc, context, conversation.id)
+                    result = await self.tool_executor.execute_tool_call(tc, context, conversation.id)
 
                     # Check if confirmation is required
                     if isinstance(result.result, dict) and result.result.get("status") == "confirmation_required":
@@ -653,26 +653,6 @@ class AgentOrchestrator:
         )
 
         logger.info(f"Cancelled chat for conversation {conversation_id}")
-
-    async def _execute_tool_call(
-        self,
-        tool_call: ToolCall,
-        context: UserContext,
-        conversation_id: UUID,
-    ) -> ToolCall:
-        """Execute a tool call.
-
-        Args:
-            tool_call: Tool call to execute
-            context: User context
-            conversation_id: Current conversation
-
-        Returns:
-            Tool call with result
-        """
-        return await self.tool_executor.execute_tool_call(
-            tool_call, context, conversation_id
-        )
 
     async def get_conversation_history(
         self,
