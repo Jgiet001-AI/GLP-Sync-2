@@ -555,6 +555,110 @@ class CircuitBreaker:
 
 
 # ============================================
+# Global Circuit Breaker Registry
+# ============================================
+
+# Global registry for all circuit breakers
+_circuit_breaker_registry: dict[str, CircuitBreaker] = {}
+
+
+def register_circuit_breaker(circuit_breaker: CircuitBreaker) -> None:
+    """Register a circuit breaker in the global registry.
+
+    Args:
+        circuit_breaker: Circuit breaker instance to register
+
+    Note:
+        If a circuit breaker with the same name already exists,
+        it will be replaced with a warning.
+    """
+    name = circuit_breaker.name
+    if name in _circuit_breaker_registry:
+        logger.warning(
+            f"Circuit breaker '{name}' is already registered. "
+            "Replacing with new instance."
+        )
+    _circuit_breaker_registry[name] = circuit_breaker
+    logger.debug(f"Registered circuit breaker: {name}")
+
+
+def unregister_circuit_breaker(name: str) -> None:
+    """Remove a circuit breaker from the global registry.
+
+    Args:
+        name: Name of the circuit breaker to unregister
+    """
+    if name in _circuit_breaker_registry:
+        del _circuit_breaker_registry[name]
+        logger.debug(f"Unregistered circuit breaker: {name}")
+    else:
+        logger.warning(f"Cannot unregister unknown circuit breaker: {name}")
+
+
+def get_circuit_breaker(name: str) -> Optional[CircuitBreaker]:
+    """Get a circuit breaker from the registry by name.
+
+    Args:
+        name: Name of the circuit breaker
+
+    Returns:
+        Circuit breaker instance or None if not found
+    """
+    return _circuit_breaker_registry.get(name)
+
+
+def get_all_circuit_breaker_status() -> list[dict[str, Any]]:
+    """Get status of all registered circuit breakers.
+
+    Returns:
+        List of status dictionaries, one for each registered circuit breaker.
+        Each dictionary contains:
+        - name: Circuit breaker name
+        - state: Current state (closed/open/half_open)
+        - failure_count: Number of consecutive failures
+        - success_count: Number of successes in HALF_OPEN state
+        - failure_threshold: Threshold for opening circuit
+        - timeout_seconds: Timeout before attempting recovery
+        - last_failure_at: ISO timestamp of last failure (or None)
+        - probe_in_progress: Whether a recovery probe is running
+
+    Example:
+        [
+            {
+                "name": "glp-api",
+                "state": "closed",
+                "failure_count": 0,
+                "success_count": 0,
+                "failure_threshold": 5,
+                "timeout_seconds": 60.0,
+                "last_failure_at": None,
+                "probe_in_progress": False
+            },
+            {
+                "name": "aruba-api",
+                "state": "open",
+                "failure_count": 5,
+                "success_count": 0,
+                "failure_threshold": 5,
+                "timeout_seconds": 60.0,
+                "last_failure_at": "2024-01-15T10:30:00",
+                "probe_in_progress": False
+            }
+        ]
+    """
+    return [cb.get_status() for cb in _circuit_breaker_registry.values()]
+
+
+def clear_circuit_breaker_registry() -> None:
+    """Clear all circuit breakers from the registry.
+
+    This is primarily useful for testing.
+    """
+    _circuit_breaker_registry.clear()
+    logger.debug("Cleared circuit breaker registry")
+
+
+# ============================================
 # Graceful Degradation Helpers
 # ============================================
 
@@ -1088,6 +1192,12 @@ __all__ = [
     # Circuit Breaker
     "CircuitBreaker",
     "CircuitState",
+    # Circuit Breaker Registry
+    "register_circuit_breaker",
+    "unregister_circuit_breaker",
+    "get_circuit_breaker",
+    "get_all_circuit_breaker_status",
+    "clear_circuit_breaker_registry",
     # Graceful Degradation
     "with_fallback",
     "with_timeout",
