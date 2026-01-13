@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .dependencies import get_db_pool, verify_api_key
@@ -1026,10 +1026,14 @@ class FilterOptions(BaseModel):
 
 @router.get("/filters", response_model=FilterOptions)
 async def get_filter_options(
+    response: Response,
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
     """Get available filter options for devices and subscriptions."""
+    # Set Cache-Control header for 5 minutes (300 seconds)
+    response.headers["Cache-Control"] = "public, max-age=300"
+
     async with pool.acquire() as conn:
         device_types = await conn.fetch("""
             SELECT DISTINCT device_type FROM devices WHERE device_type IS NOT NULL ORDER BY device_type
