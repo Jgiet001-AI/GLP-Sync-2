@@ -421,10 +421,33 @@ async def _record_sync_history(
     started_at: datetime,
     result: dict,
     status: str,
-    duration_ms: int,
     error_message: Optional[str] = None,
 ) -> None:
-    """Record sync history in database."""
+    """Record sync history in database.
+
+    Note: duration_ms is a generated column computed from started_at and completed_at.
+    Status must be 'running', 'completed', or 'failed' per the CHECK constraint.
+    Resource types: 'devices', 'subscriptions', 'all', 'central_devices', 'clients', 'firmware'.
+
+    Field mapping:
+        Syncers return: {total, upserted, errors} or {total, inserted, updated, errors}
+        We normalize to: {records_fetched, records_inserted, records_updated, records_errors}
+    """
+    # Map legacy status values to allowed values
+    status_map = {"success": "completed", "error": "failed"}
+    normalized_status = status_map.get(status, status)
+
+    # Map legacy resource types to allowed values
+    resource_type_map = {"central": "central_devices"}
+    normalized_resource_type = resource_type_map.get(resource_type, resource_type)
+
+    # Normalize field names from syncer results
+    # Syncers may return 'upserted' (combined insert/update) or separate 'inserted'/'updated'
+    records_fetched = result.get("total", 0) or 0
+    records_inserted = result.get("inserted", 0) or result.get("upserted", 0) or 0
+    records_updated = result.get("updated", 0) or 0
+    records_errors = result.get("errors", 0) or 0
+
     try:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -432,20 +455,20 @@ async def _record_sync_history(
                 INSERT INTO sync_history (
                     resource_type, started_at, completed_at, status,
                     records_fetched, records_inserted, records_updated,
-                    records_errors, duration_ms, error_message
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    records_errors, error_message
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 """,
-                resource_type,
+                normalized_resource_type,
                 started_at,
                 datetime.now(timezone.utc),
-                status,
-                result.get("total", 0),
-                result.get("inserted", 0),
-                result.get("updated", 0),
-                result.get("errors", 0),
-                duration_ms,
+                normalized_status,
+                records_fetched,
+                records_inserted,
+                records_updated,
+                records_errors,
                 error_message,
             )
+        logger.info(f"Recorded sync history: {normalized_resource_type} - {records_fetched} fetched, {records_inserted} inserted")
     except Exception as e:
         logger.warning(f"Failed to record sync history: {e}")
 
@@ -481,31 +504,25 @@ async def run_greenlake_sync(pool) -> dict:
                 # Sync devices
                 _sync_status["progress"] = "Syncing devices from GreenLake..."
                 device_started = datetime.now(timezone.utc)
-                device_start_time = time.time()
                 device_syncer = DeviceSyncer(client=client, db_pool=pool)
                 results["devices"] = await device_syncer.sync()
-                device_duration_ms = int((time.time() - device_start_time) * 1000)
                 logger.info(f"Device sync complete: {results['devices']}")
 
-                # Record device sync history
+                # Record device sync history (duration_ms computed from timestamps)
                 await _record_sync_history(
-                    pool, "devices", device_started, results["devices"],
-                    "success", device_duration_ms
+                    pool, "devices", device_started, results["devices"], "completed"
                 )
 
                 # Sync subscriptions
                 _sync_status["progress"] = "Syncing subscriptions from GreenLake..."
                 sub_started = datetime.now(timezone.utc)
-                sub_start_time = time.time()
                 sub_syncer = SubscriptionSyncer(client=client, db_pool=pool)
                 results["subscriptions"] = await sub_syncer.sync()
-                sub_duration_ms = int((time.time() - sub_start_time) * 1000)
                 logger.info(f"Subscription sync complete: {results['subscriptions']}")
 
-                # Record subscription sync history
+                # Record subscription sync history (duration_ms computed from timestamps)
                 await _record_sync_history(
-                    pool, "subscriptions", sub_started, results["subscriptions"],
-                    "success", sub_duration_ms
+                    pool, "subscriptions", sub_started, results["subscriptions"], "completed"
                 )
         except ValueError as e:
             logger.warning(f"GreenLake sync skipped (missing credentials): {e}")
@@ -516,31 +533,27 @@ async def run_greenlake_sync(pool) -> dict:
         try:
             _sync_status["progress"] = "Syncing devices from Aruba Central..."
             central_started = datetime.now(timezone.utc)
-            central_start_time = time.time()
             aruba_token_manager = ArubaTokenManager()
 
             async with ArubaCentralClient(aruba_token_manager) as central_client:
                 central_syncer = ArubaCentralSyncer(client=central_client, db_pool=pool)
                 results["central"] = await central_syncer.sync()
-                central_duration_ms = int((time.time() - central_start_time) * 1000)
                 logger.info(f"Aruba Central sync complete: {results['central']}")
 
-                # Record central sync history
+                # Record central sync history (resource_type mapped to 'central_devices')
                 await _record_sync_history(
-                    pool, "central", central_started, results["central"],
-                    "success", central_duration_ms
+                    pool, "central", central_started, results["central"], "completed"
                 )
         except ValueError as e:
             logger.warning(f"Aruba Central sync skipped (missing credentials): {e}")
             results["central"] = {"skipped": True, "reason": str(e)}
         except Exception as e:
-            central_duration_ms = int((time.time() - central_start_time) * 1000) if 'central_start_time' in dir() else 0
             logger.warning(f"Aruba Central sync failed: {e}")
             results["central"] = {"error": str(e)}
             # Record failed sync
             await _record_sync_history(
                 pool, "central", central_started if 'central_started' in dir() else datetime.now(timezone.utc),
-                {}, "failed", central_duration_ms, str(e)
+                {}, "failed", str(e)
             )
 
         _sync_status["progress"] = "Sync complete!"

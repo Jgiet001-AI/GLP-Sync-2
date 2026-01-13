@@ -327,7 +327,7 @@ $$ LANGUAGE plpgsql;
 -- ============================================
 CREATE TABLE IF NOT EXISTS sync_history (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    resource_type TEXT NOT NULL DEFAULT 'devices' CHECK (resource_type IN ('devices', 'subscriptions', 'all')),
+    resource_type TEXT NOT NULL DEFAULT 'devices',
     started_at TIMESTAMPTZ NOT NULL,
     completed_at TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),

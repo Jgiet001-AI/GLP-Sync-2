@@ -9,7 +9,6 @@ Field Mapping:
 """
 
 import logging
-import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -81,12 +80,19 @@ class DeviceSyncerAdapter(ISyncService):
         started_at: datetime,
         result: dict,
         status: str,
-        duration_ms: int,
         error_message: Optional[str] = None,
     ) -> None:
-        """Record sync history in database."""
+        """Record sync history in database.
+
+        Note: duration_ms is a generated column computed from started_at and completed_at.
+        Status must be 'running', 'completed', or 'failed' per the CHECK constraint.
+        """
         if not self.db_pool:
             return
+
+        # Map legacy status values to allowed values
+        status_map = {"success": "completed", "error": "failed"}
+        normalized_status = status_map.get(status, status)
 
         try:
             async with self.db_pool.acquire() as conn:
@@ -95,18 +101,17 @@ class DeviceSyncerAdapter(ISyncService):
                     INSERT INTO sync_history (
                         resource_type, started_at, completed_at, status,
                         records_fetched, records_inserted, records_updated,
-                        records_errors, duration_ms, error_message
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        records_errors, error_message
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     """,
                     resource_type,
                     started_at,
                     datetime.now(timezone.utc),
-                    status,
+                    normalized_status,
                     result.get("records_fetched", 0),
                     result.get("records_inserted", 0),
                     result.get("records_updated", 0),
                     result.get("errors", 0),
-                    duration_ms,
                     error_message,
                 )
         except Exception as e:
@@ -116,12 +121,10 @@ class DeviceSyncerAdapter(ISyncService):
         """Sync all devices from GreenLake to database."""
         logger.info("Starting device sync...")
         started_at = datetime.now(timezone.utc)
-        start_time = time.time()
 
         try:
             raw_result = await self.device_syncer.sync()
             result = _normalize_sync_result(raw_result)
-            duration_ms = int((time.time() - start_time) * 1000)
 
             logger.info(
                 f"Device sync complete: {result['records_fetched']} fetched, "
@@ -129,20 +132,19 @@ class DeviceSyncerAdapter(ISyncService):
                 f"{result['records_updated']} updated"
             )
 
-            # Record success in history
+            # Record success in history (duration_ms computed from timestamps)
             await self._record_sync_history(
-                "devices", started_at, result, "success", duration_ms
+                "devices", started_at, result, "completed"
             )
 
             return result
 
         except Exception as e:
-            duration_ms = int((time.time() - start_time) * 1000)
             logger.error(f"Device sync failed: {e}")
 
             # Record failure in history
             await self._record_sync_history(
-                "devices", started_at, {}, "failed", duration_ms, str(e)
+                "devices", started_at, {}, "failed", str(e)
             )
             raise
 
@@ -150,12 +152,10 @@ class DeviceSyncerAdapter(ISyncService):
         """Sync all subscriptions from GreenLake to database."""
         logger.info("Starting subscription sync...")
         started_at = datetime.now(timezone.utc)
-        start_time = time.time()
 
         try:
             raw_result = await self.subscription_syncer.sync()
             result = _normalize_sync_result(raw_result)
-            duration_ms = int((time.time() - start_time) * 1000)
 
             logger.info(
                 f"Subscription sync complete: {result['records_fetched']} fetched, "
@@ -163,19 +163,18 @@ class DeviceSyncerAdapter(ISyncService):
                 f"{result['records_updated']} updated"
             )
 
-            # Record success in history
+            # Record success in history (duration_ms computed from timestamps)
             await self._record_sync_history(
-                "subscriptions", started_at, result, "success", duration_ms
+                "subscriptions", started_at, result, "completed"
             )
 
             return result
 
         except Exception as e:
-            duration_ms = int((time.time() - start_time) * 1000)
             logger.error(f"Subscription sync failed: {e}")
 
             # Record failure in history
             await self._record_sync_history(
-                "subscriptions", started_at, {}, "failed", duration_ms, str(e)
+                "subscriptions", started_at, {}, "failed", str(e)
             )
             raise

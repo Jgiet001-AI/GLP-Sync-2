@@ -344,11 +344,13 @@ COMMENT ON VIEW platform_coverage_summary IS 'Summary statistics of device prese
 -- ============================================
 
 -- Extend resource_type check constraint if needed
+-- Note: Must include agent migration markers used by migrations 004 and 006
 DO $$
 BEGIN
     ALTER TABLE sync_history DROP CONSTRAINT IF EXISTS sync_history_resource_type_check;
     ALTER TABLE sync_history ADD CONSTRAINT sync_history_resource_type_check
-        CHECK (resource_type IN ('devices', 'subscriptions', 'all', 'central_devices'));
+        CHECK (resource_type IN ('devices', 'subscriptions', 'all', 'central_devices',
+                                 'agent_migration_004', 'agent_migration_006_agentdb'));
 EXCEPTION
     WHEN OTHERS THEN NULL;
 END;

@@ -20,4 +20,6 @@ wheels/
 .pytest_cache/
 *.json
 !pyproject.toml
+!frontend/package.json
+!frontend/package-lock.json
 node_modules/

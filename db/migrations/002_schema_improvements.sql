@@ -90,57 +90,195 @@ CREATE INDEX IF NOT EXISTS idx_subscription_tags_subscription ON subscription_ta
 -- ============================================
 -- SYNC_HISTORY TABLE: Major Improvements
 -- ============================================
--- Note: This requires recreating the table due to SERIAL -> IDENTITY change
+-- Note: This migration handles multiple scenarios:
+-- 1. Fresh database with correct schema from schema.sql (already has status column)
+-- 2. Old database with legacy columns (devices_fetched, etc.)
+-- 3. Database with partial migration
 
--- Create new table with improved schema
-CREATE TABLE IF NOT EXISTS sync_history_new (
-    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    resource_type TEXT NOT NULL DEFAULT 'devices' CHECK (resource_type IN ('devices', 'subscriptions', 'all')),
-    started_at TIMESTAMPTZ NOT NULL,
-    completed_at TIMESTAMPTZ,
-    status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
-    records_fetched INTEGER NOT NULL DEFAULT 0,
-    records_inserted INTEGER NOT NULL DEFAULT 0,
-    records_updated INTEGER NOT NULL DEFAULT 0,
-    records_errors INTEGER NOT NULL DEFAULT 0,
-    error_message TEXT,
-    duration_ms INTEGER GENERATED ALWAYS AS (
-        CASE WHEN completed_at IS NOT NULL
-             THEN (EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)::INTEGER
-        END
-    ) STORED
-);
+DO $$
+DECLARE
+    table_exists BOOLEAN;
+    has_status_col BOOLEAN;
+    has_devices_fetched_col BOOLEAN;
+    has_devices_inserted_col BOOLEAN;
+    has_devices_updated_col BOOLEAN;
+    has_devices_errors_col BOOLEAN;
+    has_records_fetched_col BOOLEAN;
+    has_all_legacy_cols BOOLEAN;
+BEGIN
+    -- Check if sync_history table exists at all
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'sync_history'
+    ) INTO table_exists;
 
--- Migrate existing data (map old column names to new)
-INSERT INTO sync_history_new (
-    resource_type,
-    started_at,
-    completed_at,
-    status,
-    records_fetched,
-    records_inserted,
-    records_updated,
-    records_errors,
-    error_message
-)
-SELECT
-    'devices',
-    started_at,
-    completed_at,
-    COALESCE(status, 'running'),
-    COALESCE(devices_fetched, 0),
-    COALESCE(devices_inserted, 0),
-    COALESCE(devices_updated, 0),
-    COALESCE(devices_errors, 0),
-    error_message
-FROM sync_history
-WHERE started_at IS NOT NULL;
+    -- If table doesn't exist, schema.sql should have created it - nothing to migrate
+    IF NOT table_exists THEN
+        RAISE NOTICE 'sync_history table does not exist, skipping migration (schema.sql will create it)';
+        RETURN;
+    END IF;
 
--- Swap tables
-DROP TABLE IF EXISTS sync_history CASCADE;
-ALTER TABLE sync_history_new RENAME TO sync_history;
+    -- Check what columns exist in sync_history
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'status'
+    ) INTO has_status_col;
 
--- Add indexes
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'devices_fetched'
+    ) INTO has_devices_fetched_col;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'devices_inserted'
+    ) INTO has_devices_inserted_col;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'devices_updated'
+    ) INTO has_devices_updated_col;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'devices_errors'
+    ) INTO has_devices_errors_col;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'sync_history' AND column_name = 'records_fetched'
+    ) INTO has_records_fetched_col;
+
+    -- All legacy columns must exist to use legacy migration path
+    has_all_legacy_cols := has_devices_fetched_col AND has_devices_inserted_col
+                           AND has_devices_updated_col AND has_devices_errors_col;
+
+    -- If table already has the correct schema (status + records_fetched), skip migration
+    IF has_status_col AND has_records_fetched_col THEN
+        RAISE NOTICE 'sync_history already has correct schema, skipping migration';
+        RETURN;
+    END IF;
+
+    -- Clean up any leftover sync_history_new from a previous partial migration
+    DROP TABLE IF EXISTS sync_history_new CASCADE;
+
+    -- Create new table with improved schema
+    -- Include extended resource_type values for compatibility with later migrations
+    -- Note: No CHECK constraint on resource_type - later migrations may add custom types
+    CREATE TABLE sync_history_new (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        resource_type TEXT NOT NULL DEFAULT 'devices',
+        started_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed')),
+        records_fetched INTEGER NOT NULL DEFAULT 0,
+        records_inserted INTEGER NOT NULL DEFAULT 0,
+        records_updated INTEGER NOT NULL DEFAULT 0,
+        records_errors INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT,
+        duration_ms INTEGER GENERATED ALWAYS AS (
+            CASE WHEN completed_at IS NOT NULL
+                 THEN (EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)::INTEGER
+            END
+        ) STORED
+    );
+
+    -- Migrate existing data based on what columns exist
+    IF has_all_legacy_cols AND has_status_col THEN
+        -- Old schema: has all devices_* columns AND status column
+        INSERT INTO sync_history_new (
+            resource_type, started_at, completed_at, status,
+            records_fetched, records_inserted, records_updated, records_errors, error_message
+        )
+        SELECT
+            'devices',
+            started_at,
+            completed_at,
+            -- Map legacy status values to allowed values
+            CASE
+                WHEN status IN ('success', 'completed') THEN 'completed'
+                WHEN status = 'failed' THEN 'failed'
+                WHEN status = 'running' THEN 'running'
+                ELSE 'completed'  -- Default for unknown values
+            END,
+            COALESCE(devices_fetched, 0),
+            COALESCE(devices_inserted, 0),
+            COALESCE(devices_updated, 0),
+            COALESCE(devices_errors, 0),
+            error_message
+        FROM sync_history
+        WHERE started_at IS NOT NULL;
+        RAISE NOTICE 'Migrated from legacy devices_* columns with status';
+    ELSIF has_all_legacy_cols AND NOT has_status_col THEN
+        -- Very old schema: has devices_* columns but no status column
+        INSERT INTO sync_history_new (
+            resource_type, started_at, completed_at, status,
+            records_fetched, records_inserted, records_updated, records_errors, error_message
+        )
+        SELECT
+            'devices',
+            started_at,
+            completed_at,
+            'completed',  -- Default status when column doesn't exist
+            COALESCE(devices_fetched, 0),
+            COALESCE(devices_inserted, 0),
+            COALESCE(devices_updated, 0),
+            COALESCE(devices_errors, 0),
+            error_message
+        FROM sync_history
+        WHERE started_at IS NOT NULL;
+        RAISE NOTICE 'Migrated from legacy devices_* columns (no status column)';
+    ELSIF has_status_col THEN
+        -- Intermediate schema: has status but not records_fetched
+        INSERT INTO sync_history_new (
+            resource_type, started_at, completed_at, status,
+            records_fetched, records_inserted, records_updated, records_errors, error_message
+        )
+        SELECT
+            -- Map legacy resource types
+            CASE
+                WHEN resource_type = 'central' THEN 'central_devices'
+                WHEN resource_type IS NULL THEN 'devices'
+                ELSE resource_type
+            END,
+            started_at,
+            completed_at,
+            -- Map legacy status values
+            CASE
+                WHEN status IN ('success', 'completed') THEN 'completed'
+                WHEN status = 'failed' THEN 'failed'
+                WHEN status = 'running' THEN 'running'
+                ELSE 'completed'
+            END,
+            0, 0, 0, 0,
+            error_message
+        FROM sync_history
+        WHERE started_at IS NOT NULL;
+        RAISE NOTICE 'Migrated from intermediate schema (status only)';
+    ELSE
+        -- Very old schema or empty: just migrate basic fields
+        INSERT INTO sync_history_new (
+            resource_type, started_at, completed_at, status, error_message
+        )
+        SELECT
+            'devices',
+            started_at,
+            completed_at,
+            'completed',
+            error_message
+        FROM sync_history
+        WHERE started_at IS NOT NULL;
+        RAISE NOTICE 'Migrated from very old schema';
+    END IF;
+
+    -- Swap tables
+    DROP TABLE IF EXISTS sync_history CASCADE;
+    ALTER TABLE sync_history_new RENAME TO sync_history;
+
+    RAISE NOTICE 'sync_history migration completed successfully';
+END $$;
+
+-- Add indexes (idempotent)
 CREATE INDEX IF NOT EXISTS idx_sync_history_resource_type ON sync_history(resource_type);
 CREATE INDEX IF NOT EXISTS idx_sync_history_started ON sync_history(started_at DESC);
 

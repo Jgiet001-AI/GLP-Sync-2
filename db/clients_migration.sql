@@ -344,11 +344,13 @@ COMMENT ON COLUMN devices.firmware_synced_at IS 'When firmware info was last syn
 -- UPDATE sync_history FOR CLIENTS
 -- ============================================
 
+-- Note: Must include agent migration markers used by migrations 004 and 006
 DO $$
 BEGIN
     ALTER TABLE sync_history DROP CONSTRAINT IF EXISTS sync_history_resource_type_check;
     ALTER TABLE sync_history ADD CONSTRAINT sync_history_resource_type_check
-        CHECK (resource_type IN ('devices', 'subscriptions', 'all', 'central_devices', 'clients', 'firmware'));
+        CHECK (resource_type IN ('devices', 'subscriptions', 'all', 'central_devices', 'clients', 'firmware',
+                                 'agent_migration_004', 'agent_migration_006_agentdb'));
 EXCEPTION
     WHEN OTHERS THEN NULL;
 END;
