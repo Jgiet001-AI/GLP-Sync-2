@@ -26,6 +26,7 @@ import { clientsApiClient, type ClientItem, type SiteStats, type ClientsSummary 
 import { useClientsFilters, type FilterPreset, filtersToQueryParams } from '../hooks/useClientsFilters'
 import { ClientsFilterPanel, ClientsFilterBar } from '../components/filters/ClientsFilterPanel'
 import { ReportButton } from '../components/reports/ReportButton'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
 
 // Health color mapping
 const healthColors = {
@@ -680,6 +681,9 @@ export function ClientsPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [showFilterPanel, setShowFilterPanel] = useState(false)
 
+  // Debounce search to avoid excessive API calls
+  const debouncedSearchQuery = useDebouncedSearch(searchQuery, 300)
+
   // Filter state from URL
   const {
     filters,
@@ -705,11 +709,11 @@ export function ClientsPage() {
     staleTime: 30000,
   })
 
-  // Search results
+  // Search results - using debounced search query
   const { data: searchResults, isLoading: searchLoading } = useQuery({
-    queryKey: ['clients-search', searchQuery],
-    queryFn: () => clientsApiClient.searchClients(searchQuery, { page_size: 50 }),
-    enabled: searchQuery.length >= 2,
+    queryKey: ['clients-search', debouncedSearchQuery],
+    queryFn: () => clientsApiClient.searchClients(debouncedSearchQuery, { page_size: 50 }),
+    enabled: debouncedSearchQuery.length >= 2,
     staleTime: 10000,
   })
 
@@ -915,7 +919,7 @@ export function ClientsPage() {
                 clearFilters()
                 setSearchQuery('')
               }}
-              isActive={!hasFilters && !searchQuery}
+              isActive={!hasFilters && !debouncedSearchQuery}
               ariaLabel="Show all sites"
             />
           </section>
@@ -940,7 +944,7 @@ export function ClientsPage() {
           )}
 
           {/* Filtered View - Shows when filters are active */}
-          {hasFilters && !searchQuery && (
+          {hasFilters && !debouncedSearchQuery && (
             <section className="mb-8">
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <Filter className="h-5 w-5 text-violet-400" />
@@ -954,7 +958,7 @@ export function ClientsPage() {
           )}
 
           {/* Search Results */}
-          {searchQuery.length >= 2 && (
+          {debouncedSearchQuery.length >= 2 && (
             <section className="mb-8">
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <Search className="h-5 w-5 text-slate-400" />
@@ -1026,14 +1030,14 @@ export function ClientsPage() {
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-slate-400 rounded-2xl border border-slate-700/50 bg-slate-800/30">
                   <Search className="h-10 w-10 mb-3 opacity-50" />
-                  <p>No clients found matching "{searchQuery}"</p>
+                  <p>No clients found matching "{debouncedSearchQuery}"</p>
                 </div>
               )}
             </section>
           )}
 
           {/* Sites List - Shows when no filters or search */}
-          {!searchQuery && !hasFilters && (
+          {!debouncedSearchQuery && !hasFilters && (
             <section>
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <MapPin className="h-5 w-5 text-violet-400" />
