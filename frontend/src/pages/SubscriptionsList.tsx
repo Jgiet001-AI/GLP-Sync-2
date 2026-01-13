@@ -15,7 +15,6 @@ import {
   ChevronsRight,
   Filter,
   X,
-  ArrowUpDown,
   RefreshCw,
   Clock,
   AlertTriangle,
@@ -31,6 +30,7 @@ import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
 import { formatDate } from '../utils/formatting'
 import { PAGE_SIZE_OPTIONS, generatePageNumbers } from '../utils/pagination'
+import { SortableHeader } from '../components/shared/SortableHeader'
 
 export function SubscriptionsList() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -770,41 +770,6 @@ function SubscriptionDetailContent({
     </div>
   )
 }
-
-// Sortable Header Component
-const SortableHeader = memo(function SortableHeader({
-  column,
-  label,
-  currentSort,
-  sortOrder,
-  onSort,
-}: {
-  column: string
-  label: string
-  currentSort?: string
-  sortOrder?: string
-  onSort: (column: string) => void
-}) {
-  const isActive = currentSort === column
-
-  return (
-    <th
-      className="cursor-pointer px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400 transition-colors hover:text-white"
-      onClick={() => onSort(column)}
-      tabIndex={0}
-      role="button"
-      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <div className="flex items-center gap-1">
-        {label}
-        <ArrowUpDown className={`h-3.5 w-3.5 ${isActive ? 'text-hpe-purple' : 'text-slate-600'}`} />
-        {isActive && (
-          <span className="text-hpe-purple">{sortOrder === 'asc' ? '↑' : '↓'}</span>
-        )}
-      </div>
-    </th>
-  )
-})
 
 // Subscription Row Component with clickable device count
 const SubscriptionRow = memo(function SubscriptionRow({
