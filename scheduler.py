@@ -178,7 +178,7 @@ async def run_sync(
         if config.sync_subscriptions:
             try:
                 async with GLPClient(token_manager) as client:
-                    print("[Scheduler] Syncing subscriptions...")
+                    print("[Scheduler] Step 1/2: Syncing subscriptions (sequential, required for FK constraints)...")
                     syncer = SubscriptionSyncer(client=client, db_pool=db_pool)
 
                     if db_pool:
@@ -187,7 +187,8 @@ async def run_sync(
                         subs = await syncer.fetch_all_subscriptions()
                         results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
 
-                    logger.info("Subscription sync completed successfully")
+                    logger.info("Subscription sync completed successfully (sequential phase)")
+                    print("[Scheduler] ✓ Subscriptions synced successfully")
 
             except Exception as e:
                 # Log detailed error for subscription sync
@@ -211,6 +212,7 @@ async def run_sync(
 
         # Step 2: Run GreenLake device sync and Aruba Central sync in PARALLEL
         # These are independent operations writing to different columns
+        print("[Scheduler] Step 2/2: Preparing parallel sync tasks...")
         parallel_tasks = []
         task_names = []
 
@@ -219,7 +221,7 @@ async def run_sync(
             """Sync GreenLake devices with comprehensive error handling."""
             try:
                 async with GLPClient(token_manager) as client:
-                    print("[Scheduler] Syncing GreenLake devices...")
+                    print("[Scheduler]   → GreenLake devices sync started (parallel task)")
                     syncer = DeviceSyncer(client=client, db_pool=db_pool)
 
                     if db_pool:
@@ -244,7 +246,7 @@ async def run_sync(
             """Sync Aruba Central devices with comprehensive error handling."""
             try:
                 async with ArubaCentralClient(aruba_token_manager) as central_client:
-                    print("[Scheduler] Syncing Aruba Central devices...")
+                    print("[Scheduler]   → Aruba Central sync started (parallel task)")
                     syncer = ArubaCentralSyncer(client=central_client, db_pool=db_pool)
 
                     if db_pool:
@@ -280,8 +282,11 @@ async def run_sync(
 
         # Execute parallel tasks if any
         if parallel_tasks:
+            task_list = " and ".join(task_names)
             if len(parallel_tasks) > 1:
-                print("[Scheduler] Running GreenLake devices and Aruba Central sync in parallel...")
+                print(f"[Scheduler] ⚡ Running {len(parallel_tasks)} sync tasks in parallel: {task_list}")
+            else:
+                print(f"[Scheduler] Running single task: {task_list}")
 
             # Use return_exceptions=True to handle partial failures
             parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
@@ -312,16 +317,19 @@ async def run_sync(
                 else:
                     # Successful result
                     logger.info(f"Parallel sync task '{task_name}' completed successfully")
+                    print(f"[Scheduler]   ✓ {task_name.capitalize()} sync completed successfully")
                     results[task_name] = result
 
             # Only mark success if no errors occurred
             if not has_errors:
                 results["success"] = True
+                print(f"[Scheduler] ✓ All parallel sync tasks completed successfully")
             else:
                 # Log summary of parallel sync failures
                 failed_tasks = [task_names[i] for i, r in enumerate(parallel_results) if isinstance(r, Exception)]
-                logger.warning(f"Parallel sync completed with failures in: {', '.join(failed_tasks)}")
-                print(f"[Scheduler] WARNING: Parallel sync completed with failures in: {', '.join(failed_tasks)}")
+                successful_tasks = [task_names[i] for i, r in enumerate(parallel_results) if not isinstance(r, Exception)]
+                logger.warning(f"Partial parallel sync failure - succeeded: {successful_tasks}, failed: {failed_tasks}")
+                print(f"[Scheduler] ⚠ Partial parallel sync failure - succeeded: {successful_tasks}, failed: {failed_tasks}")
         else:
             # No parallel tasks to run, mark as successful
             results["success"] = True
