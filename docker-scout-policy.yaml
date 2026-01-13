@@ -53,9 +53,9 @@ base_images:
   message: "Only approved base images are allowed"
   allowed:
     # Python official images (for application)
-    - pattern: "docker.io/library/python:3.11-slim*"
+    - pattern: "docker.io/library/python:3.12-alpine*"
       pinned_digests:
-        - "sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36"
+        - "sha256:68d81cd281ee785f48cdadecb6130d05ec6957f1249814570dc90e5100d3b146"
 
     - pattern: "docker.io/library/python:3.12-slim*"
       comment: "Allow Python 3.12 for future upgrades"
@@ -63,7 +63,7 @@ base_images:
     # PostgreSQL official images (for database)
     - pattern: "docker.io/library/postgres:16-alpine*"
       pinned_digests:
-        - "sha256:8d32048ee4d8d41201412687a485bf2da8b11aab309369cca3fbdf30f8ceab76"
+        - "sha256:23e88eb049fd5d54894d70100df61d38a49ed97909263f79d4ff4c30a5d5fca2"
 
     - pattern: "docker.io/library/postgres:17-alpine*"
       comment: "Allow PostgreSQL 17 for future upgrades"
