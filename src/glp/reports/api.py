@@ -446,7 +446,7 @@ async def export_subscriptions(
 
 @router.get("/clients/export")
 async def export_clients(
-    format: str = Query("xlsx", regex="^(csv|xlsx)$"),
+    format: str = Query("xlsx", regex="^(csv|xlsx|json)$", description="Export format"),
     type: Optional[str] = Query(None, description="Filter by type (Wired/Wireless)"),
     status: Optional[str] = Query(None, description="Filter by status"),
     health: Optional[str] = Query(None, description="Filter by health"),
@@ -455,7 +455,7 @@ async def export_clients(
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Export network clients as Excel or CSV."""
+    """Export network clients as Excel, CSV, or JSON."""
     where_clauses = []
     params = []
     param_idx = 1
@@ -546,10 +546,14 @@ async def export_clients(
     if format == "xlsx":
         content = await generator.generate_excel_async(data, filters)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    else:
+    elif format == "csv":
         content = await generator.generate_csv_async(data, filters)
         content = content.encode("utf-8")
         media_type = "text/csv"
+    else:  # json
+        content = await generator.generate_json_async(data, filters)
+        content = content.encode("utf-8")
+        media_type = "application/json"
 
     headers = {
         **DOWNLOAD_HEADERS,
