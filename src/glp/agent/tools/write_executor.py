@@ -791,6 +791,27 @@ class WriteExecutor(IToolExecutor):
         """
         device_count = len(arguments.get("device_ids", []))
 
+        # Build tag change summary for BULK_UPDATE_TAGS
+        tag_summary = ""
+        if operation_type == WriteOperationType.BULK_UPDATE_TAGS:
+            tags = arguments.get("tags", {})
+            additions = []
+            removals = []
+
+            for key, value in tags.items():
+                if value is None:
+                    removals.append(key)
+                else:
+                    additions.append(f"{key}={value}")
+
+            parts = []
+            if additions:
+                parts.append(f"add/update: {', '.join(additions)}")
+            if removals:
+                parts.append(f"remove: {', '.join(removals)}")
+
+            tag_summary = f" ({'; '.join(parts)})" if parts else ""
+
         messages = {
             WriteOperationType.ARCHIVE_DEVICES: (
                 f"Are you sure you want to archive {device_count} device(s)? "
@@ -809,6 +830,9 @@ class WriteExecutor(IToolExecutor):
             ),
             WriteOperationType.ASSIGN_SUBSCRIPTION: (
                 f"Assign subscription to {device_count} device(s)?"
+            ),
+            WriteOperationType.BULK_UPDATE_TAGS: (
+                f"Update tags on {device_count} device(s){tag_summary}?"
             ),
         }
 
