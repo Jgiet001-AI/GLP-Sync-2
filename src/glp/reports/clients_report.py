@@ -7,6 +7,7 @@ Generates comprehensive network client reports with:
 - Connection details
 """
 
+import json
 import logging
 from typing import Any
 
@@ -92,6 +93,17 @@ class ClientsReportGenerator(BaseReportGenerator):
 
         fieldnames = [field for field, _ in self.CLIENT_COLUMNS]
         return self._dict_to_csv(rows, fieldnames)
+
+    def generate_json(
+        self,
+        data: dict[str, Any],
+        filters: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate JSON with client data."""
+        items = data.get("items", [])
+
+        # Return JSON array of clients
+        return json.dumps(items, indent=2, default=str)
 
     def _create_summary_sheet(
         self,
