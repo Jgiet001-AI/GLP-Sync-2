@@ -30,10 +30,12 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
 from fastapi import HTTPException, status
@@ -100,6 +102,184 @@ class RateLimitConfig:
 
     # Key prefix for Redis
     key_prefix: str = "rate_limit:tenant"
+
+
+@dataclass
+class _BucketCounter:
+    """Internal counter for a time bucket.
+
+    Attributes:
+        count: Number of requests in this bucket
+        expires_at: When this bucket expires (Unix timestamp)
+    """
+
+    count: int = 0
+    expires_at: float = field(default_factory=time.time)
+
+
+class InMemoryRateLimiter:
+    """In-memory fallback rate limiter for single-instance deployments.
+
+    Uses fixed time windows with in-memory storage. Suitable for:
+    - Single API server instances
+    - Development/testing
+    - Fallback when Redis is unavailable
+
+    Note: Does NOT work across multiple server instances - use Redis-backed
+    TenantRateLimiter for distributed deployments.
+
+    Usage:
+        limiter = InMemoryRateLimiter()
+        try:
+            await limiter.check_rate_limit("tenant-123")
+        except RateLimitExceededError:
+            # Handle rate limit exceeded
+            pass
+    """
+
+    def __init__(self, config: Optional[RateLimitConfig] = None):
+        """Initialize in-memory rate limiter.
+
+        Args:
+            config: Rate limit configuration
+        """
+        self.config = config or RateLimitConfig()
+        # Store: {tenant_id: {bucket: _BucketCounter}}
+        self._counters: dict[str, dict[int, _BucketCounter]] = defaultdict(dict)
+        self._lock = asyncio.Lock()
+        self._last_cleanup = time.time()
+        # Clean up old buckets every 5 minutes
+        self._cleanup_interval = 300
+
+    def _get_current_bucket(self) -> int:
+        """Get current time bucket.
+
+        Returns:
+            Bucket identifier (Unix timestamp / window_seconds)
+        """
+        return int(time.time() // self.config.window_seconds)
+
+    async def _cleanup_old_buckets(self) -> None:
+        """Remove expired buckets to prevent memory growth.
+
+        This is called periodically during check_rate_limit.
+        """
+        now = time.time()
+
+        # Only cleanup every N seconds
+        if now - self._last_cleanup < self._cleanup_interval:
+            return
+
+        async with self._lock:
+            for tenant_id in list(self._counters.keys()):
+                tenant_buckets = self._counters[tenant_id]
+
+                # Remove expired buckets
+                for bucket in list(tenant_buckets.keys()):
+                    counter = tenant_buckets[bucket]
+                    if counter.expires_at < now:
+                        del tenant_buckets[bucket]
+
+                # Remove tenant entry if no buckets remain
+                if not tenant_buckets:
+                    del self._counters[tenant_id]
+
+            self._last_cleanup = now
+
+            logger.debug(
+                f"Cleaned up rate limit buckets. "
+                f"Active tenants: {len(self._counters)}"
+            )
+
+    async def check_rate_limit(self, tenant_id: str) -> None:
+        """Check if tenant is within rate limit.
+
+        Args:
+            tenant_id: Tenant identifier
+
+        Raises:
+            RateLimitExceededError: If rate limit exceeded
+        """
+        if not self.config.enabled:
+            return
+
+        # Periodic cleanup
+        await self._cleanup_old_buckets()
+
+        bucket = self._get_current_bucket()
+        now = time.time()
+
+        async with self._lock:
+            # Get or create bucket counter
+            if bucket not in self._counters[tenant_id]:
+                self._counters[tenant_id][bucket] = _BucketCounter(
+                    count=0,
+                    expires_at=now + self.config.window_seconds,
+                )
+
+            counter = self._counters[tenant_id][bucket]
+
+            # Check if limit exceeded
+            if counter.count >= self.config.requests_per_window:
+                retry_after = max(1, int(counter.expires_at - now))
+                logger.warning(
+                    f"Rate limit exceeded for tenant {tenant_id}: "
+                    f"{counter.count}/{self.config.requests_per_window} "
+                    f"(in-memory fallback)"
+                )
+                raise RateLimitExceededError(
+                    tenant_id=tenant_id,
+                    limit=self.config.requests_per_window,
+                    window_seconds=self.config.window_seconds,
+                    retry_after=retry_after,
+                )
+
+            # Increment counter
+            counter.count += 1
+
+            logger.debug(
+                f"Tenant {tenant_id} rate limit (in-memory): "
+                f"{counter.count}/{self.config.requests_per_window}"
+            )
+
+    async def get_rate_limit_info(self, tenant_id: str) -> dict:
+        """Get current rate limit status for a tenant.
+
+        Args:
+            tenant_id: Tenant identifier
+
+        Returns:
+            Dict with rate limit information
+        """
+        if not self.config.enabled:
+            return {
+                "tenant_id": tenant_id,
+                "enabled": False,
+            }
+
+        bucket = self._get_current_bucket()
+
+        async with self._lock:
+            counter = self._counters[tenant_id].get(bucket)
+
+            if not counter:
+                current = 0
+            else:
+                current = counter.count
+
+            return {
+                "tenant_id": tenant_id,
+                "current_requests": current,
+                "limit": self.config.requests_per_window,
+                "window_seconds": self.config.window_seconds,
+                "remaining": max(0, self.config.requests_per_window - current),
+                "storage": "in-memory",
+            }
+
+    def reset(self) -> None:
+        """Reset all counters (useful for testing)."""
+        self._counters.clear()
+        self._last_cleanup = time.time()
 
 
 class TenantRateLimiter:
