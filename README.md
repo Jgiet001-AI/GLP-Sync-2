@@ -9,6 +9,45 @@
 
 A comprehensive platform for syncing device and subscription inventory from HPE GreenLake Platform to PostgreSQL, with a React dashboard, AI chatbot, and Aruba Central integration.
 
+## Table of Contents
+
+- [Features](#features)
+  - [Core Sync](#core-sync)
+  - [Web Dashboard](#web-dashboard)
+  - [AI Agent Chatbot](#ai-agent-chatbot)
+  - [Integrations](#integrations)
+- [Quick Start](#quick-start)
+  - [Option 1: Interactive Setup Wizard](#option-1-interactive-setup-wizard-recommended)
+  - [Option 2: Manual Docker Compose](#option-2-manual-docker-compose)
+  - [Option 3: Production Deployment](#option-3-production-deployment-docker-hub-images)
+- [Docker Architecture](#docker-architecture)
+  - [Services](#services)
+  - [Docker Hub Images](#docker-hub-images)
+  - [Security Features](#security-features)
+- [Environment Variables](#environment-variables)
+  - [Required](#required)
+  - [Optional](#optional)
+  - [Aruba Central](#aruba-central-optional)
+- [CLI Usage](#cli-usage)
+- [API Endpoints](#api-endpoints)
+  - [Dashboard API](#dashboard-api-api)
+  - [Agent API](#agent-api-apiagent)
+  - [MCP Server](#mcp-server-port-8010)
+- [Project Structure](#project-structure)
+- [Database Schema](#database-schema)
+  - [Tables](#tables)
+  - [Views](#views)
+- [Development](#development)
+  - [Local Setup](#local-setup)
+  - [Testing](#testing)
+  - [Linting](#linting)
+- [CI/CD](#cicd)
+  - [GitHub Actions](#github-actions)
+  - [Required Secrets](#required-secrets)
+  - [Required Variables](#required-variables)
+- [Architecture](#architecture)
+- [License](#license)
+
 ## Features
 
 ### Core Sync
