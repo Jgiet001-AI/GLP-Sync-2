@@ -28,6 +28,7 @@ import { formatDate } from '../utils/formatting'
 import { PAGE_SIZE_OPTIONS } from '../utils/pagination'
 import { SortableHeader } from '../components/shared/SortableHeader'
 import { PaginationControls } from '../components/shared/PaginationControls'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
 
 export function SubscriptionsList() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -74,12 +75,11 @@ export function SubscriptionsList() {
   }, [searchParams])
 
   // Debounced search
+  const debouncedSearch = useDebouncedSearch(searchInput, 300)
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setParams((prev) => ({ ...prev, search: searchInput || undefined, page: 1 }))
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchInput])
+    setParams((prev) => ({ ...prev, search: debouncedSearch || undefined, page: 1 }))
+  }, [debouncedSearch])
 
   // Fetch subscriptions
   const { data, isLoading, error, refetch, isFetching } = useQuery({
