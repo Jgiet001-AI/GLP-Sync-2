@@ -10,6 +10,7 @@ Security:
 """
 
 import io
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -44,12 +45,12 @@ def get_filename(report_type: str, format: str) -> str:
 
 @router.get("/dashboard/export")
 async def export_dashboard(
-    format: str = Query("xlsx", regex="^(csv|xlsx)$", description="Export format"),
+    format: str = Query("xlsx", regex="^(csv|xlsx|json)$", description="Export format"),
     expiring_days: int = Query(90, ge=1, le=365, description="Days for expiring items"),
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Export dashboard data as Excel or CSV.
+    """Export dashboard data as Excel, CSV, or JSON.
 
     Generates a comprehensive dashboard report including:
     - Executive summary with KPIs
@@ -177,10 +178,14 @@ async def export_dashboard(
     if format == "xlsx":
         content = await generator.generate_excel_async(data)
         media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    else:
+    elif format == "csv":
         content = await generator.generate_csv_async(data)
         content = content.encode("utf-8")
         media_type = "text/csv"
+    else:  # json
+        content = await generator.generate_json_async(data)
+        content = content.encode("utf-8")
+        media_type = "application/json"
 
     headers = {
         **DOWNLOAD_HEADERS,
