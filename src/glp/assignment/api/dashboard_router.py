@@ -120,6 +120,7 @@ class DashboardResponse(BaseModel):
 
 @router.get("", response_model=DashboardResponse)
 async def get_dashboard(
+    response: Response,
     expiring_days: int = Query(default=90, ge=1, le=365, description="Days to look ahead for expiring items"),
     sync_history_limit: int = Query(default=10, ge=1, le=50, description="Number of sync history records to return"),
     pool=Depends(get_db_pool),
@@ -130,6 +131,9 @@ async def get_dashboard(
     Returns comprehensive statistics about devices, subscriptions,
     expiring items, and sync history.
     """
+    # Set Cache-Control header for 30 seconds
+    response.headers["Cache-Control"] = "public, max-age=30"
+
     async with pool.acquire() as conn:
         # 1. Device Statistics
         device_stats_row = await conn.fetchrow("""
