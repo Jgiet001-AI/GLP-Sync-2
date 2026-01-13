@@ -8,6 +8,7 @@ Generates comprehensive Excel reports with:
 - Sync history
 """
 
+import json
 import logging
 from typing import Any
 
@@ -109,6 +110,28 @@ class DashboardReportGenerator(BaseReportGenerator):
         })
 
         return self._dict_to_csv(rows, ["Category", "Metric", "Value"])
+
+    def generate_json(
+        self,
+        data: dict[str, Any],
+        filters: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate JSON dashboard report.
+
+        Returns the complete dashboard data structure including:
+        - Device statistics
+        - Device breakdown by type
+        - Subscription statistics
+        - Other dashboard metrics
+
+        Args:
+            data: Report data
+            filters: Optional filters applied
+
+        Returns:
+            JSON content as string
+        """
+        return json.dumps(data, indent=2, default=str)
 
     def _create_executive_summary(self, ws, data: dict[str, Any]) -> None:
         """Create the executive summary sheet with KPIs."""
