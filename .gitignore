@@ -22,4 +22,7 @@ wheels/
 !pyproject.toml
 !frontend/package.json
 !frontend/package-lock.json
+!frontend/tsconfig.json
+!frontend/tsconfig.node.json
+!frontend/tsconfig.app.json
 node_modules/
