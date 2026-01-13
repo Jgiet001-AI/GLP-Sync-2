@@ -46,6 +46,7 @@ class WriteOperationType(str, Enum):
 
     ADD_DEVICE = "add_device"
     UPDATE_TAGS = "update_tags"
+    BULK_UPDATE_TAGS = "bulk_update_tags"
     ASSIGN_APPLICATION = "assign_application"
     UNASSIGN_APPLICATION = "unassign_application"
     ARCHIVE_DEVICES = "archive_devices"
