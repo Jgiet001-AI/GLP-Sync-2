@@ -9,6 +9,7 @@ This module provides the foundation for all report generators with:
 
 import csv
 import io
+import json
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -291,6 +292,19 @@ class BaseReportGenerator(ABC):
         """
         pass
 
+    @abstractmethod
+    def generate_json(self, data: dict[str, Any], filters: dict[str, Any] | None = None) -> str:
+        """Generate JSON report string.
+
+        Args:
+            data: Report data
+            filters: Optional filters applied
+
+        Returns:
+            JSON content as string
+        """
+        pass
+
     async def generate_excel_async(
         self,
         data: dict[str, Any],
@@ -328,6 +342,24 @@ class BaseReportGenerator(ABC):
         """
         return await anyio.to_thread.run_sync(
             lambda: self.generate_csv(data, filters)
+        )
+
+    async def generate_json_async(
+        self,
+        data: dict[str, Any],
+        filters: dict[str, Any] | None = None,
+    ) -> str:
+        """Generate JSON report asynchronously (non-blocking).
+
+        Args:
+            data: Report data
+            filters: Optional filters applied
+
+        Returns:
+            JSON content as string
+        """
+        return await anyio.to_thread.run_sync(
+            lambda: self.generate_json(data, filters)
         )
 
     def _workbook_to_bytes(self, wb: Workbook) -> bytes:
