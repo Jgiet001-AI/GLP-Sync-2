@@ -2,11 +2,13 @@
 
 import json as json_module
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from src.glp.api.resilience import get_all_circuit_breaker_status
 
 from .dependencies import get_db_pool, verify_api_key
 
@@ -403,10 +405,54 @@ async def search_devices(
         return [dict(row) for row in rows]
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthCheckResponse)
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": "dashboard"}
+    """Health check endpoint with circuit breaker status.
+
+    Returns the overall health status and circuit breaker state.
+    If multiple circuit breakers exist, returns the most critical one
+    (open > half_open > closed).
+    """
+    # Get all circuit breaker statuses
+    cb_statuses = get_all_circuit_breaker_status()
+
+    circuit_breaker_status = None
+    if cb_statuses:
+        # Sort by priority: open > half_open > closed
+        state_priority = {"open": 0, "half_open": 1, "closed": 2}
+        sorted_cbs = sorted(cb_statuses, key=lambda x: state_priority.get(x["state"], 999))
+        most_critical = sorted_cbs[0]
+
+        # Parse last_failure_at if present
+        last_failure_time = None
+        if most_critical.get("last_failure_at"):
+            try:
+                last_failure_time = datetime.fromisoformat(most_critical["last_failure_at"])
+            except (ValueError, TypeError):
+                pass
+
+        # Calculate next_attempt_time for open circuits
+        next_attempt_time = None
+        if most_critical["state"] == "open" and last_failure_time:
+            timeout_seconds = most_critical.get("timeout_seconds", 60.0)
+            next_attempt_time = last_failure_time + timedelta(seconds=timeout_seconds)
+
+        circuit_breaker_status = CircuitBreakerStatus(
+            state=most_critical["state"],
+            failure_count=most_critical.get("failure_count", 0),
+            last_failure_time=last_failure_time,
+            next_attempt_time=next_attempt_time,
+        )
+
+    # Overall health status based on circuit breaker state
+    overall_status = "healthy"
+    if circuit_breaker_status and circuit_breaker_status.state == "open":
+        overall_status = "degraded"
+
+    return HealthCheckResponse(
+        status=overall_status,
+        circuit_breaker=circuit_breaker_status,
+    )
 
 
 # ========== Sync Endpoints ==========
