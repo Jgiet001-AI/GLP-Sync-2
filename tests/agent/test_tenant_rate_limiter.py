@@ -419,6 +419,96 @@ class TestFailClosedBehavior:
         assert fallback.config.requests_per_window == config.requests_per_window
         assert fallback.config.window_seconds == config.window_seconds
 
+    @pytest.mark.asyncio
+    async def test_rate_limit_error_propagates_from_fallback(self, limiter):
+        """RateLimitExceededError from fallback should propagate to caller."""
+        tenant_id = "tenant-error-propagation"
+
+        # Use up all 5 requests in fallback mode
+        for _ in range(5):
+            await limiter.check_rate_limit(tenant_id)
+
+        # Verify we're using fallback
+        assert limiter._in_memory_fallback is not None
+
+        # 6th request should raise RateLimitExceededError (not swallowed)
+        with pytest.raises(RateLimitExceededError) as exc_info:
+            await limiter.check_rate_limit(tenant_id)
+
+        # Verify exception details
+        assert exc_info.value.tenant_id == tenant_id
+        assert exc_info.value.limit == 5
+        assert exc_info.value.window_seconds == 60
+        assert exc_info.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_multiple_tenants_in_fallback_mode(self, limiter):
+        """Multiple tenants should have independent limits in fallback mode."""
+        # Exhaust limit for tenant-1
+        for _ in range(5):
+            await limiter.check_rate_limit("tenant-1")
+
+        # tenant-1 should be blocked
+        with pytest.raises(RateLimitExceededError):
+            await limiter.check_rate_limit("tenant-1")
+
+        # But tenant-2 and tenant-3 should still have full quota
+        for _ in range(5):
+            await limiter.check_rate_limit("tenant-2")
+
+        for _ in range(5):
+            await limiter.check_rate_limit("tenant-3")
+
+        # All tenants should now be at limit
+        with pytest.raises(RateLimitExceededError):
+            await limiter.check_rate_limit("tenant-1")
+
+        with pytest.raises(RateLimitExceededError):
+            await limiter.check_rate_limit("tenant-2")
+
+        with pytest.raises(RateLimitExceededError):
+            await limiter.check_rate_limit("tenant-3")
+
+    @pytest.mark.asyncio
+    async def test_integration_redis_failure_enforces_limits(self):
+        """Integration test: Redis fails, fallback enforces limits, errors propagate."""
+        # Create config with fail-closed enabled
+        config = RateLimitConfig(
+            requests_per_window=3,
+            window_seconds=60,
+            enabled=True,
+            fail_closed=True,
+        )
+
+        # Create failing Redis client
+        redis = MockRedisClient(should_fail=True)
+        limiter = TenantRateLimiter(redis=redis, config=config)
+
+        tenant_id = "tenant-integration"
+
+        # Step 1: First 3 requests should succeed via fallback
+        for i in range(3):
+            await limiter.check_rate_limit(tenant_id)
+
+        # Step 2: Verify fallback is active
+        assert limiter._in_memory_fallback is not None
+        info = await limiter._in_memory_fallback.get_rate_limit_info(tenant_id)
+        assert info["current_requests"] == 3
+        assert info["remaining"] == 0
+
+        # Step 3: 4th request should raise RateLimitExceededError
+        with pytest.raises(RateLimitExceededError) as exc_info:
+            await limiter.check_rate_limit(tenant_id)
+
+        # Step 4: Verify error is NOT swallowed or allowed through
+        assert exc_info.value.tenant_id == tenant_id
+        assert exc_info.value.limit == 3
+        assert "Rate limit exceeded" in str(exc_info.value)
+
+        # Step 5: Verify subsequent requests also fail
+        with pytest.raises(RateLimitExceededError):
+            await limiter.check_rate_limit(tenant_id)
+
 
 # ============================================
 # Fail-Open Behavior Tests
