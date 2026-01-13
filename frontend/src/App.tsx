@@ -152,10 +152,10 @@ function Navigation({ onOpenSearch }: { onOpenSearch: () => void }) {
                   onClick={() => setMobileMenuOpen(false)}
                   data-testid={`mobile-nav-${item.label.toLowerCase()}`}
                   className={({ isActive }) =>
-                    `flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium transition-all ${
+                    `flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm font-medium transition-all border-b-2 ${
                       isActive
-                        ? 'bg-hpe-green/10 text-hpe-green'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                        ? 'bg-hpe-green/10 text-hpe-green border-hpe-green'
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-white border-transparent'
                     }`
                   }
                 >
