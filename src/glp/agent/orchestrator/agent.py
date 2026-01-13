@@ -258,17 +258,10 @@ class AgentOrchestrator:
             ChatEvent objects for streaming to client
         """
         turn = 0
-        sequence = 0
 
-        def next_event(event_type: ChatEventType, **kwargs) -> ChatEvent:
-            nonlocal sequence
-            sequence += 1
-            return ChatEvent(
-                type=event_type,
-                sequence=sequence,
-                correlation_id=context.session_id,
-                **kwargs,
-            )
+        # Initialize event streamer for this conversation turn
+        self.event_streamer.set_correlation_id(context.session_id)
+        self.event_streamer.reset()
 
         try:
             # Get or create conversation
@@ -330,7 +323,7 @@ class AgentOrchestrator:
                     # Forward events to client
                     if event.type == ChatEventType.TEXT_DELTA:
                         response_text += event.content or ""
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.TEXT_DELTA,
                             content=event.content,
                         )
@@ -339,7 +332,7 @@ class AgentOrchestrator:
                         thinking_text += event.content or ""
                         # Redact sensitive data before streaming to client
                         redacted_chunk = get_redactor().redact(event.content or "").summary
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.THINKING_DELTA,
                             content=redacted_chunk,
                         )
@@ -350,7 +343,7 @@ class AgentOrchestrator:
                             "name": event.tool_name,
                             "arguments": {},
                         }
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.TOOL_CALL_START,
                             tool_call_id=event.tool_call_id,
                             tool_name=event.tool_name,
@@ -366,7 +359,7 @@ class AgentOrchestrator:
                                     arguments=current_tool_call["arguments"],
                                 )
                             )
-                            yield next_event(
+                            yield self.event_streamer.create_event(
                                 ChatEventType.TOOL_CALL_END,
                                 tool_call_id=event.tool_call_id,
                                 tool_arguments=event.tool_arguments,
@@ -374,7 +367,7 @@ class AgentOrchestrator:
                             current_tool_call = None
 
                     elif event.type == ChatEventType.ERROR:
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.ERROR,
                             content=event.content,
                             error_type=event.error_type,
@@ -455,7 +448,7 @@ class AgentOrchestrator:
                                 self._pending_confirmations[conversation.id] = {}
                             self._pending_confirmations[conversation.id][operation_id] = confirmation_data
 
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.CONFIRMATION_REQUIRED,
                             tool_call_id=tc.id,
                             content=result.result.get("message"),
@@ -468,7 +461,7 @@ class AgentOrchestrator:
                         return
 
                     # Send tool result
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TOOL_RESULT,
                         tool_call_id=tc.id,
                         content=str(result.result)[:1000],  # Truncate for event
@@ -517,7 +510,7 @@ class AgentOrchestrator:
                 )
 
             # Done
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.DONE,
                 metadata={
                     "conversation_id": str(conversation.id),
@@ -527,7 +520,7 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.exception(f"Chat error: {e}")
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.ERROR,
                 content=f"An error occurred: {str(e)}",
                 error_type=ErrorType.FATAL,
@@ -551,17 +544,9 @@ class AgentOrchestrator:
         Yields:
             ChatEvent objects
         """
-        sequence = 0
-
-        def next_event(event_type: ChatEventType, **kwargs) -> ChatEvent:
-            nonlocal sequence
-            sequence += 1
-            return ChatEvent(
-                type=event_type,
-                sequence=sequence,
-                correlation_id=context.session_id,
-                **kwargs,
-            )
+        # Initialize event streamer for this confirmation
+        self.event_streamer.set_correlation_id(context.session_id)
+        self.event_streamer.reset()
 
         pending = None
 
@@ -604,7 +589,7 @@ class AgentOrchestrator:
             conv_confirmations = self._pending_confirmations.get(conversation_id, {})
 
             if not conv_confirmations:
-                yield next_event(
+                yield self.event_streamer.create_event(
                     ChatEventType.ERROR,
                     content="No pending operation to confirm",
                     error_type=ErrorType.RECOVERABLE,
@@ -620,7 +605,7 @@ class AgentOrchestrator:
                 pending = conv_confirmations.pop(first_op_id)
                 operation_id = pending.get("operation_id")
             else:
-                yield next_event(
+                yield self.event_streamer.create_event(
                     ChatEventType.ERROR,
                     content="No pending operation to confirm",
                     error_type=ErrorType.RECOVERABLE,
@@ -632,24 +617,24 @@ class AgentOrchestrator:
                 self._pending_confirmations.pop(conversation_id, None)
 
         if not pending:
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.ERROR,
                 content="No pending operation to confirm",
                 error_type=ErrorType.RECOVERABLE,
             )
             return
 
-        yield next_event(
+        yield self.event_streamer.create_event(
             ChatEventType.CONFIRMATION_RESPONSE,
             metadata={"confirmed": confirmed, "operation_id": operation_id},
         )
 
         if not confirmed:
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.TEXT_DELTA,
                 content="Operation cancelled.",
             )
-            yield next_event(ChatEventType.DONE)
+            yield self.event_streamer.create_event(ChatEventType.DONE)
             return
 
         # Execute the confirmed operation
@@ -674,7 +659,7 @@ class AgentOrchestrator:
                 )
 
                 if operation.error:
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.ERROR,
                         content=f"Operation failed: {operation.error}",
                         error_type=ErrorType.RECOVERABLE,
@@ -691,12 +676,12 @@ class AgentOrchestrator:
                             name=f"learn_failure:{tool_call.name}",
                         )
                 else:
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TOOL_RESULT,
                         tool_call_id=tool_call.id if tool_call else "unknown",
                         content=f"Operation completed successfully: {operation.result}",
                     )
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TEXT_DELTA,
                         content="Done! The operation completed successfully.",
                     )
@@ -714,13 +699,13 @@ class AgentOrchestrator:
 
             except Exception as e:
                 logger.exception(f"Confirmation execution failed: {e}")
-                yield next_event(
+                yield self.event_streamer.create_event(
                     ChatEventType.ERROR,
                     content=f"Failed to execute operation: {e}",
                     error_type=ErrorType.RECOVERABLE,
                 )
 
-        yield next_event(ChatEventType.DONE)
+        yield self.event_streamer.create_event(ChatEventType.DONE)
 
     async def cancel_chat(
         self,
