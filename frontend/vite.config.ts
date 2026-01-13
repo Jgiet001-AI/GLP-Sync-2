@@ -18,6 +18,7 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: env.VITE_API_URL || 'http://localhost:8000',
           changeOrigin: true,
+          ws: true,  // Enable WebSocket proxy for chat
         },
       },
     },

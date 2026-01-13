@@ -1,98 +1,137 @@
-# ============================================
-# HPE GreenLake Sync - Docker Compose
-# ============================================
-# 
+# =============================================================================
+# HPE GreenLake Sync - Docker Compose (Unified)
+# =============================================================================
+# Single configuration for development and production with security hardening.
+#
 # Usage:
-#   # Start everything (scheduler + database)
-#   docker compose up -d
+#   docker compose up -d              # Start all services
+#   docker compose logs -f            # View logs
+#   docker compose down               # Stop
+#   docker compose down -v            # Stop and remove data
 #
-#   # View logs
-#   docker compose logs -f scheduler
-#
-#   # One-time sync (instead of scheduled)
-#   docker compose run --rm scheduler python main.py --all
-#
-#   # Stop everything
-#   docker compose down
-#
-#   # Stop and remove data
-#   docker compose down -v
+# Manual commands:
+#   docker compose run --rm sync-once       # One-time sync
+#   docker compose run --rm check-expiring  # Show expiring subscriptions
+# =============================================================================
 
 services:
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   # PostgreSQL Database with pgvector
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   postgres:
     image: pgvector/pgvector:pg16
     container_name: glp-postgres
     restart: unless-stopped
+    # Note: postgres image handles user switching internally (root -> postgres)
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-glp}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-glp_secret}
       POSTGRES_DB: ${POSTGRES_DB:-greenlake}
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # Initial schema files (run on first init only)
+      # Schema files
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
       - ./db/subscriptions_schema.sql:/docker-entrypoint-initdb.d/02-subscriptions.sql:ro
-      # Migration files (run on first init only)
+      # Migration files
       - ./db/migrations/001_add_device_fields.sql:/docker-entrypoint-initdb.d/03-migration-001.sql:ro
       - ./db/migrations/002_schema_improvements.sql:/docker-entrypoint-initdb.d/04-migration-002.sql:ro
       - ./db/migrations/003_add_central_fields.sql:/docker-entrypoint-initdb.d/05-migration-003.sql:ro
       - ./db/migrations/004_agent_chatbot.sql:/docker-entrypoint-initdb.d/06-migration-004.sql:ro
       - ./db/migrations/005_agent_messages_rls.sql:/docker-entrypoint-initdb.d/07-migration-005.sql:ro
       - ./db/migrations/006_agentdb_memory_patterns.sql:/docker-entrypoint-initdb.d/08-migration-006.sql:ro
-      # Additional migrations
       - ./db/aruba_central_migration.sql:/docker-entrypoint-initdb.d/09-aruba-central.sql:ro
       - ./db/clients_migration.sql:/docker-entrypoint-initdb.d/10-clients.sql:ro
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-glp} -d ${POSTGRES_DB:-greenlake}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+      - FOWNER
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    networks:
+      - glp-internal
 
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   # Redis (WebSocket Ticket Auth)
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: glp-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    user: "999:999"
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-redis_secret}
     volumes:
       - redis_data:/data
-    ports:
-      - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_secret}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=50M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+    networks:
+      - glp-internal
 
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   # GLP Sync Scheduler
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   scheduler:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: glp-scheduler
     restart: unless-stopped
+    user: "1000:1000"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # GreenLake API credentials (required)
+      # GreenLake API
       GLP_CLIENT_ID: ${GLP_CLIENT_ID}
       GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
       GLP_TOKEN_URL: ${GLP_TOKEN_URL}
       GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
-      
-      # Database connection
+      # Aruba Central (optional)
+      ARUBA_CLIENT_ID: ${ARUBA_CLIENT_ID:-}
+      ARUBA_CLIENT_SECRET: ${ARUBA_CLIENT_SECRET:-}
+      ARUBA_TOKEN_URL: ${ARUBA_TOKEN_URL:-}
+      ARUBA_BASE_URL: ${ARUBA_BASE_URL:-}
+      # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
-      
       # Scheduler settings
       SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-60}
       SYNC_DEVICES: ${SYNC_DEVICES:-true}
@@ -102,66 +141,80 @@ services:
       SYNC_RETRY_DELAY_MINUTES: ${SYNC_RETRY_DELAY_MINUTES:-5}
       HEALTH_CHECK_PORT: 8080
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
       interval: 30s
       timeout: 10s
       start_period: 10s
       retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    networks:
+      - glp-internal
 
-  # ----------------------------------------
-  # FastAPI Server (Dashboard & Assignment APIs)
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
+  # FastAPI Server (Dashboard, Assignment, Agent APIs)
+  # --------------------------------------------------------------------------
   api-server:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: glp-api-server
     restart: unless-stopped
+    user: "1000:1000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      # Redis (WebSocket ticket auth)
-      REDIS_URL: redis://redis:6379/0
-
-      # GreenLake API credentials
+      # Redis
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379/0
+      # GreenLake API
       GLP_CLIENT_ID: ${GLP_CLIENT_ID}
       GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
       GLP_TOKEN_URL: ${GLP_TOKEN_URL}
       GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
-
       # Aruba Central (optional)
       ARUBA_CLIENT_ID: ${ARUBA_CLIENT_ID:-}
       ARUBA_CLIENT_SECRET: ${ARUBA_CLIENT_SECRET:-}
       ARUBA_TOKEN_URL: ${ARUBA_TOKEN_URL:-}
       ARUBA_BASE_URL: ${ARUBA_BASE_URL:-}
-
-      # Database connection
+      # Database
       DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
-
-      # API Security (REQUIRED for production)
-      API_KEY: ${API_KEY}
+      # API Security
+      API_KEY: ${API_KEY:-}
       DISABLE_AUTH: ${DISABLE_AUTH:-false}
-
-      # JWT Authentication (for Agent API)
+      # JWT Authentication (Agent API)
       JWT_SECRET: ${JWT_SECRET:-}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
-
-      # AI Model Configuration (optional)
+      # AI Providers (optional)
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
-
-      # CORS (for production, set specific origins)
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-}
+      # CORS
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     command: ["python", "-m", "uvicorn", "src.glp.assignment.app:app", "--host", "0.0.0.0", "--port", "8000"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -169,100 +222,27 @@ services:
       timeout: 10s
       start_period: 10s
       retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    networks:
+      - glp-internal
 
-  # ----------------------------------------
-  # One-Time Sync (manual trigger)
-  # ----------------------------------------
-  # Usage: docker compose run --rm sync-once
-  sync-once:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    profiles: ["manual"]  # Only runs when explicitly called
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
-      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
-      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
-      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
-      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
-    command: ["python", "main.py", "--all"]
-
-  # ----------------------------------------
-  # Expiring Subscriptions Report
-  # ----------------------------------------
-  # Usage: docker compose run --rm check-expiring
-  check-expiring:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    profiles: ["manual"]
-    environment:
-      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
-      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
-      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
-      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
-    command: ["python", "main.py", "--expiring-days", "90"]
-
-  # ----------------------------------------
-  # MCP Server (FastMCP)
-  # ----------------------------------------
-  # Provides read-only database access for AI assistants
-  # Usage: docker compose up mcp-server
-  #
-  # HTTP mode (recommended for remote access):
-  #   docker compose up mcp-server
-  #   Connect clients to http://localhost:8010
-  #
-  # stdio mode (for local Claude Desktop):
-  #   docker compose run --rm mcp-stdio
-  mcp-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: glp-mcp-server
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
-      # Connection pool tuning
-      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
-      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-10}
-    ports:
-      - "${MCP_PORT:-8010}:8000"
-    command: ["python", "server.py", "--transport", "http", "--port", "8000"]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 30s
-      timeout: 10s
-      start_period: 10s
-      retries: 3
-
-  # MCP Server (stdio mode for Claude Desktop)
-  # Usage: docker compose run --rm mcp-stdio
-  mcp-stdio:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    profiles: ["manual"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
-      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
-      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-5}
-    stdin_open: true
-    tty: true
-    command: ["python", "server.py"]
-
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   # Frontend (React + Nginx)
-  # ----------------------------------------
+  # --------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
@@ -273,40 +253,196 @@ services:
     restart: unless-stopped
     depends_on:
       - api-server
+    environment:
+      API_KEY: ${API_KEY:-}
     ports:
-      - "${FRONTEND_PORT:-80}:8080"
+      - "127.0.0.1:${FRONTEND_PORT:-80}:8080"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       start_period: 10s
       retries: 3
+    security_opt:
+      - no-new-privileges:true
+    # Note: read_only disabled - nginx needs to write config for envsubst
+    tmpfs:
+      - /tmp:mode=1777,size=50M
+      - /var/cache/nginx:mode=1777,size=50M
+      - /var/run:mode=1777,size=10M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    networks:
+      - glp-internal
 
+  # --------------------------------------------------------------------------
+  # MCP Server (FastMCP) - For AI Assistants
+  # --------------------------------------------------------------------------
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: glp-mcp-server
+    restart: unless-stopped
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
+      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-10}
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8010}:8000"
+    command: ["python", "server.py", "--transport", "http", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # One-Time Sync (manual trigger)
+  # Usage: docker compose run --rm sync-once
+  # --------------------------------------------------------------------------
+  sync-once:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+      ARUBA_CLIENT_ID: ${ARUBA_CLIENT_ID:-}
+      ARUBA_CLIENT_SECRET: ${ARUBA_CLIENT_SECRET:-}
+      ARUBA_TOKEN_URL: ${ARUBA_TOKEN_URL:-}
+      ARUBA_BASE_URL: ${ARUBA_BASE_URL:-}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+    command: ["python", "main.py", "--all"]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # Expiring Subscriptions Report (manual trigger)
+  # Usage: docker compose run --rm check-expiring
+  # --------------------------------------------------------------------------
+  check-expiring:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]
+    user: "1000:1000"
+    environment:
+      GLP_CLIENT_ID: ${GLP_CLIENT_ID}
+      GLP_CLIENT_SECRET: ${GLP_CLIENT_SECRET}
+      GLP_TOKEN_URL: ${GLP_TOKEN_URL}
+      GLP_BASE_URL: ${GLP_BASE_URL:-https://global.api.greenlake.hpe.com}
+    command: ["python", "main.py", "--expiring-days", "90"]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=100M
+    cap_drop:
+      - ALL
+    networks:
+      - glp-internal
+
+  # --------------------------------------------------------------------------
+  # MCP Server (stdio mode for Claude Desktop)
+  # Usage: docker compose run --rm mcp-stdio
+  # --------------------------------------------------------------------------
+  mcp-stdio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["manual"]
+    user: "1000:1000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-glp}:${POSTGRES_PASSWORD:-glp_secret}@postgres:5432/${POSTGRES_DB:-greenlake}
+      DB_POOL_MIN: ${MCP_DB_POOL_MIN:-2}
+      DB_POOL_MAX: ${MCP_DB_POOL_MAX:-5}
+    stdin_open: true
+    tty: true
+    command: ["python", "server.py"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - glp-internal
+
+# -----------------------------------------------------------------------------
+# Networks
+# -----------------------------------------------------------------------------
+networks:
+  glp-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# -----------------------------------------------------------------------------
+# Volumes
+# -----------------------------------------------------------------------------
 volumes:
   postgres_data:
     driver: local
   redis_data:
     driver: local
 
-# ============================================
-# Environment File (.env) - Production
-# ============================================
-# REQUIRED for production:
+# =============================================================================
+# Quick Start:
+#   1. Run ./setup.sh to create .env file
+#   2. docker compose up -d
+#   3. Open http://localhost in browser
 #
-# # GreenLake API
-# GLP_CLIENT_ID=your_client_id
-# GLP_CLIENT_SECRET=your_client_secret
-# GLP_TOKEN_URL=https://sso.common.cloud.hpe.com/as/token.oauth2
-#
-# # API Security (REQUIRED)
-# API_KEY=your_secure_api_key_here
-# DISABLE_AUTH=false
-#
-# # Database
-# POSTGRES_PASSWORD=your_secure_password
-#
-# OPTIONAL:
-# SYNC_INTERVAL_MINUTES=60
-# CORS_ORIGINS=https://your-domain.com
-# ANTHROPIC_API_KEY=your_key (for chatbot)
-# JWT_SECRET=your_jwt_secret (for agent API)
+# Services:
+#   - Frontend:    http://localhost:80
+#   - API Server:  http://localhost:8000
+#   - Scheduler:   http://localhost:8080 (health check)
+#   - MCP Server:  http://localhost:8010
+#   - PostgreSQL:  localhost:5432
+# =============================================================================

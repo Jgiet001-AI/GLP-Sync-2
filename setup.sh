@@ -58,25 +58,30 @@ prompt_with_default() {
     local default="$2"
     local var_name="$3"
     local is_secret="$4"
-    
-    if [ -n "$default" ]; then
-        echo -ne "${CYAN}$prompt${NC} [${YELLOW}$default${NC}]: "
-    else
-        echo -ne "${CYAN}$prompt${NC}: "
-    fi
-    
+
     if [ "$is_secret" = "true" ]; then
+        # For secrets, show (hidden) and mask the default
+        if [ -n "$default" ]; then
+            echo -ne "${CYAN}$prompt${NC} (hidden, Enter for default): "
+        else
+            echo -ne "${CYAN}$prompt${NC} (hidden): "
+        fi
         read -s value
         echo ""  # New line after hidden input
     else
+        if [ -n "$default" ]; then
+            echo -ne "${CYAN}$prompt${NC} [${YELLOW}$default${NC}]: "
+        else
+            echo -ne "${CYAN}$prompt${NC}: "
+        fi
         read value
     fi
-    
+
     # Use default if empty
     if [ -z "$value" ]; then
         value="$default"
     fi
-    
+
     eval "$var_name='$value'"
 }
 
@@ -86,22 +91,22 @@ prompt_required() {
     local var_name="$2"
     local is_secret="$3"
     local value=""
-    
+
     while [ -z "$value" ]; do
-        echo -ne "${CYAN}$prompt${NC}: "
-        
         if [ "$is_secret" = "true" ]; then
+            echo -ne "${CYAN}$prompt${NC} (hidden): "
             read -s value
-            echo ""
+            echo ""  # New line after hidden input
         else
+            echo -ne "${CYAN}$prompt${NC}: "
             read value
         fi
-        
+
         if [ -z "$value" ]; then
             print_error "This field is required. Please enter a value."
         fi
     done
-    
+
     eval "$var_name='$value'"
 }
 
@@ -187,25 +192,28 @@ case $aruba_choice in
         echo -e "${BOLD}Select your Aruba Central Region:${NC}"
         echo ""
         echo "  ${CYAN}Americas:${NC}"
-        echo "    1) US-1         (https://us1.api.central.arubanetworks.com)"
-        echo "    2) US-2         (https://us2.api.central.arubanetworks.com)"
-        echo "    3) US-West-4    (https://us4.api.central.arubanetworks.com)"
-        echo "    4) US-West-5    (https://us5.api.central.arubanetworks.com)"
-        echo "    5) US-East-1    (https://us6.api.central.arubanetworks.com)"
-        echo "    6) Canada-1     (https://cn1.api.central.arubanetworks.com)"
+        echo "    1) US-1 (prod)            https://us1.api.central.arubanetworks.com"
+        echo "    2) US-2 (central-prod2)   https://us2.api.central.arubanetworks.com"
+        echo "    3) US-West-4 (uswest4)    https://us4.api.central.arubanetworks.com"
+        echo "    4) US-West-5 (uswest5)    https://us5.api.central.arubanetworks.com"
+        echo "    5) US-East-1 (us-east-1)  https://us6.api.central.arubanetworks.com"
+        echo "    6) Canada-1 (starman)     https://ca1.api.central.arubanetworks.com"
         echo ""
         echo "  ${CYAN}Europe:${NC}"
-        echo "    7) EU-1         (https://ge1.api.central.arubanetworks.com)"
-        echo "    8) EU-Central-2 (https://ge2.api.central.arubanetworks.com)"
-        echo "    9) EU-Central-3 (https://ge3.api.central.arubanetworks.com)"
+        echo "    7) EU-1 (eu)              https://de1.api.central.arubanetworks.com"
+        echo "    8) EU-Central-2 (eucentral2) https://de2.api.central.arubanetworks.com"
+        echo "    9) EU-Central-3 (eucentral3) https://de3.api.central.arubanetworks.com"
         echo ""
         echo "  ${CYAN}Asia Pacific:${NC}"
-        echo "   10) APAC-1       (https://in.api.central.arubanetworks.com)"
-        echo "   11) APAC-East-1  (https://jp1.api.central.arubanetworks.com)"
-        echo "   12) APAC-South-1 (https://au1.api.central.arubanetworks.com)"
+        echo "   10) APAC-1 (apac)          https://in.api.central.arubanetworks.com"
+        echo "   11) APAC-East-1 (apaceast) https://jp1.api.central.arubanetworks.com"
+        echo "   12) APAC-South-1 (apacsouth) https://au1.api.central.arubanetworks.com"
+        echo ""
+        echo "  ${CYAN}Internal:${NC}"
+        echo "   13) Internal               https://internal.api.central.arubanetworks.com"
         echo ""
 
-        echo -ne "${CYAN}Select region (1-12)${NC} [${YELLOW}2${NC}]: "
+        echo -ne "${CYAN}Select region (1-13)${NC} [${YELLOW}2${NC}]: "
         read region_choice
 
         # Default to US-2
@@ -214,19 +222,20 @@ case $aruba_choice in
         fi
 
         case $region_choice in
-            1)  ARUBA_BASE_URL="https://us1.api.central.arubanetworks.com"; ARUBA_REGION="US-1" ;;
-            2)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2" ;;
-            3)  ARUBA_BASE_URL="https://us4.api.central.arubanetworks.com"; ARUBA_REGION="US-West-4" ;;
-            4)  ARUBA_BASE_URL="https://us5.api.central.arubanetworks.com"; ARUBA_REGION="US-West-5" ;;
-            5)  ARUBA_BASE_URL="https://us6.api.central.arubanetworks.com"; ARUBA_REGION="US-East-1" ;;
-            6)  ARUBA_BASE_URL="https://cn1.api.central.arubanetworks.com"; ARUBA_REGION="Canada-1" ;;
-            7)  ARUBA_BASE_URL="https://ge1.api.central.arubanetworks.com"; ARUBA_REGION="EU-1" ;;
-            8)  ARUBA_BASE_URL="https://ge2.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-2" ;;
-            9)  ARUBA_BASE_URL="https://ge3.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-3" ;;
-            10) ARUBA_BASE_URL="https://in.api.central.arubanetworks.com"; ARUBA_REGION="APAC-1" ;;
-            11) ARUBA_BASE_URL="https://jp1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-East-1" ;;
-            12) ARUBA_BASE_URL="https://au1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-South-1" ;;
-            *)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2" ;;
+            1)  ARUBA_BASE_URL="https://us1.api.central.arubanetworks.com"; ARUBA_REGION="US-1 (prod)" ;;
+            2)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2 (central-prod2)" ;;
+            3)  ARUBA_BASE_URL="https://us4.api.central.arubanetworks.com"; ARUBA_REGION="US-West-4 (uswest4)" ;;
+            4)  ARUBA_BASE_URL="https://us5.api.central.arubanetworks.com"; ARUBA_REGION="US-West-5 (uswest5)" ;;
+            5)  ARUBA_BASE_URL="https://us6.api.central.arubanetworks.com"; ARUBA_REGION="US-East-1 (us-east-1)" ;;
+            6)  ARUBA_BASE_URL="https://ca1.api.central.arubanetworks.com"; ARUBA_REGION="Canada-1 (starman)" ;;
+            7)  ARUBA_BASE_URL="https://de1.api.central.arubanetworks.com"; ARUBA_REGION="EU-1 (eu)" ;;
+            8)  ARUBA_BASE_URL="https://de2.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-2 (eucentral2)" ;;
+            9)  ARUBA_BASE_URL="https://de3.api.central.arubanetworks.com"; ARUBA_REGION="EU-Central-3 (eucentral3)" ;;
+            10) ARUBA_BASE_URL="https://in.api.central.arubanetworks.com"; ARUBA_REGION="APAC-1 (apac)" ;;
+            11) ARUBA_BASE_URL="https://jp1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-East-1 (apaceast)" ;;
+            12) ARUBA_BASE_URL="https://au1.api.central.arubanetworks.com"; ARUBA_REGION="APAC-South-1 (apacsouth)" ;;
+            13) ARUBA_BASE_URL="https://internal.api.central.arubanetworks.com"; ARUBA_REGION="Internal (internal)" ;;
+            *)  ARUBA_BASE_URL="https://us2.api.central.arubanetworks.com"; ARUBA_REGION="US-2 (central-prod2)" ;;
         esac
 
         echo ""
@@ -526,59 +535,11 @@ print_success ".env file created"
 # Note: API_KEY is now injected by nginx proxy, not bundled in frontend
 # No need to create frontend/.env with VITE_API_KEY (security improvement)
 
-# ============================================
-# Deployment Mode Selection
-# ============================================
-print_header "Step 7b: Deployment Mode"
-
-echo "Select deployment mode:"
-echo ""
-echo "  1) Development mode - Build images locally"
-echo "  2) Production mode - Use pre-built Docker Hub images (jgiet001/glp-sync)"
-echo ""
-
-echo -ne "${CYAN}Select mode (1-2)${NC} [${YELLOW}1${NC}]: "
-read deploy_mode
-
-# Default to development
-if [ -z "$deploy_mode" ]; then
-    deploy_mode="1"
-fi
-
-DEPLOY_MODE="development"
-DOCKERHUB_USERNAME="jgiet001"
-IMAGE_TAG="latest"
-
-case $deploy_mode in
-    2)
-        DEPLOY_MODE="production"
-        echo ""
-        prompt_with_default "Docker Hub username" "jgiet001" DOCKERHUB_USERNAME
-        prompt_with_default "Image tag" "latest" IMAGE_TAG
-        print_success "Production mode: Using Docker Hub images"
-        ;;
-    1|*)
-        DEPLOY_MODE="development"
-        print_success "Development mode: Building images locally"
-        ;;
-esac
-
-# Add Docker Hub vars to .env if production mode
-if [ "$DEPLOY_MODE" = "production" ]; then
-    cat >> .env << EOF
-
-# Docker Hub Configuration (Production)
-DOCKERHUB_USERNAME=$DOCKERHUB_USERNAME
-IMAGE_TAG=$IMAGE_TAG
-EOF
-fi
-
-echo ""
 
 # ============================================
 # Redis Password
 # ============================================
-print_header "Step 7c: Redis Configuration"
+print_header "Step 7b: Redis Configuration"
 
 echo "Configure Redis password for WebSocket authentication."
 echo ""
@@ -600,21 +561,12 @@ echo ""
 # ============================================
 print_header "Step 8: Building & Starting Containers"
 
-if [ "$DEPLOY_MODE" = "production" ]; then
-    print_step "Pulling Docker images from Docker Hub..."
-    docker compose -f docker-compose.prod.yml pull
+print_step "Building Docker images..."
+docker compose build
 
-    echo ""
-    print_step "Starting containers (production mode)..."
-    docker compose -f docker-compose.prod.yml up -d
-else
-    print_step "Building Docker images locally..."
-    docker compose build
-
-    echo ""
-    print_step "Starting containers (development mode)..."
-    docker compose up -d
-fi
+echo ""
+print_step "Starting containers..."
+docker compose up -d
 
 echo ""
 print_success "Containers started!"
@@ -647,18 +599,13 @@ fi
 echo ""
 
 echo -e "${BOLD}Useful Commands:${NC}"
-if [ "$DEPLOY_MODE" = "production" ]; then
-    echo "  View logs:              docker compose -f docker-compose.prod.yml logs -f scheduler"
-    echo "  Check health:           curl http://localhost:8080/"
-    echo "  Stop services:          docker compose -f docker-compose.prod.yml down"
-    echo "  Restart:                docker compose -f docker-compose.prod.yml up -d"
-else
-    echo "  View logs:              docker compose logs -f scheduler"
-    echo "  Check health:           curl http://localhost:8080/"
-    echo "  Stop services:          docker compose down"
-    echo "  Manual sync:            docker compose run --rm sync-once"
-    echo "  Check expiring subs:    docker compose run --rm check-expiring"
-fi
+echo "  View logs:              docker compose logs -f"
+echo "  View scheduler logs:    docker compose logs -f scheduler"
+echo "  Check health:           curl http://localhost:8080/"
+echo "  Stop services:          docker compose down"
+echo "  Restart:                docker compose up -d"
+echo "  Manual sync:            docker compose run --rm sync-once"
+echo "  Check expiring subs:    docker compose run --rm check-expiring"
 echo ""
 
 echo -e "${BOLD}Web UI:${NC}"
@@ -674,8 +621,4 @@ echo ""
 echo -e "${YELLOW}Showing scheduler logs (Ctrl+C to exit)...${NC}"
 echo ""
 sleep 2
-if [ "$DEPLOY_MODE" = "production" ]; then
-    docker compose -f docker-compose.prod.yml logs -f scheduler
-else
-    docker compose logs -f scheduler
-fi
+docker compose logs -f scheduler

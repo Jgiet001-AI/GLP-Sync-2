@@ -9,8 +9,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import jwt
 import pytest
-from jose import jwt
 
 from src.glp.agent.api.auth import (
     AuthenticationError,

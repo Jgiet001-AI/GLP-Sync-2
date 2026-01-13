@@ -58,7 +58,7 @@ class OpenAIProvider(BaseLLMProvider):
     """
 
     # Default models
-    DEFAULT_MODEL = "gpt-5-nano-2025-08-07"
+    DEFAULT_MODEL = "gpt-4o"  # Secondary/fallback when Anthropic unavailable
     DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large"
 
     # Embedding dimensions by model

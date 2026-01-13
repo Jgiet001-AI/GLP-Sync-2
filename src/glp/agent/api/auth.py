@@ -26,8 +26,9 @@ import logging
 import os
 from typing import Optional, Union
 
+import jwt
 from fastapi import Depends, Header, HTTPException, status
-from jose import JWTError, jwt
+from jwt.exceptions import InvalidTokenError
 from pydantic import BaseModel
 
 from ..domain.entities import UserContext
@@ -150,8 +151,7 @@ def _validate_token(token: str) -> TokenPayload:
         "verify_exp": True,
         "verify_nbf": True,
         "verify_iat": True,
-        "require_exp": True,
-        "leeway": JWTConfig.CLOCK_SKEW_SECONDS,
+        "require": ["exp"],
     }
 
     # Add issuer/audience verification if configured
@@ -168,14 +168,21 @@ def _validate_token(token: str) -> TokenPayload:
             options=options,
             issuer=JWTConfig.ISSUER,
             audience=JWTConfig.AUDIENCE,
+            leeway=JWTConfig.CLOCK_SKEW_SECONDS,
         )
     except jwt.ExpiredSignatureError:
         logger.warning("JWT expired")
         raise AuthenticationError("Token has expired")
-    except jwt.JWTClaimsError as e:
-        logger.warning(f"JWT claims error: {e}")
+    except jwt.ImmatureSignatureError as e:
+        logger.warning(f"JWT not yet valid: {e}")
+        raise AuthenticationError(f"Token not yet valid: {e}")
+    except jwt.InvalidAudienceError as e:
+        logger.warning(f"JWT audience error: {e}")
         raise AuthenticationError(f"Invalid token claims: {e}")
-    except JWTError as e:
+    except jwt.InvalidIssuerError as e:
+        logger.warning(f"JWT issuer error: {e}")
+        raise AuthenticationError(f"Invalid token claims: {e}")
+    except InvalidTokenError as e:
         logger.warning(f"JWT validation failed: {e}")
         raise AuthenticationError("Invalid token")
 

@@ -33,12 +33,15 @@ try:
     from ..agent.api import router as agent_router
     from ..agent.providers.base import LLMProviderConfig
     from ..agent.security import TicketAuth
+    from ..agent.tools.mcp_client import MCPClient, MCPClientConfig
     AGENT_AVAILABLE = True
 except ImportError:
     AGENT_AVAILABLE = False
     agent_router = None
     create_agent_dependencies = None
     TicketAuth = None
+    MCPClient = None
+    MCPClientConfig = None
 
 # Redis client (for WebSocket ticket auth)
 _redis_client = None
@@ -99,15 +102,41 @@ def _init_agent_orchestrator(redis_client=None) -> None:
         logger.warning("No LLM provider could be initialized - chatbot will be unavailable")
         return
 
-    try:
-        # Create tool registry (empty for now - can add MCP/WriteExecutor later)
-        tool_registry = ToolRegistry()
+    # Create OpenAI embedding provider (needed for semantic memory even with Anthropic chat)
+    embedding_provider = None
+    if openai_key:
+        try:
+            embedding_config = LLMProviderConfig(
+                api_key=openai_key,
+                model="gpt-4o",  # Not used for embeddings
+                embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
+            )
+            embedding_provider = OpenAIProvider(embedding_config)
+            logger.info(f"Embedding provider configured: {embedding_config.embedding_model}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize embedding provider: {e}")
 
-        # Create orchestrator
+    try:
+        # Create MCP client for read-only database operations
+        mcp_client = None
+        mcp_server_url = os.getenv("MCP_SERVER_URL", "http://mcp-server:8000")
+        if MCPClient and MCPClientConfig:
+            try:
+                mcp_config = MCPClientConfig(base_url=mcp_server_url)
+                mcp_client = MCPClient(mcp_config)
+                logger.info(f"MCP client configured for: {mcp_server_url}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize MCP client: {e}")
+
+        # Create tool registry with MCP client for database queries
+        tool_registry = ToolRegistry(mcp_client=mcp_client)
+
+        # Create orchestrator with embedding provider for semantic memory
         orchestrator = AgentOrchestrator(
             llm_provider=llm_provider,
             tool_registry=tool_registry,
             config=AgentConfig(),
+            # embedding_provider is passed to memory store inside orchestrator if needed
         )
 
         # Initialize ticket auth if Redis is available

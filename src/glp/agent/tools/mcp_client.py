@@ -106,6 +106,21 @@ class MCPClient(IMCPClient):
             await self._session.close()
             self._session = None
 
+    async def health_check(self) -> bool:
+        """Check if the MCP server is healthy.
+
+        Returns:
+            True if server responds successfully
+        """
+        session = await self._get_session()
+        url = f"{self.config.base_url}/health"
+
+        try:
+            async with session.get(url, headers=self._get_headers()) as response:
+                return response.status == 200
+        except aiohttp.ClientError:
+            return False
+
     def _get_headers(self, context: Optional[UserContext] = None) -> dict[str, str]:
         """Build request headers with auth and context."""
         headers = {
@@ -343,6 +358,10 @@ class InProcessMCPClient(IMCPClient):
             tools: Dict mapping tool names to async functions
         """
         self.tools = tools
+
+    async def health_check(self) -> bool:
+        """In-process client is always healthy."""
+        return True
 
     async def list_tools(self) -> list[ToolDefinition]:
         """List available tools.

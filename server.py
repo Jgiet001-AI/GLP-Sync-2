@@ -29,10 +29,14 @@ load_dotenv()
 # Database Connection Pool (Lifespan)
 # =============================================================================
 
+# Global pool reference for REST API access
+_DB_POOL: asyncpg.Pool | None = None
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
     """Initialize and cleanup database connection pool."""
+    global _DB_POOL
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
@@ -46,9 +50,11 @@ async def lifespan(server: FastMCP):
         # Connection health and timeout settings
         max_inactive_connection_lifetime=300,  # Close idle connections after 5 min
     )
+    _DB_POOL = pool  # Store globally for REST API access
     try:
         yield {"db_pool": pool}
     finally:
+        _DB_POOL = None
         await pool.close()
 
 
@@ -80,6 +86,110 @@ async def health_check(request: Request) -> JSONResponse:
         "service": "greenlake-mcp",
         "tools": 27,
     })
+
+
+# =============================================================================
+# REST API Endpoints for Agent Chatbot
+# =============================================================================
+
+
+# Registry of all tools for REST API (populated dynamically from FastMCP)
+_TOOL_REGISTRY: dict[str, dict] = {}
+_TOOLS_INITIALIZED = False
+
+
+def _init_tool_registry():
+    """Initialize tool registry from FastMCP tools."""
+    global _TOOLS_INITIALIZED
+    if _TOOLS_INITIALIZED:
+        return
+
+    # Get tools from FastMCP's internal registry
+    # FastMCP stores tools in _tool_manager._tools dict
+    if hasattr(mcp, "_tool_manager") and hasattr(mcp._tool_manager, "_tools"):
+        for name, tool in mcp._tool_manager._tools.items():
+            # Convert annotations to dict if it's an object
+            annotations = {"readOnlyHint": True}
+            if hasattr(tool, "annotations") and tool.annotations:
+                if hasattr(tool.annotations, "__dict__"):
+                    annotations = {k: v for k, v in tool.annotations.__dict__.items() if not k.startswith("_")}
+                elif isinstance(tool.annotations, dict):
+                    annotations = tool.annotations
+
+            _TOOL_REGISTRY[name] = {
+                "name": name,
+                "description": tool.description or "",
+                "func": tool.fn,
+                "inputSchema": tool.parameters if hasattr(tool, "parameters") else {},
+                "annotations": annotations,
+            }
+    _TOOLS_INITIALIZED = True
+
+
+@mcp.custom_route("/mcp/v1/tools/list", methods=["POST"])
+async def rest_list_tools(request: Request) -> JSONResponse:
+    """REST endpoint to list all available tools."""
+    _init_tool_registry()
+    tools = [
+        {
+            "name": t["name"],
+            "description": t["description"],
+            "inputSchema": t["inputSchema"],
+            "annotations": t["annotations"],
+        }
+        for t in _TOOL_REGISTRY.values()
+    ]
+    return JSONResponse({"tools": tools})
+
+
+@mcp.custom_route("/mcp/v1/tools/call", methods=["POST"])
+async def rest_call_tool(request: Request) -> JSONResponse:
+    """REST endpoint to call a tool by name."""
+    _init_tool_registry()
+    try:
+        body = await request.json()
+        tool_name = body.get("name")
+        arguments = body.get("arguments", {})
+
+        if not tool_name:
+            return JSONResponse({"error": "Tool name required"}, status_code=400)
+
+        if tool_name not in _TOOL_REGISTRY:
+            return JSONResponse({"error": f"Tool not found: {tool_name}"}, status_code=404)
+
+        tool = _TOOL_REGISTRY[tool_name]
+        func = tool["func"]
+
+        # Use global database pool
+        pool = _DB_POOL
+
+        # Create a mock context for tools that need it
+        class MockContext:
+            def __init__(self, db_pool):
+                self._pool = db_pool
+                self.request_context = type("RC", (), {"lifespan_context": {"db_pool": db_pool}})()
+
+        ctx = MockContext(pool) if pool else None
+
+        # Call the tool function
+        if "ctx" in func.__code__.co_varnames[:func.__code__.co_argcount]:
+            result = await func(ctx=ctx, **arguments)
+        else:
+            result = await func(**arguments)
+
+        # Format result as MCP content
+        import json
+        if isinstance(result, (dict, list)):
+            text = json.dumps(result)
+        else:
+            text = str(result)
+
+        return JSONResponse({
+            "content": [{"type": "text", "text": text}]
+        })
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # =============================================================================

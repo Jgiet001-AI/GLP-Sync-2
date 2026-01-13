@@ -134,6 +134,30 @@ class AnthropicProvider(BaseLLMProvider):
                         }
                     ],
                 })
+            elif msg.role == MessageRole.ASSISTANT:
+                # Assistant messages with tool calls need special formatting
+                if msg.tool_calls:
+                    content_blocks = []
+                    # Add text content if present
+                    if msg.content:
+                        content_blocks.append({"type": "text", "text": msg.content})
+                    # Add tool_use blocks
+                    for tc in msg.tool_calls:
+                        content_blocks.append({
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        })
+                    api_messages.append({
+                        "role": "assistant",
+                        "content": content_blocks,
+                    })
+                else:
+                    api_messages.append({
+                        "role": "assistant",
+                        "content": msg.content,
+                    })
             else:
                 api_messages.append({
                     "role": msg.role.value,
@@ -179,19 +203,26 @@ class AnthropicProvider(BaseLLMProvider):
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "messages": api_messages,
-            "max_tokens": max_tokens or self.config.max_tokens,
-            "temperature": temperature,
         }
+
+        # Extended thinking requires complex message handling for tool results
+        # Disable for now until proper thinking block propagation is implemented
+        # TODO: Implement proper thinking support with message history
+        # if self._supports_thinking:
+        #     thinking_budget = 8000
+        #     kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        #     kwargs["temperature"] = 1  # Required for extended thinking
+        #     # max_tokens must be greater than thinking budget
+        #     kwargs["max_tokens"] = max(thinking_budget + 4096, max_tokens or 0)
+        # else:
+        kwargs["temperature"] = temperature
+        kwargs["max_tokens"] = max_tokens or self.config.max_tokens
 
         if system:
             kwargs["system"] = system
 
         if tools:
             kwargs["tools"] = self._format_tools_for_api(tools)
-
-        # Enable extended thinking for supported models
-        if self._supports_thinking:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 1024}
 
         try:
             async with self.client.messages.stream(**kwargs) as stream_response:
