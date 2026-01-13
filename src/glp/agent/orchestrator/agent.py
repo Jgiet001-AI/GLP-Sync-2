@@ -180,8 +180,63 @@ class AgentOrchestrator:
         self.agentdb = agentdb
         self.config = config or AgentConfig()
 
+        # Initialize focused manager modules
+        from .conversation_manager import ConversationManager
+        from .memory_manager import MemoryManager
+        from .pattern_manager import PatternManager
+        from .tool_executor import ToolExecutor
+        from .event_streamer import EventStreamer
+        from .confirmation_manager import ConfirmationManager
+        from .prompt_builder import PromptBuilder
+
+        # Conversation lifecycle management
+        self.conversation_manager = ConversationManager(
+            conversation_store=conversation_store,
+        )
+
+        # Semantic memory and fact extraction
+        self.memory_manager = MemoryManager(
+            memory_store=memory_store,
+            fact_extractor=fact_extractor,
+            search_limit=self.config.memory_search_limit,
+            min_confidence=self.config.memory_min_confidence,
+            enable_search=self.config.enable_memory_search,
+            enable_extraction=self.config.enable_fact_extraction,
+        )
+
+        # Pattern learning and matching
+        self.pattern_manager = PatternManager(
+            agentdb=agentdb,
+            match_limit=self.config.memory_search_limit,  # Reuse same limit
+            min_confidence=self.config.pattern_min_confidence,
+            enable_learning=self.config.enable_pattern_learning,
+            enable_matching=self.config.enable_pattern_matching,
+        )
+
+        # Tool execution with error handling
+        self.tool_executor = ToolExecutor(
+            tool_registry=tool_registry,
+        )
+
+        # Event streaming with sequence tracking
+        self.event_streamer = EventStreamer(
+            correlation_id=None,  # Set per chat() call
+        )
+
+        # Operation confirmation management
+        self.confirmation_manager = ConfirmationManager(
+            agentdb=agentdb,
+            ttl_seconds=self.config.confirmation_ttl_seconds,
+        )
+
+        # System prompt construction
+        self.prompt_builder = PromptBuilder(
+            pattern_similarity_threshold=self.config.pattern_min_confidence,
+        )
+
         # Fallback in-memory store for confirmations (when AgentDB not available)
         # Structure: {conversation_id: {operation_id: {...}}}
+        # NOTE: This is now managed by confirmation_manager, keeping for backward compatibility
         self._pending_confirmations: dict[UUID, dict[str, dict[str, Any]]] = {}
 
     async def chat(
