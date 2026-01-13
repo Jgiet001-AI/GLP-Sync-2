@@ -15,10 +15,22 @@ This guide explains the core table relationships in the HPE GreenLake Device & S
 8. [Full-Text Search](#full-text-search)
 9. [Common Query Patterns](#common-query-patterns)
 10. [Performance Tips](#performance-tips)
+11. [Schema Files Reference](#schema-files-reference)
+12. [Additional Resources](#additional-resources)
+13. [Quick Reference](#quick-reference)
+
+### Related Documentation
+- [ER_DIAGRAM.md](./ER_DIAGRAM.md) - Visual entity relationship diagram with complete schema overview
+- [schema.sql](./schema.sql) - SQL schema definitions for core tables
+- [subscriptions_schema.sql](./subscriptions_schema.sql) - SQL schema for subscription tables
+- [aruba_central_schema.sql](./aruba_central_schema.sql) - SQL schema for Aruba Central integration
+- [agent_schema.sql](./agent_schema.sql) - SQL schema for AI agent chatbot
 
 ---
 
 ## Core Relationships
+
+> **See Also:** [ER_DIAGRAM.md - Key Relationships](./ER_DIAGRAM.md#key-relationships) for visual representation
 
 ### 1. Many-to-Many: Devices ↔ Subscriptions
 
@@ -316,6 +328,8 @@ ALTER TABLE devices ADD COLUMN firmware_synced_at TIMESTAMPTZ;
 ---
 
 ## Network Clients & Sites Relationships
+
+> **Schema Files:** [aruba_central_schema.sql](./aruba_central_schema.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#one-to-many-sites--clients)
 
 ### Understanding the Hierarchy
 
@@ -615,6 +629,8 @@ idx_devices_firmware_status ON devices(firmware_upgrade_status)
 ---
 
 ## Agent Chatbot Relationships & Special Features
+
+> **Schema Files:** [agent_schema.sql](./agent_schema.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#agent-chatbot-relationships)
 
 The agent chatbot system uses a sophisticated multi-table architecture with **pgvector semantic search**, **Row-Level Security (RLS)** for multi-tenancy, and **background embedding generation**. This section explains the core relationships and advanced features.
 
@@ -1820,6 +1836,8 @@ GROUP BY
 
 ## Performance Tips
 
+> **See Also:** [ER_DIAGRAM.md - Indexing Strategy](./ER_DIAGRAM.md#indexing-strategy) for index overview
+
 ### 1. Index Usage Guide
 
 This section provides a comprehensive overview of all database indexes, when to use different index types, and best practices for optimal query performance.
@@ -2587,12 +2605,37 @@ EXECUTE find_device('VNT9KWC01V');
 
 ---
 
+## Schema Files Reference
+
+The complete database schema is defined across multiple SQL files:
+
+| File | Description | Documentation |
+|------|-------------|---------------|
+| [schema.sql](./schema.sql) | Core tables: devices, device_tags, device_subscriptions, sync_history, query_examples | [ER Diagram](#) |
+| [subscriptions_schema.sql](./subscriptions_schema.sql) | Subscription tables: subscriptions, subscription_tags | [Core Relationships](#core-relationships) |
+| [aruba_central_schema.sql](./aruba_central_schema.sql) | Aruba Central: sites, clients, firmware tracking | [Network Clients & Sites](#network-clients--sites-relationships) |
+| [agent_schema.sql](./agent_schema.sql) | AI agent: conversations, messages, memory, embeddings | [Agent Chatbot](#agent-chatbot-relationships--special-features) |
+| [migrations/](./migrations/) | Database migration scripts for schema updates | - |
+
+### Quick Setup
+
+```bash
+# Initialize database with all schemas
+psql $DATABASE_URL -f db/schema.sql
+psql $DATABASE_URL -f db/subscriptions_schema.sql
+psql $DATABASE_URL -f db/aruba_central_schema.sql
+psql $DATABASE_URL -f db/agent_schema.sql
+
+# Or use Docker Compose (includes all schemas)
+docker compose up -d postgres
+```
+
+---
+
 ## Additional Resources
 
-- **Schema Files:**
-  - [schema.sql](./schema.sql) - Devices, tags, sync tracking
-  - [subscriptions_schema.sql](./subscriptions_schema.sql) - Subscriptions and related tables
-  - [ER_DIAGRAM.md](./ER_DIAGRAM.md) - Visual entity relationship diagram
+- **Visual Documentation:**
+  - [ER_DIAGRAM.md](./ER_DIAGRAM.md) - Entity relationship diagram with Mermaid visualization
 
 - **Built-in Documentation:**
   ```sql
@@ -2612,6 +2655,7 @@ EXECUTE find_device('VNT9KWC01V');
   - [JSON Functions and Operators](https://www.postgresql.org/docs/current/functions-json.html)
   - [Full-Text Search](https://www.postgresql.org/docs/current/textsearch.html)
   - [Indexes](https://www.postgresql.org/docs/current/indexes.html)
+  - [pgvector Extension](https://github.com/pgvector/pgvector)
 
 ---
 

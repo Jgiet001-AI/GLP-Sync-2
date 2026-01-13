@@ -4,6 +4,26 @@ This diagram shows the core database schema for the HPE GreenLake Device & Subsc
 
 > **See Also:** [RELATIONSHIPS.md](./RELATIONSHIPS.md) for detailed relationship explanations and query patterns.
 
+## Table of Contents
+1. [Entity Relationship Diagram](#entity-relationship-diagram)
+2. [Key Relationships](#key-relationships)
+   - [Many-to-Many: Devices ↔ Subscriptions](#many-to-many-devices--subscriptions)
+   - [One-to-Many: Devices ↔ Device Tags](#one-to-many-devices--device-tags)
+   - [One-to-Many: Subscriptions ↔ Subscription Tags](#one-to-many-subscriptions--subscription-tags)
+   - [Tracking Table: Sync History](#tracking-table-sync-history)
+   - [Reference Table: Query Examples](#reference-table-query-examples)
+   - [One-to-Many: Sites ↔ Clients](#one-to-many-sites--clients)
+   - [One-to-Many: Devices ↔ Clients](#one-to-many-devices--clients)
+   - [Firmware Enrichment for Devices](#firmware-enrichment-for-devices)
+   - [Agent Chatbot Relationships](#agent-chatbot-relationships)
+3. [Important Views](#important-views)
+4. [Important Functions](#important-functions)
+5. [Data Storage Philosophy](#data-storage-philosophy)
+6. [Indexing Strategy](#indexing-strategy)
+7. [Schema Files](#schema-files)
+
+---
+
 ## Entity Relationship Diagram
 
 ```mermaid
@@ -397,6 +417,8 @@ All embedding columns include:
 
 ## Important Views
 
+> **See Also:** [RELATIONSHIPS.md - Common Query Patterns](./RELATIONSHIPS.md#common-query-patterns) for detailed usage examples
+
 The schema includes several materialized views for common queries:
 
 - **active_devices** - Non-archived devices only
@@ -420,6 +442,8 @@ The schema includes several materialized views for common queries:
 - **agent_memory_revision_stats** - Memory revision statistics by tenant and user
 
 ## Important Functions
+
+> **See Also:** [RELATIONSHIPS.md - Full-Text Search](./RELATIONSHIPS.md#full-text-search) for search function usage
 
 - **search_devices(query, limit)** - Full-text search with ranking
 - **get_devices_by_tag(key, value)** - Tag-based device lookup
@@ -465,3 +489,44 @@ This design optimizes for:
 - Partial indexes for active/non-archived records
 - JSONB path operators for nested data access
 - PostgreSQL extensions: uuid-ossp, pg_trgm, pgvector (for AI features)
+
+> **For detailed index usage patterns and performance optimization tips, see:** [RELATIONSHIPS.md - Performance Tips](./RELATIONSHIPS.md#performance-tips)
+
+---
+
+## Schema Files
+
+The complete database schema is defined across multiple SQL files:
+
+| File | Description |
+|------|-------------|
+| [schema.sql](./schema.sql) | Core tables: devices, device_tags, device_subscriptions, sync_history, query_examples |
+| [subscriptions_schema.sql](./subscriptions_schema.sql) | Subscription tables: subscriptions, subscription_tags |
+| [migrations/](./migrations/) | Database migration scripts for schema updates |
+| [aruba_central_schema.sql](./aruba_central_schema.sql) | Aruba Central integration: sites, clients |
+| [agent_schema.sql](./agent_schema.sql) | AI agent chatbot: conversations, messages, memory, embeddings |
+
+### Quick Setup
+
+```bash
+# Initialize database with all schemas
+psql $DATABASE_URL -f db/schema.sql
+psql $DATABASE_URL -f db/subscriptions_schema.sql
+psql $DATABASE_URL -f db/aruba_central_schema.sql
+psql $DATABASE_URL -f db/agent_schema.sql
+
+# Or use Docker Compose (includes all schemas)
+docker compose up -d postgres
+```
+
+### Schema Documentation
+
+For detailed relationship explanations and query patterns, see:
+- [RELATIONSHIPS.md](./RELATIONSHIPS.md) - Comprehensive guide to table relationships and query patterns
+- [schema.sql](./schema.sql) - Complete SQL schema definitions with inline comments
+- [subscriptions_schema.sql](./subscriptions_schema.sql) - Subscription-related tables and views
+
+---
+
+**Last Updated:** 2024-01-13
+**Schema Version:** PostgreSQL 16+ with pgvector, pg_trgm, uuid-ossp extensions
