@@ -6,14 +6,15 @@ This guide explains the core table relationships in the HPE GreenLake Device & S
 
 ## Table of Contents
 1. [Core Relationships](#core-relationships)
-2. [Network Clients & Sites Relationships](#network-clients--sites-relationships)
-3. [Agent Chatbot Relationships & Special Features](#agent-chatbot-relationships--special-features)
-4. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
-5. [Tag Relationships](#tag-relationships)
-6. [JSONB Querying](#jsonb-querying)
-7. [Full-Text Search](#full-text-search)
-8. [Common Query Patterns](#common-query-patterns)
-9. [Performance Tips](#performance-tips)
+2. [Audit & Reference Tables](#audit--reference-tables)
+3. [Network Clients & Sites Relationships](#network-clients--sites-relationships)
+4. [Agent Chatbot Relationships & Special Features](#agent-chatbot-relationships--special-features)
+5. [Querying Devices and Subscriptions](#querying-devices-and-subscriptions)
+6. [Tag Relationships](#tag-relationships)
+7. [JSONB Querying](#jsonb-querying)
+8. [Full-Text Search](#full-text-search)
+9. [Common Query Patterns](#common-query-patterns)
+10. [Performance Tips](#performance-tips)
 
 ---
 
@@ -95,6 +96,131 @@ subscription_tags (
 - Each device/subscription can have multiple tags, but only one value per tag key
 - Tags are also available in `devices.raw_data->'tags'` and `subscriptions.raw_data->'tags'` as JSONB
 - Use normalized tables for filtering; use JSONB for ad-hoc queries
+
+---
+
+## Audit & Reference Tables
+
+### Sync History (Audit Trail)
+
+The **sync_history** table is an **independent audit table** (no foreign keys) that tracks all synchronization operations for both devices and subscriptions.
+
+```
+sync_history (independent table)
+  ↓
+Tracks sync operations for:
+  - devices
+  - subscriptions
+```
+
+**Schema:**
+```sql
+sync_history (
+  id BIGINT PRIMARY KEY,                 -- Auto-increment ID
+  resource_type TEXT,                    -- 'devices' or 'subscriptions'
+  started_at TIMESTAMPTZ,                -- Sync start time
+  completed_at TIMESTAMPTZ,              -- Sync completion time
+  status TEXT,                           -- 'running', 'completed', 'failed'
+  records_fetched INTEGER,               -- Records fetched from API
+  records_inserted INTEGER,              -- Records inserted to DB
+  records_updated INTEGER,               -- Records updated in DB
+  records_errors INTEGER,                -- Number of errors
+  error_message TEXT,                    -- Error details if failed
+  duration_ms INTEGER GENERATED ALWAYS AS (
+    EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000
+  ) STORED                               -- Computed sync duration in ms
+)
+```
+
+**Key Points:**
+- **No Foreign Keys:** Independent table that references no other tables
+- **Dual Purpose:** Tracks both device syncs and subscription syncs via `resource_type` field
+- **Audit Trail:** Provides complete history of all sync operations
+- **Performance Metrics:** Captures timing (duration_ms), volume (records_fetched/inserted/updated), and errors
+- **Computed Duration:** `duration_ms` is automatically calculated from `started_at` and `completed_at`
+
+**Example Query: View Recent Sync History**
+```sql
+-- View last 10 sync operations
+SELECT
+  resource_type,
+  started_at,
+  completed_at,
+  status,
+  records_fetched,
+  records_inserted,
+  records_updated,
+  records_errors,
+  duration_ms,
+  CASE
+    WHEN status = 'completed' AND records_errors = 0 THEN '✅ Success'
+    WHEN status = 'completed' AND records_errors > 0 THEN '⚠️ Partial'
+    WHEN status = 'failed' THEN '❌ Failed'
+    ELSE '🔄 Running'
+  END as sync_status
+FROM sync_history
+ORDER BY started_at DESC
+LIMIT 10;
+```
+
+---
+
+### Query Examples (Reference Data)
+
+The **query_examples** table is an **independent reference table** that stores example SQL queries for LLM/AI assistants and documentation purposes.
+
+```
+query_examples (independent table)
+  ↓
+Provides example queries categorized by use case
+```
+
+**Schema:**
+```sql
+query_examples (
+  id BIGINT PRIMARY KEY,                 -- Auto-increment ID
+  category TEXT,                         -- 'search', 'filter', 'expiring', 'summary', 'join', 'tags'
+  description TEXT,                      -- Human-readable query description
+  sql_query TEXT,                        -- SQL query template
+  created_at TIMESTAMPTZ DEFAULT NOW()   -- Record creation timestamp
+)
+```
+
+**Key Points:**
+- **No Foreign Keys:** Independent reference table
+- **AI Assistant Support:** Provides query examples for LLM-based tools (like MCP server)
+- **Categorized:** Queries grouped by category for easy lookup
+- **Templates:** SQL queries may include placeholders (e.g., `$1`, `?`) for parameterization
+- **Documentation:** Serves as runnable documentation for common query patterns
+
+**Query Categories:**
+- **search:** Full-text search queries using `search_vector`
+- **filter:** Filtering by device type, region, status, etc.
+- **expiring:** Finding expiring subscriptions/devices
+- **summary:** Aggregation queries (counts, summaries)
+- **join:** Multi-table join examples (devices ↔ subscriptions)
+- **tags:** Tag-based queries using normalized or JSONB tags
+
+**Example Query: Browse Query Examples**
+```sql
+-- View all query examples by category
+SELECT
+  category,
+  description,
+  sql_query
+FROM query_examples
+ORDER BY category, id;
+
+-- Find examples for a specific category
+SELECT
+  description,
+  sql_query
+FROM query_examples
+WHERE category = 'expiring'
+ORDER BY id;
+```
+
+---
 
 ### 3. Network Clients & Sites Relationships
 

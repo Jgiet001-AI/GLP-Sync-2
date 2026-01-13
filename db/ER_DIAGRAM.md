@@ -2,6 +2,8 @@
 
 This diagram shows the core database schema for the HPE GreenLake Device & Subscription Sync platform.
 
+> **See Also:** [RELATIONSHIPS.md](./RELATIONSHIPS.md) for detailed relationship explanations and query patterns.
+
 ## Entity Relationship Diagram
 
 ```mermaid
