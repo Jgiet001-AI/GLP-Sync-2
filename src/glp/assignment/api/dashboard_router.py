@@ -119,6 +119,11 @@ class CreateSearchHistoryRequest(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class SearchSuggestionsResponse(BaseModel):
+    """List of search suggestions based on history."""
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class DashboardResponse(BaseModel):
     """Complete dashboard data."""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1265,3 +1270,62 @@ async def delete_search_history(
                 status_code=404,
                 detail=f"Search history record with id '{id}' not found"
             )
+
+
+@router.get("/search-suggestions", response_model=SearchSuggestionsResponse)
+async def get_search_suggestions(
+    tenant_id: str = Query(..., description="Tenant identifier for multi-tenancy isolation"),
+    user_id: str = Query(..., description="User identifier"),
+    prefix: str = Query(..., min_length=1, description="Search query prefix to match"),
+    search_type: Optional[str] = Query(default=None, description="Filter by search type (device or subscription)"),
+    limit: int = Query(default=5, ge=1, le=20, description="Maximum number of suggestions to return"),
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Get search suggestions based on previous search history.
+
+    Returns unique search queries that match the given prefix, filtered by tenant/user.
+    Results are sorted by most recent first, limited to the specified number of suggestions.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            # Return empty suggestions if table doesn't exist yet
+            return SearchSuggestionsResponse(suggestions=[])
+
+        # Build the query dynamically
+        where_clauses = ["tenant_id = $1", "user_id = $2", "query ILIKE $3"]
+        params = [tenant_id, user_id, f"{prefix}%"]
+        param_idx = 4
+
+        if search_type:
+            where_clauses.append(f"search_type = ${param_idx}")
+            params.append(search_type)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Fetch unique suggestions matching the prefix, ordered by most recent
+        # Use GROUP BY to enable ORDER BY MAX(created_at) for unique queries
+        query_sql = f"""
+            SELECT query
+            FROM search_history
+            WHERE {where_sql}
+            GROUP BY query
+            ORDER BY MAX(created_at) DESC
+            LIMIT ${param_idx}
+        """
+        params.append(limit)
+
+        rows = await conn.fetch(query_sql, *params)
+
+        suggestions = [row['query'] for row in rows]
+
+        return SearchSuggestionsResponse(suggestions=suggestions)
