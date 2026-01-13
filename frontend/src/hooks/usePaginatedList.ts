@@ -1,8 +1,21 @@
+/**
+ * Paginated list state management hook
+ *
+ * Extracted from DevicesList, SubscriptionsList, and ClientsPage to reduce duplication.
+ * Provides a unified approach to pagination, sorting, filtering, and URL synchronization
+ * for all list-based pages in the application.
+ */
+
 import { useCallback } from 'react'
 import { useUrlState } from './useUrlState'
 
 /**
- * Configuration for paginated list state
+ * Configuration object for initializing paginated list state
+ *
+ * All fields are optional and will fall back to sensible defaults.
+ * Filter fields are defined by the generic TFilters type.
+ *
+ * @template TFilters - Record type defining available filter fields
  */
 export interface PaginatedListConfig<TFilters extends Record<string, string | undefined>> {
   /** Initial page number (default: 1) */
@@ -13,30 +26,45 @@ export interface PaginatedListConfig<TFilters extends Record<string, string | un
   sort_by?: string
   /** Initial sort direction (default: 'desc') */
   sort_order?: 'asc' | 'desc'
-  /** Additional filter fields */
+  /** Additional filter fields specific to the list type */
   filters?: TFilters
 }
 
 /**
- * State returned by usePaginatedList
+ * Current state of the paginated list
+ *
+ * This state is synchronized with URL parameters, allowing for
+ * shareable links and browser back/forward navigation.
+ *
+ * @template TFilters - Record type defining available filter fields
  */
 export interface PaginatedListState<TFilters extends Record<string, string | undefined>> {
+  /** Current page number (1-indexed) */
   page: number
+  /** Number of items per page */
   page_size: number
+  /** Field name to sort by */
   sort_by: string
+  /** Sort direction */
   sort_order: 'asc' | 'desc'
+  /** Active filter values */
   filters: TFilters
 }
 
 /**
- * Handlers returned by usePaginatedList
+ * Event handlers for paginated list interactions
+ *
+ * All handlers automatically sync state changes to URL parameters.
+ * Filter and page size changes automatically reset to page 1.
+ *
+ * @template TFilters - Record type defining available filter fields
  */
 export interface PaginatedListHandlers<TFilters extends Record<string, string | undefined>> {
   /** Change the current page */
   handlePageChange: (newPage: number) => void
   /** Change the page size and reset to page 1 */
   handlePageSizeChange: (newSize: number) => void
-  /** Toggle sort order for a column */
+  /** Toggle sort order for a column (switches between asc/desc) */
   handleSort: (column: string) => void
   /** Update a single filter value and reset to page 1 */
   handleFilterChange: (key: keyof TFilters, value: string | undefined) => void
