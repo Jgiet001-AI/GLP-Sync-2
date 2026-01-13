@@ -46,6 +46,9 @@ except ImportError:
 # Redis client (for WebSocket ticket auth)
 _redis_client = None
 
+# Chatbot availability flag (set during init)
+_chatbot_enabled = False
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -150,6 +153,10 @@ def _init_agent_orchestrator(redis_client=None) -> None:
         # Register with router
         create_agent_dependencies(orchestrator, ticket_auth)
         logger.info("Agent orchestrator initialized successfully")
+
+        # Mark chatbot as enabled
+        global _chatbot_enabled
+        _chatbot_enabled = True
 
     except Exception as e:
         logger.error(f"Failed to initialize agent orchestrator: {e}")
@@ -280,6 +287,18 @@ async def root():
 async def health():
     """Global health check."""
     return {"status": "healthy"}
+
+
+@app.get("/api/config")
+async def get_config():
+    """Get frontend configuration.
+
+    Returns feature flags and settings for the frontend.
+    """
+    return {
+        "chatbot_enabled": _chatbot_enabled,
+        "version": "1.0.0",
+    }
 
 
 # Entry point for running with uvicorn

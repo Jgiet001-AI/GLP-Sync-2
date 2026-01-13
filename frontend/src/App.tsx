@@ -8,6 +8,7 @@ import { Breadcrumbs } from './components/navigation/Breadcrumbs'
 import { ChatWidget } from './components/chat'
 import { BackgroundTaskProvider } from './contexts/BackgroundTaskContext'
 import { BackgroundTaskIndicator } from './components/BackgroundTaskIndicator'
+import { useConfig } from './hooks/useConfig'
 
 // Lazy load page components for code splitting
 const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
@@ -172,6 +173,7 @@ function Navigation({ onOpenSearch }: { onOpenSearch: () => void }) {
 
 function App() {
   const [searchOpen, setSearchOpen] = useState(false)
+  const { config } = useConfig()
 
   // Global keyboard shortcut for search
   useEffect(() => {
@@ -231,8 +233,10 @@ function App() {
             />
             {/* Global Command Palette */}
             <CommandPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
-            {/* AI Chat Widget */}
-            <ChatWidget apiBaseUrl="/api/agent" position="bottom-right" />
+            {/* AI Chat Widget - only shown if chatbot is enabled */}
+            {config.chatbot_enabled && (
+              <ChatWidget apiBaseUrl="/api/agent" position="bottom-right" />
+            )}
             {/* Background Task Indicator (bottom-right, above chat) */}
             <BackgroundTaskIndicator />
           </div>
