@@ -49,8 +49,8 @@ services:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-glp} -d ${POSTGRES_DB:-greenlake}"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 30s
     security_opt:
       - no-new-privileges:true
     cap_drop:
