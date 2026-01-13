@@ -91,6 +91,24 @@ class SyncHistoryItem(BaseModel):
     duration_ms: Optional[int] = None
 
 
+class SearchHistoryItem(BaseModel):
+    """Search history record."""
+    id: str
+    tenant_id: str
+    user_id: str
+    query: str
+    search_type: str
+    result_count: Optional[int] = None
+    created_at: datetime
+    metadata: dict = Field(default_factory=dict)
+
+
+class SearchHistoryResponse(BaseModel):
+    """List of search history records."""
+    items: list[SearchHistoryItem] = Field(default_factory=list)
+    total: int = 0
+
+
 class DashboardResponse(BaseModel):
     """Complete dashboard data."""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
