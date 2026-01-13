@@ -40,7 +40,6 @@ from ..memory.long_term import ConversationSummarizer, FactExtractor
 from ..memory.agentdb import (
     AgentDBAdapter,
     PatternType,
-    SessionType,
 )
 from ..security.cot_redactor import get_redactor
 from ..tools.registry import ToolRegistry
@@ -234,10 +233,6 @@ class AgentOrchestrator:
             pattern_similarity_threshold=self.config.pattern_min_confidence,
         )
 
-        # Fallback in-memory store for confirmations (when AgentDB not available)
-        # Structure: {conversation_id: {operation_id: {...}}}
-        # NOTE: This is now managed by confirmation_manager, keeping for backward compatibility
-        self._pending_confirmations: dict[UUID, dict[str, dict[str, Any]]] = {}
 
     async def chat(
         self,
@@ -430,23 +425,13 @@ class AgentOrchestrator:
                             },
                         }
 
-                        # Use AgentDB persistent session store if available
-                        if self.agentdb:
-                            session_key = f"{conversation.id}:{operation_id}"
-                            await self.agentdb.sessions.set(
-                                tenant_id=context.tenant_id,
-                                user_id=context.user_id,
-                                session_type=SessionType.CONFIRMATION,
-                                key=session_key,
-                                data=confirmation_data,
-                                ttl_seconds=self.config.confirmation_ttl_seconds,
-                            )
-                            logger.debug(f"Stored confirmation in AgentDB: {session_key}")
-                        else:
-                            # Fallback to in-memory store
-                            if conversation.id not in self._pending_confirmations:
-                                self._pending_confirmations[conversation.id] = {}
-                            self._pending_confirmations[conversation.id][operation_id] = confirmation_data
+                        # Use ConfirmationManager to store
+                        await self.confirmation_manager.store(
+                            context=context,
+                            conversation_id=conversation.id,
+                            operation_id=operation_id,
+                            confirmation_data=confirmation_data,
+                        )
 
                         yield self.event_streamer.create_event(
                             ChatEventType.CONFIRMATION_REQUIRED,
@@ -548,73 +533,16 @@ class AgentOrchestrator:
         self.event_streamer.set_correlation_id(context.session_id)
         self.event_streamer.reset()
 
-        pending = None
+        # Use ConfirmationManager to get and delete confirmation
+        pending = await self.confirmation_manager.get_and_delete(
+            context=context,
+            conversation_id=conversation_id,
+            operation_id=operation_id,
+        )
 
-        # Try AgentDB persistent session store first
-        if self.agentdb:
-            if operation_id:
-                session_key = f"{conversation_id}:{operation_id}"
-                session = await self.agentdb.sessions.get_and_delete(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    key=session_key,
-                )
-                if session:
-                    pending = session.data
-                    logger.debug(f"Retrieved confirmation from AgentDB: {session_key}")
-            else:
-                # List all confirmations for this conversation and get first
-                sessions = await self.agentdb.sessions.list_by_type(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    prefix=f"{conversation_id}:",
-                )
-                if sessions:
-                    first_session = sessions[0]
-                    pending = first_session.data
-                    operation_id = pending.get("operation_id")
-                    # Delete it
-                    await self.agentdb.sessions.delete(
-                        tenant_id=context.tenant_id,
-                        user_id=context.user_id,
-                        session_type=SessionType.CONFIRMATION,
-                        key=first_session.key,
-                    )
-                    logger.debug(f"Retrieved first confirmation from AgentDB: {first_session.key}")
-
-        # Fallback to in-memory store
-        if not pending:
-            conv_confirmations = self._pending_confirmations.get(conversation_id, {})
-
-            if not conv_confirmations:
-                yield self.event_streamer.create_event(
-                    ChatEventType.ERROR,
-                    content="No pending operation to confirm",
-                    error_type=ErrorType.RECOVERABLE,
-                )
-                return
-
-            # Get the specific operation or the first one
-            if operation_id and operation_id in conv_confirmations:
-                pending = conv_confirmations.pop(operation_id)
-            elif conv_confirmations:
-                # Use first available operation for backward compatibility
-                first_op_id = next(iter(conv_confirmations))
-                pending = conv_confirmations.pop(first_op_id)
-                operation_id = pending.get("operation_id")
-            else:
-                yield self.event_streamer.create_event(
-                    ChatEventType.ERROR,
-                    content="No pending operation to confirm",
-                    error_type=ErrorType.RECOVERABLE,
-                )
-                return
-
-            # Clean up empty conversation entry
-            if not conv_confirmations:
-                self._pending_confirmations.pop(conversation_id, None)
+        # Update operation_id if it was found from first available confirmation
+        if pending and not operation_id:
+            operation_id = pending.get("operation_id")
 
         if not pending:
             yield self.event_streamer.create_event(
@@ -718,26 +646,11 @@ class AgentOrchestrator:
             conversation_id: Conversation to cancel
             context: User context
         """
-        # Remove pending confirmations from AgentDB if available
-        if self.agentdb:
-            sessions = await self.agentdb.sessions.list_by_type(
-                tenant_id=context.tenant_id,
-                user_id=context.user_id,
-                session_type=SessionType.CONFIRMATION,
-                prefix=f"{conversation_id}:",
-            )
-            for session in sessions:
-                await self.agentdb.sessions.delete(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    key=session.key,
-                )
-            if sessions:
-                logger.debug(f"Cleaned up {len(sessions)} AgentDB sessions for conversation {conversation_id}")
-
-        # Also clean up in-memory store
-        self._pending_confirmations.pop(conversation_id, None)
+        # Use ConfirmationManager to cleanup all confirmations
+        await self.confirmation_manager.cleanup_conversation(
+            context=context,
+            conversation_id=conversation_id,
+        )
 
         logger.info(f"Cancelled chat for conversation {conversation_id}")
 
