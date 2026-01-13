@@ -23,8 +23,9 @@ This guide explains the core table relationships in the HPE GreenLake Device & S
 - [ER_DIAGRAM.md](./ER_DIAGRAM.md) - Visual entity relationship diagram with complete schema overview
 - [schema.sql](./schema.sql) - SQL schema definitions for core tables
 - [subscriptions_schema.sql](./subscriptions_schema.sql) - SQL schema for subscription tables
-- [aruba_central_schema.sql](./aruba_central_schema.sql) - SQL schema for Aruba Central integration
-- [agent_schema.sql](./agent_schema.sql) - SQL schema for AI agent chatbot
+- [clients_migration.sql](./clients_migration.sql) - SQL schema for Aruba Central integration (sites, clients)
+- [migrations/004_agent_chatbot.sql](./migrations/004_agent_chatbot.sql) - SQL schema for AI agent base tables
+- [migrations/006_agentdb_memory_patterns.sql](./migrations/006_agentdb_memory_patterns.sql) - SQL schema for AI agent advanced features
 
 ---
 
@@ -329,7 +330,7 @@ ALTER TABLE devices ADD COLUMN firmware_synced_at TIMESTAMPTZ;
 
 ## Network Clients & Sites Relationships
 
-> **Schema Files:** [aruba_central_schema.sql](./aruba_central_schema.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#one-to-many-sites--clients)
+> **Schema Files:** [clients_migration.sql](./clients_migration.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#one-to-many-sites--clients)
 
 ### Understanding the Hierarchy
 
@@ -630,7 +631,7 @@ idx_devices_firmware_status ON devices(firmware_upgrade_status)
 
 ## Agent Chatbot Relationships & Special Features
 
-> **Schema Files:** [agent_schema.sql](./agent_schema.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#agent-chatbot-relationships)
+> **Schema Files:** [004_agent_chatbot.sql](./migrations/004_agent_chatbot.sql), [006_agentdb_memory_patterns.sql](./migrations/006_agentdb_memory_patterns.sql) | **Visual:** [ER_DIAGRAM.md](./ER_DIAGRAM.md#agent-chatbot-relationships)
 
 The agent chatbot system uses a sophisticated multi-table architecture with **pgvector semantic search**, **Row-Level Security (RLS)** for multi-tenancy, and **background embedding generation**. This section explains the core relationships and advanced features.
 
@@ -2611,20 +2612,22 @@ The complete database schema is defined across multiple SQL files:
 
 | File | Description | Documentation |
 |------|-------------|---------------|
-| [schema.sql](./schema.sql) | Core tables: devices, device_tags, device_subscriptions, sync_history, query_examples | [ER Diagram](#) |
+| [schema.sql](./schema.sql) | Core tables: devices, device_tags, device_subscriptions, sync_history, query_examples | [ER Diagram](./ER_DIAGRAM.md) |
 | [subscriptions_schema.sql](./subscriptions_schema.sql) | Subscription tables: subscriptions, subscription_tags | [Core Relationships](#core-relationships) |
-| [aruba_central_schema.sql](./aruba_central_schema.sql) | Aruba Central: sites, clients, firmware tracking | [Network Clients & Sites](#network-clients--sites-relationships) |
-| [agent_schema.sql](./agent_schema.sql) | AI agent: conversations, messages, memory, embeddings | [Agent Chatbot](#agent-chatbot-relationships--special-features) |
+| [clients_migration.sql](./clients_migration.sql) | Aruba Central: sites, clients, firmware tracking | [Network Clients & Sites](#network-clients--sites-relationships) |
+| [migrations/004_agent_chatbot.sql](./migrations/004_agent_chatbot.sql) | AI agent base: conversations, messages, memory, embeddings, audit | [Agent Chatbot](#agent-chatbot-relationships--special-features) |
+| [migrations/006_agentdb_memory_patterns.sql](./migrations/006_agentdb_memory_patterns.sql) | AI agent advanced: sessions, patterns, memory revisions | [Agent Chatbot](#agent-chatbot-relationships--special-features) |
 | [migrations/](./migrations/) | Database migration scripts for schema updates | - |
 
 ### Quick Setup
 
 ```bash
-# Initialize database with all schemas
+# Initialize database with all schemas (run in order)
 psql $DATABASE_URL -f db/schema.sql
 psql $DATABASE_URL -f db/subscriptions_schema.sql
-psql $DATABASE_URL -f db/aruba_central_schema.sql
-psql $DATABASE_URL -f db/agent_schema.sql
+psql $DATABASE_URL -f db/clients_migration.sql
+psql $DATABASE_URL -f db/migrations/004_agent_chatbot.sql
+psql $DATABASE_URL -f db/migrations/006_agentdb_memory_patterns.sql
 
 # Or use Docker Compose (includes all schemas)
 docker compose up -d postgres

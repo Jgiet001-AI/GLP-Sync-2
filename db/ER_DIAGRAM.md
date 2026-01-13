@@ -502,18 +502,20 @@ The complete database schema is defined across multiple SQL files:
 |------|-------------|
 | [schema.sql](./schema.sql) | Core tables: devices, device_tags, device_subscriptions, sync_history, query_examples |
 | [subscriptions_schema.sql](./subscriptions_schema.sql) | Subscription tables: subscriptions, subscription_tags |
-| [migrations/](./migrations/) | Database migration scripts for schema updates |
-| [aruba_central_schema.sql](./aruba_central_schema.sql) | Aruba Central integration: sites, clients |
-| [agent_schema.sql](./agent_schema.sql) | AI agent chatbot: conversations, messages, memory, embeddings |
+| [clients_migration.sql](./clients_migration.sql) | Aruba Central integration: sites, clients |
+| [migrations/004_agent_chatbot.sql](./migrations/004_agent_chatbot.sql) | AI agent base: conversations, messages, memory, embeddings, audit |
+| [migrations/006_agentdb_memory_patterns.sql](./migrations/006_agentdb_memory_patterns.sql) | AI agent advanced: sessions, patterns, memory revisions |
+| [migrations/](./migrations/) | Additional database migration scripts |
 
 ### Quick Setup
 
 ```bash
-# Initialize database with all schemas
+# Initialize database with all schemas (run in order)
 psql $DATABASE_URL -f db/schema.sql
 psql $DATABASE_URL -f db/subscriptions_schema.sql
-psql $DATABASE_URL -f db/aruba_central_schema.sql
-psql $DATABASE_URL -f db/agent_schema.sql
+psql $DATABASE_URL -f db/clients_migration.sql
+psql $DATABASE_URL -f db/migrations/004_agent_chatbot.sql
+psql $DATABASE_URL -f db/migrations/006_agentdb_memory_patterns.sql
 
 # Or use Docker Compose (includes all schemas)
 docker compose up -d postgres
