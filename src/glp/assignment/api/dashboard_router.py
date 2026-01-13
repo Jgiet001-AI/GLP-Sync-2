@@ -109,6 +109,16 @@ class SearchHistoryResponse(BaseModel):
     total: int = 0
 
 
+class CreateSearchHistoryRequest(BaseModel):
+    """Request to create a search history record."""
+    tenant_id: str
+    user_id: str
+    query: str
+    search_type: str
+    result_count: Optional[int] = None
+    metadata: dict = Field(default_factory=dict)
+
+
 class DashboardResponse(BaseModel):
     """Complete dashboard data."""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1148,3 +1158,69 @@ async def get_search_history(
         ]
 
         return SearchHistoryResponse(items=items, total=total)
+
+
+@router.post("/search-history", response_model=SearchHistoryItem, status_code=201)
+async def create_search_history(
+    request: CreateSearchHistoryRequest,
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Create a new search history record.
+
+    Records a user's search query with tenant/user isolation.
+    Returns the created record with HTTP 201 status.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            raise HTTPException(
+                status_code=503,
+                detail="Search history table not available. Run database migrations."
+            )
+
+        # Insert the search history record
+        row = await conn.fetchrow("""
+            INSERT INTO search_history (
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING
+                id::text,
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                created_at,
+                metadata
+        """,
+            request.tenant_id,
+            request.user_id,
+            request.query,
+            request.search_type,
+            request.result_count,
+            json_module.dumps(request.metadata),
+        )
+
+        return SearchHistoryItem(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            user_id=row['user_id'],
+            query=row['query'],
+            search_type=row['search_type'],
+            result_count=row['result_count'],
+            created_at=row['created_at'],
+            metadata=row['metadata'] or {},
+        )
