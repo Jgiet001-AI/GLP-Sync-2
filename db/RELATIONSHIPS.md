@@ -1694,7 +1694,667 @@ GROUP BY
 
 ## Performance Tips
 
-### 1. Use Indexes Wisely
+### 1. Index Usage Guide
+
+This section provides a comprehensive overview of all database indexes, when to use different index types, and best practices for optimal query performance.
+
+#### Overview of All Indexes
+
+The database uses three types of indexes:
+- **B-tree indexes** (default) - For exact matches, range queries, sorting
+- **GIN indexes** (Generalized Inverted Index) - For full-text search, JSONB, arrays
+- **Partial indexes** - Index subset of rows matching a condition
+
+**Devices Table Indexes:**
+
+```sql
+-- B-tree Indexes (Standard)
+idx_devices_serial              -- serial_number (unique lookups)
+idx_devices_mac                 -- mac_address (unique lookups)
+idx_devices_type                -- device_type (categorical filtering)
+idx_devices_region              -- region (categorical filtering)
+idx_devices_assigned            -- assigned_state (categorical filtering)
+idx_devices_updated             -- updated_at DESC (recent updates)
+idx_devices_created             -- created_at DESC (recent additions)
+idx_devices_application         -- application_id (foreign key)
+idx_devices_location            -- location_id (foreign key)
+idx_devices_location_country    -- location_country (geographic filtering)
+idx_devices_location_city       -- location_city (geographic filtering)
+idx_devices_tenant              -- tenant_workspace_id (multi-tenancy)
+idx_devices_dedicated_platform  -- dedicated_platform_id (platform filtering)
+
+-- B-tree Partial Indexes
+idx_devices_archived            -- WHERE archived = false (only active devices)
+
+-- GIN Indexes (Full-text & JSONB)
+idx_devices_search              -- search_vector (full-text search)
+idx_devices_raw                 -- raw_data jsonb_path_ops (JSONB containment @>)
+idx_devices_subscriptions       -- raw_data->'subscription' (subscription array queries)
+idx_devices_tags                -- raw_data->'tags' (tag existence/value queries)
+
+-- Aruba Central Indexes
+idx_devices_central_id          -- central_device_id (Aruba Central UUID)
+idx_devices_central_status      -- central_status (device status)
+idx_devices_central_site_id     -- central_site_id (site filtering)
+idx_devices_central_model       -- central_model (partial, only non-null)
+idx_devices_central_last_seen   -- central_last_seen_at DESC (partial, only non-null)
+idx_devices_central_config_status -- central_config_status (partial, only non-null)
+idx_devices_central_only        -- WHERE central_device_id IS NOT NULL AND id IS NULL
+idx_devices_greenlake_only      -- WHERE id IS NOT NULL AND central_device_id IS NULL
+idx_devices_both_platforms      -- WHERE id IS NOT NULL AND central_device_id IS NOT NULL
+idx_devices_last_seen_central   -- central_last_seen_at DESC (time-based queries)
+
+-- Firmware Indexes
+idx_devices_firmware_status     -- firmware_upgrade_status (partial, only non-null)
+idx_devices_firmware_synced     -- firmware_synced_at (partial, only non-null)
+```
+
+**Subscriptions Table Indexes:**
+
+```sql
+-- B-tree Indexes (Standard)
+idx_subscriptions_key           -- key (unique lookups)
+idx_subscriptions_type          -- subscription_type (categorical)
+idx_subscriptions_status        -- subscription_status (categorical)
+idx_subscriptions_tier          -- tier (categorical)
+idx_subscriptions_product_type  -- product_type (categorical)
+idx_subscriptions_is_eval       -- is_eval (boolean)
+idx_subscriptions_end_time      -- end_time (expiration queries)
+idx_subscriptions_start_time    -- start_time (activation queries)
+
+-- B-tree Composite & Covering Indexes
+idx_subscriptions_expiring      -- (subscription_status, end_time) WHERE subscription_status = 'STARTED'
+idx_subscriptions_expiring_covering  -- Covering: end_time, key, subscription_type, tier, sku, quantity, available_quantity
+                                     -- WHERE subscription_status = 'STARTED' (index-only scan)
+
+-- GIN Indexes (Full-text & JSONB)
+idx_subscriptions_search        -- search_vector (full-text search)
+idx_subscriptions_raw           -- raw_data jsonb_path_ops (JSONB containment)
+idx_subscriptions_tags          -- raw_data->'tags' (tag queries)
+```
+
+**Junction & Tag Tables:**
+
+```sql
+-- device_subscriptions (many-to-many)
+PRIMARY KEY (device_id, subscription_id)  -- Composite primary key (clustered index)
+idx_device_subscriptions_sub              -- subscription_id (reverse lookups)
+
+-- device_tags
+PRIMARY KEY (device_id, tag_key)          -- Composite primary key
+idx_device_tags_key                       -- tag_key (find all devices with key)
+idx_device_tags_key_value                 -- (tag_key, tag_value) (find devices by tag)
+idx_device_tags_device                    -- device_id (get all tags for device)
+
+-- subscription_tags
+PRIMARY KEY (subscription_id, tag_key)
+idx_subscription_tags_key
+idx_subscription_tags_key_value
+idx_subscription_tags_subscription
+```
+
+**Network Clients & Sites Indexes:**
+
+```sql
+-- sites
+PRIMARY KEY (site_id)
+idx_sites_name                  -- site_name (search by name)
+idx_sites_last_synced           -- last_synced_at DESC (recent syncs)
+
+-- clients
+PRIMARY KEY (id)                -- Auto-increment BIGINT
+UNIQUE (site_id, mac)           -- One MAC per site
+idx_clients_site_id             -- site_id (get all clients for site)
+idx_clients_mac                 -- mac (MAC address lookups)
+idx_clients_connected_device    -- connected_device_serial (partial, only non-null)
+idx_clients_last_seen           -- last_seen_at DESC NULLS LAST
+idx_clients_synced_at           -- synced_at
+idx_clients_name_trgm           -- GIN trigram for fuzzy name search
+idx_clients_raw_data            -- GIN JSONB for advanced queries
+
+-- Partial Indexes (only active clients)
+idx_clients_status              -- WHERE status IS NOT NULL AND status != 'REMOVED'
+idx_clients_health              -- WHERE health IS NOT NULL
+idx_clients_type                -- WHERE type IS NOT NULL
+
+-- Composite Partial Index
+idx_clients_site_status_health  -- (site_id, status, health) WHERE status != 'REMOVED'
+```
+
+**Agent Chatbot Indexes:**
+
+```sql
+-- agent_conversations
+PRIMARY KEY (id)
+idx_agent_conversations_tenant_user  -- (tenant_id, user_id) (RLS filtering)
+
+-- agent_messages
+PRIMARY KEY (id)
+idx_agent_messages_conversation      -- conversation_id (get messages for conversation)
+idx_agent_messages_embedding_status  -- embedding_status (find pending embeddings)
+idx_agent_messages_tenant            -- tenant_id (RLS filtering)
+idx_agent_messages_tenant_conversation -- (tenant_id, conversation_id) (optimized RLS join)
+
+-- agent_memory
+PRIMARY KEY (id)
+UNIQUE (tenant_id, user_id, content_hash)  -- Deduplication
+idx_agent_memory_tenant_user        -- (tenant_id, user_id)
+idx_agent_memory_ttl                -- valid_until (expiration cleanup)
+idx_agent_memory_confidence         -- confidence (high-confidence memories)
+idx_agent_memory_invalidated        -- is_invalidated (exclude invalidated)
+idx_agent_memory_last_accessed      -- last_accessed_at (confidence decay)
+
+-- agent_embedding_jobs (background queue)
+PRIMARY KEY (id)
+UNIQUE (target_table, target_id)    -- Prevent duplicate jobs
+idx_agent_embedding_jobs_pending    -- WHERE status = 'pending' (worker queue)
+idx_agent_embedding_jobs_status     -- status (monitoring)
+idx_agent_embedding_jobs_locked     -- locked_at (stale job detection)
+
+-- agent_audit_log
+PRIMARY KEY (id)
+UNIQUE (tenant_id, idempotency_key) -- Idempotency
+idx_agent_audit_tenant_user         -- (tenant_id, user_id)
+idx_agent_audit_idempotency         -- idempotency_key
+idx_agent_audit_status              -- status
+
+-- agent_sessions (persistent state)
+PRIMARY KEY (id)
+UNIQUE (tenant_id, user_id, session_type, key)
+idx_agent_sessions_lookup           -- (tenant_id, user_id, session_type, key)
+idx_agent_sessions_expiry           -- expires_at (cleanup)
+idx_agent_sessions_type             -- session_type
+
+-- agent_patterns (learned patterns)
+PRIMARY KEY (id)
+UNIQUE (tenant_id, trigger_hash)
+idx_agent_patterns_type_confidence  -- (pattern_type, confidence DESC)
+idx_agent_patterns_active           -- WHERE is_active = true
+
+-- agent_memory_revisions (versioning)
+PRIMARY KEY (id)
+idx_agent_memory_revisions_unique_current  -- UNIQUE (memory_id) WHERE version_state = 'current'
+idx_agent_memory_revisions_memory          -- memory_id (get all revisions)
+idx_agent_memory_revisions_current         -- WHERE version_state = 'current'
+idx_agent_memory_revisions_user            -- (tenant_id, user_id)
+```
+
+**Sync History:**
+
+```sql
+-- sync_history
+PRIMARY KEY (id)
+idx_sync_history_resource_type  -- resource_type (devices vs subscriptions)
+idx_sync_history_started        -- started_at DESC (recent syncs)
+```
+
+---
+
+#### When to Use GIN vs B-tree Indexes
+
+**Use B-tree Indexes (Default) When:**
+
+1. **Exact Match Queries**
+   ```sql
+   -- ✅ B-tree: Exact serial number lookup
+   SELECT * FROM devices WHERE serial_number = 'VNT9KWC01V';
+   ```
+
+2. **Range Queries**
+   ```sql
+   -- ✅ B-tree: Date range queries
+   SELECT * FROM subscriptions
+   WHERE end_time BETWEEN '2026-01-01' AND '2026-12-31';
+   ```
+
+3. **Sorting and ORDER BY**
+   ```sql
+   -- ✅ B-tree: Can use idx_devices_updated for sorting
+   SELECT * FROM devices
+   ORDER BY updated_at DESC
+   LIMIT 50;
+   ```
+
+4. **Foreign Keys and Joins**
+   ```sql
+   -- ✅ B-tree: Fast join on device_id
+   SELECT d.*, s.*
+   FROM devices d
+   JOIN device_subscriptions ds ON d.id = ds.device_id
+   JOIN subscriptions s ON ds.subscription_id = s.id;
+   ```
+
+5. **Prefix Matching (with LIKE pattern%)**
+   ```sql
+   -- ✅ B-tree: Can use idx_devices_serial for prefix
+   SELECT * FROM devices
+   WHERE serial_number LIKE 'VNT9%';
+   ```
+
+**Use GIN Indexes When:**
+
+1. **Full-Text Search**
+   ```sql
+   -- ✅ GIN: idx_devices_search for full-text search
+   SELECT * FROM devices
+   WHERE search_vector @@ websearch_to_tsquery('english', 'aruba 6200');
+   ```
+
+2. **JSONB Containment Queries (@>)**
+   ```sql
+   -- ✅ GIN: idx_devices_raw (jsonb_path_ops) for containment
+   SELECT * FROM devices
+   WHERE raw_data @> '{"archived": false, "device_type": "SWITCH"}';
+   ```
+
+3. **JSONB Key Existence (?, ?|, ?&)**
+   ```sql
+   -- ✅ GIN: idx_devices_tags for tag key existence
+   SELECT * FROM devices
+   WHERE raw_data->'tags' ? 'customer';
+
+   -- ✅ GIN: Check for any of multiple keys
+   SELECT * FROM devices
+   WHERE raw_data->'tags' ?| array['customer', 'site', 'region'];
+   ```
+
+4. **Array Operations**
+   ```sql
+   -- ✅ GIN: For array contains/overlap queries (if using arrays)
+   SELECT * FROM table WHERE tags @> ARRAY['production'];
+   ```
+
+5. **Trigram Fuzzy Search (pg_trgm)**
+   ```sql
+   -- ✅ GIN: idx_clients_name_trgm for fuzzy name search
+   SELECT * FROM clients
+   WHERE name ILIKE '%iphone%';
+   ```
+
+**Index Type Comparison:**
+
+| Feature | B-tree | GIN |
+|---------|--------|-----|
+| Exact match | ✅ Excellent | ✅ Good |
+| Range queries | ✅ Excellent | ❌ Not supported |
+| Sorting | ✅ Excellent | ❌ Not supported |
+| Full-text search | ❌ Not supported | ✅ Excellent |
+| JSONB containment | ❌ Not supported | ✅ Excellent |
+| Array operations | ❌ Not supported | ✅ Excellent |
+| Index size | Smaller | Larger |
+| Update performance | Faster | Slower |
+| Prefix match (LIKE 'x%') | ✅ Good | ❌ Not supported |
+| Suffix match (LIKE '%x') | ❌ Not supported | ✅ With trigrams |
+
+---
+
+#### JSONB Query Optimization
+
+**1. Use `jsonb_path_ops` for Containment Queries**
+
+Our indexes use `jsonb_path_ops` which is optimized for `@>` (containment) but **not** for key existence (`?`).
+
+```sql
+-- ✅ FAST: Uses idx_devices_raw (jsonb_path_ops)
+SELECT * FROM devices
+WHERE raw_data @> '{"device_type": "SWITCH"}';
+
+-- ⚠️ SLOWER: jsonb_path_ops doesn't support ? operator efficiently
+-- Uses sequential scan or different index
+SELECT * FROM devices
+WHERE raw_data ? 'device_type';
+```
+
+**2. Use Dedicated Nested Path Indexes**
+
+For frequently queried nested paths, we have dedicated GIN indexes:
+
+```sql
+-- ✅ FAST: Uses idx_devices_tags (dedicated GIN on raw_data->'tags')
+SELECT * FROM devices
+WHERE raw_data->'tags' ? 'customer';
+
+-- ✅ FAST: Uses idx_devices_subscriptions (dedicated GIN on raw_data->'subscription')
+SELECT * FROM devices
+WHERE raw_data->'subscription' @> '[{"tier": "FOUNDATION_AP"}]';
+```
+
+**3. Prefer Normalized Columns Over JSONB**
+
+Always use normalized columns when available - they're faster and more predictable:
+
+```sql
+-- ✅ EXCELLENT: Uses B-tree idx_devices_type
+SELECT * FROM devices WHERE device_type = 'SWITCH';
+
+-- ❌ SLOWER: JSONB query even with GIN index
+SELECT * FROM devices WHERE raw_data->>'device_type' = 'SWITCH';
+```
+
+**4. JSONB Operator Best Practices**
+
+```sql
+-- ✅ Use @> for containment (uses jsonb_path_ops index)
+WHERE raw_data @> '{"key": "value"}'
+
+-- ✅ Use -> for extraction (returns JSONB)
+WHERE (raw_data->'subscription'->>0->>'tier') = 'FOUNDATION_AP'
+
+-- ✅ Use ->> for text extraction
+WHERE raw_data->>'device_name' = 'Switch-01'
+
+-- ❌ AVOID: Functions on indexed columns prevent index usage
+WHERE LOWER(raw_data->>'device_name') = 'switch-01'
+
+-- ✅ BETTER: Store normalized lowercase or use expression index
+WHERE raw_data->>'device_name' = 'switch-01'  -- If data is already normalized
+```
+
+**5. JSONB Array Queries**
+
+```sql
+-- Extract and filter JSONB arrays
+SELECT
+  d.serial_number,
+  sub->>'key' as subscription_key,
+  sub->>'tier' as tier
+FROM devices d,
+     jsonb_array_elements(d.raw_data->'subscription') as sub
+WHERE sub->>'tier' LIKE 'FOUNDATION%';
+
+-- Check array length
+SELECT * FROM devices
+WHERE jsonb_array_length(raw_data->'subscription') > 0;
+
+-- Containment in array
+SELECT * FROM devices
+WHERE raw_data->'subscription' @> '[{"key": "PAT4DYYJAEEEJA"}]';
+```
+
+---
+
+#### Full-Text Search Best Practices
+
+**1. Use `websearch_to_tsquery` for Natural Language**
+
+```sql
+-- ✅ RECOMMENDED: Natural language syntax (supports AND, OR, quotes)
+SELECT * FROM devices
+WHERE search_vector @@ websearch_to_tsquery('english', 'aruba 6200');
+
+-- Supports natural operators:
+-- 'aruba 6200'              → aruba AND 6200
+-- 'aruba OR cisco'          → aruba OR cisco
+-- '"access point"'          → exact phrase
+-- 'switch -aruba'           → switch AND NOT aruba
+-- '(aruba OR cisco) switch' → (aruba OR cisco) AND switch
+```
+
+**2. Use Ranking for Relevance Sorting**
+
+```sql
+-- ✅ Include ts_rank for relevance scoring
+SELECT
+  serial_number,
+  device_name,
+  device_type,
+  ts_rank(search_vector, websearch_to_tsquery('english', 'aruba 6200')) as rank
+FROM devices
+WHERE search_vector @@ websearch_to_tsquery('english', 'aruba 6200')
+  AND NOT archived
+ORDER BY rank DESC
+LIMIT 50;
+```
+
+**3. Use Weighted Search Vectors**
+
+Our `search_vector` columns use weights (A, B, C) to prioritize different fields:
+
+```sql
+-- Devices search_vector weights:
+-- A (highest): serial_number, device_name
+-- B (medium):  mac_address, model
+-- C (lowest):  device_type, region, location_city, location_country
+
+-- This means matches in serial_number rank higher than matches in region
+```
+
+**4. Performance Optimization**
+
+```sql
+-- ✅ FAST: Indexed full-text search
+SELECT * FROM search_devices('aruba 6200', 50);
+
+-- ✅ FAST: Direct search_vector query
+WHERE search_vector @@ websearch_to_tsquery('english', 'query')
+
+-- ❌ SLOW: to_tsvector on-the-fly (no index)
+WHERE to_tsvector('english', device_name) @@ to_tsquery('aruba')
+
+-- ✅ Use the generated column instead
+WHERE search_vector @@ websearch_to_tsquery('english', 'aruba')
+```
+
+**5. Combine Full-Text with Filters**
+
+```sql
+-- ✅ Filter first, then search (uses multiple indexes)
+SELECT
+  serial_number,
+  device_name,
+  ts_rank(search_vector, websearch_to_tsquery('english', 'switch')) as rank
+FROM devices
+WHERE device_type = 'SWITCH'              -- Uses idx_devices_type
+  AND region = 'us-west'                  -- Uses idx_devices_region
+  AND search_vector @@ websearch_to_tsquery('english', '6200')  -- Uses idx_devices_search
+ORDER BY rank DESC;
+```
+
+**6. Trigram Search for Fuzzy Matching**
+
+For fuzzy/partial name matching, use the `pg_trgm` GIN indexes:
+
+```sql
+-- ✅ FAST: Uses idx_clients_name_trgm (GIN trigram index)
+SELECT * FROM clients
+WHERE name ILIKE '%iphone%'
+LIMIT 50;
+
+-- Can also use similarity matching
+SELECT
+  name,
+  similarity(name, 'iPhone') as sim
+FROM clients
+WHERE name % 'iPhone'  -- % operator = similar to
+ORDER BY sim DESC
+LIMIT 10;
+```
+
+---
+
+#### pgvector Index Limitations & Best Practices
+
+**Critical Limitation: 2000-Dimension Maximum**
+
+pgvector's HNSW and IVFFlat indexes **only support up to 2000 dimensions**. Our schema uses `vector(3072)` to support OpenAI's `text-embedding-3-large` model, which means:
+
+⚠️ **We CANNOT create vector indexes on our embedding columns**
+
+```sql
+-- ❌ FAILS: Dimension 3072 > 2000 limit
+CREATE INDEX idx_agent_messages_embedding
+ON agent_messages USING hnsw(embedding vector_cosine_ops);
+-- ERROR: hnsw index does not support vector(3072)
+
+-- ❌ FAILS: Same issue with IVFFlat
+CREATE INDEX idx_agent_messages_embedding
+ON agent_messages USING ivfflat(embedding vector_cosine_ops);
+-- ERROR: ivfflat index does not support vector(3072)
+```
+
+**Current Behavior: Sequential Scans**
+
+All semantic search queries use **sequential scans** (full table scans):
+
+```sql
+-- This query scans ALL rows in agent_messages
+SELECT
+  id,
+  content,
+  1 - (embedding <=> '[0.1, 0.2, ...]'::vector(3072)) as similarity
+FROM agent_messages
+WHERE tenant_id = 'acme-corp'
+  AND conversation_id = 'conv-abc'
+  AND embedding_status = 'completed'
+  AND embedding_model = 'text-embedding-3-large'  -- CRITICAL: filter by model
+ORDER BY embedding <=> '[0.1, 0.2, ...]'::vector(3072)
+LIMIT 10;
+```
+
+**Performance Characteristics:**
+
+| Data Size | Performance | Notes |
+|-----------|-------------|-------|
+| < 10,000 rows | ✅ Acceptable | Sequential scan is fast enough |
+| 10,000 - 100,000 rows | ⚠️ Moderate | Noticeable latency (100-500ms) |
+| > 100,000 rows | ❌ Slow | Consider alternatives |
+
+**Optimization Strategies:**
+
+**1. Filter Before Similarity Search**
+
+Reduce the scan set with indexed filters:
+
+```sql
+-- ✅ GOOD: Filter first using indexed columns
+SELECT
+  id,
+  content,
+  1 - (embedding <=> $1::vector(3072)) as similarity
+FROM agent_messages
+WHERE tenant_id = 'acme-corp'              -- Uses idx_agent_messages_tenant
+  AND conversation_id = 'conv-abc'         -- Uses idx_agent_messages_tenant_conversation
+  AND embedding_status = 'completed'       -- Uses idx_agent_messages_embedding_status
+  AND embedding_model = 'text-embedding-3-large'  -- Filter by model
+  AND created_at > NOW() - INTERVAL '30 days'     -- Further reduce scan set
+ORDER BY embedding <=> $1::vector(3072)
+LIMIT 10;
+```
+
+**2. Partition by Tenant**
+
+For multi-tenant deployments, consider table partitioning by `tenant_id` to isolate tenant data:
+
+```sql
+-- Each tenant gets a smaller table to scan
+CREATE TABLE agent_messages PARTITION BY LIST (tenant_id);
+CREATE TABLE agent_messages_acme PARTITION OF agent_messages FOR VALUES IN ('acme-corp');
+CREATE TABLE agent_messages_globex PARTITION OF agent_messages FOR VALUES IN ('globex');
+```
+
+**3. Use Dual Embedding Strategy (Advanced)**
+
+For production with millions of messages, consider storing **two embeddings**:
+
+```sql
+ALTER TABLE agent_messages
+ADD COLUMN embedding_reduced vector(1536),  -- Reduced dimensions for indexing
+ADD COLUMN embedding_dimension_reduced INTEGER;
+
+-- Create index on reduced embedding
+CREATE INDEX idx_agent_messages_embedding_reduced
+ON agent_messages USING hnsw(embedding_reduced vector_cosine_ops);
+
+-- Two-phase search:
+-- 1. Fast approximate search with index (top 100)
+-- 2. Precise re-ranking with full embedding (top 10)
+WITH approximate_results AS (
+  SELECT id, content, embedding
+  FROM agent_messages
+  WHERE tenant_id = 'acme-corp'
+    AND embedding_reduced IS NOT NULL
+  ORDER BY embedding_reduced <=> $1::vector(1536)
+  LIMIT 100
+)
+SELECT
+  id,
+  content,
+  1 - (embedding <=> $2::vector(3072)) as similarity
+FROM approximate_results
+ORDER BY embedding <=> $2::vector(3072)
+LIMIT 10;
+```
+
+**4. External Vector Search Engine**
+
+For very large deployments (millions of vectors), consider external vector databases:
+
+- **Pinecone** - Managed vector database
+- **Weaviate** - Open-source vector search engine
+- **Qdrant** - High-performance vector database
+- **Milvus** - Cloud-native vector database
+
+Store only metadata in PostgreSQL, vectors in external engine.
+
+**5. Dimensionality Reduction**
+
+Use PCA, UMAP, or other techniques to reduce embeddings to ≤2000 dimensions:
+
+```python
+# Python example: Reduce 3072 → 1536 dimensions
+from sklearn.decomposition import PCA
+
+pca = PCA(n_components=1536)
+reduced_embeddings = pca.fit_transform(full_embeddings)
+```
+
+**Best Practices:**
+
+1. **Always Filter by `embedding_model`** - Don't compare embeddings from different models
+2. **Use `embedding_status = 'completed'`** - Exclude pending/failed embeddings
+3. **Limit Result Set** - Use `LIMIT` to stop scanning early
+4. **Monitor Query Performance** - Use `EXPLAIN ANALYZE` to track scan times
+5. **Consider Caching** - Cache frequently requested similarity results in Redis
+6. **Batch Operations** - For bulk similarity searches, use batching to amortize overhead
+
+**Vector Similarity Operators:**
+
+```sql
+-- Cosine distance (most common for semantic search)
+-- Range: 0 (identical) to 2 (opposite)
+ORDER BY embedding <=> query_vector
+
+-- Euclidean distance (L2)
+-- Range: 0 (identical) to infinity
+ORDER BY embedding <-> query_vector
+
+-- Negative inner product
+-- Range: -infinity to +infinity
+ORDER BY embedding <#> query_vector
+
+-- Convert cosine distance to similarity (0-1 scale)
+SELECT 1 - (embedding <=> query_vector) as similarity
+```
+
+**Memory Considerations:**
+
+```sql
+-- vector(3072) with FLOAT4 = 3072 * 4 bytes = 12.3 KB per embedding
+-- 1 million messages = ~12.3 GB just for embeddings
+-- Factor in PostgreSQL overhead: ~15-20 GB total
+
+-- Monitor embedding storage
+SELECT
+  pg_size_pretty(pg_total_relation_size('agent_messages')) as total_size,
+  COUNT(*) as message_count,
+  COUNT(*) FILTER (WHERE embedding IS NOT NULL) as embeddings_count,
+  pg_size_pretty(pg_total_relation_size('agent_messages') / NULLIF(COUNT(*), 0)) as avg_row_size
+FROM agent_messages;
+```
+
+---
+
+### 2. Use Indexes Wisely
 
 ```sql
 -- ✅ GOOD: Uses index on device_type
