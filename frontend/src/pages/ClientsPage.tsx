@@ -27,6 +27,7 @@ import { useClientsFilters, type FilterPreset, filtersToQueryParams } from '../h
 import { ClientsFilterPanel, ClientsFilterBar } from '../components/filters/ClientsFilterPanel'
 import { ReportButton } from '../components/reports/ReportButton'
 import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
+import { PaginationControls } from '../components/shared/PaginationControls'
 
 // Health color mapping
 const healthColors = {
@@ -391,96 +392,6 @@ function PageSizeSelector({
   )
 }
 
-// Pagination Controls Component
-function PaginationControls({
-  page,
-  totalPages,
-  total,
-  pageSize,
-  onPageChange,
-}: {
-  page: number
-  totalPages: number
-  total: number
-  pageSize: number
-  onPageChange: (page: number) => void
-}) {
-  const startItem = (page - 1) * pageSize + 1
-  const endItem = Math.min(page * pageSize, total)
-
-  // Generate page numbers to show
-  const getPageNumbers = () => {
-    const pages: (number | string)[] = []
-    const maxVisible = 7
-
-    if (totalPages <= maxVisible) {
-      for (let i = 1; i <= totalPages; i++) pages.push(i)
-    } else {
-      pages.push(1)
-      if (page > 3) pages.push('...')
-
-      const start = Math.max(2, page - 1)
-      const end = Math.min(totalPages - 1, page + 1)
-
-      for (let i = start; i <= end; i++) pages.push(i)
-
-      if (page < totalPages - 2) pages.push('...')
-      pages.push(totalPages)
-    }
-    return pages
-  }
-
-  return (
-    <div className="flex items-center justify-between px-4 py-3 border-t border-slate-700/50 bg-slate-900/30">
-      <div className="text-sm text-slate-400">
-        Showing <span className="font-medium text-white">{startItem.toLocaleString()}</span> to{' '}
-        <span className="font-medium text-white">{endItem.toLocaleString()}</span> of{' '}
-        <span className="font-medium text-white">{total.toLocaleString()}</span> clients
-      </div>
-
-      <div className="flex items-center gap-1">
-        {/* Previous button */}
-        <button
-          onClick={() => onPageChange(page - 1)}
-          disabled={page === 1}
-          className="px-3 py-1.5 text-sm rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Previous
-        </button>
-
-        {/* Page numbers */}
-        <div className="flex items-center gap-1 mx-2">
-          {getPageNumbers().map((p, idx) => (
-            typeof p === 'number' ? (
-              <button
-                key={idx}
-                onClick={() => onPageChange(p)}
-                className={`min-w-[36px] px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                  p === page
-                    ? 'bg-violet-600 text-white'
-                    : 'border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                {p}
-              </button>
-            ) : (
-              <span key={idx} className="px-2 text-slate-500">...</span>
-            )
-          ))}
-        </div>
-
-        {/* Next button */}
-        <button
-          onClick={() => onPageChange(page + 1)}
-          disabled={page === totalPages}
-          className="px-3 py-1.5 text-sm rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Next
-        </button>
-      </div>
-    </div>
-  )
-}
 
 // Filtered Clients Table Component
 function FilteredClientsTable({ filters }: { filters: ReturnType<typeof useClientsFilters>['filters'] }) {
@@ -667,7 +578,10 @@ function FilteredClientsTable({ filters }: { filters: ReturnType<typeof useClien
           totalPages={data.total_pages}
           total={data.total}
           pageSize={pageSize}
+          itemName="clients"
           onPageChange={setCurrentPage}
+          variant="text"
+          theme="violet"
         />
       )}
     </div>
