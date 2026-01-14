@@ -14,6 +14,13 @@ from pydantic import BaseModel, Field
 
 
 # =============================================================================
+# Constants
+# =============================================================================
+
+MAX_MESSAGE_LENGTH = 10000
+
+
+# =============================================================================
 # Chat Schemas
 # =============================================================================
 
@@ -21,7 +28,7 @@ from pydantic import BaseModel, Field
 class ChatRequest(BaseModel):
     """Request to send a chat message."""
 
-    message: str = Field(..., min_length=1, max_length=10000)
+    message: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
     conversation_id: Optional[UUID] = None
 
     class Config:
