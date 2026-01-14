@@ -7,6 +7,174 @@ sanitized to remove credentials, connection strings, file paths,
 and other potentially sensitive data.
 
 Security Principle: Never expose internal details - only safe, generic error messages.
+
+Why Sanitization Matters
+------------------------
+API error messages can inadvertently leak sensitive information:
+- Database connection strings with credentials
+- API keys and authentication tokens
+- File paths revealing system structure
+- Stack traces exposing code internals
+- Environment variable names and values
+- IP addresses and network topology
+
+This module prevents such leaks by automatically redacting sensitive
+patterns before error messages reach clients, while preserving the
+original detailed errors for internal logging.
+
+Usage Examples
+--------------
+
+Basic Usage (FastAPI Exception Handler):
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import JSONResponse
+    from src.glp.api.error_sanitizer import sanitize_error_message
+
+    app = FastAPI()
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        error_msg = str(exc)
+
+        # Log original error internally (NEVER send to client)
+        logger.error(f"Internal error: {error_msg}", exc_info=exc)
+
+        # Sanitize before returning to client
+        safe_msg = sanitize_error_message(error_msg, "Internal server error")
+
+        return JSONResponse(
+            status_code=500,
+            content={"detail": safe_msg}
+        )
+
+Instance-Based Usage:
+    from src.glp.api.error_sanitizer import ErrorSanitizer
+
+    sanitizer = ErrorSanitizer()
+
+    try:
+        conn = connect("postgresql://admin:secret123@db.internal/prod")
+    except Exception as e:
+        result = sanitizer.sanitize(str(e))
+        if result.was_sanitized:
+            logger.warning(f"Sanitized {result.redaction_count} sensitive items")
+        return {"error": result.sanitized_message}
+
+    # Original: "Connection failed to postgresql://admin:secret123@db.internal/prod"
+    # Sanitized: "Connection failed to [DATABASE_URL]"
+
+Custom Patterns:
+    from src.glp.api.error_sanitizer import ErrorSanitizer
+
+    # Add organization-specific patterns
+    sanitizer = ErrorSanitizer()
+    sanitizer.add_pattern(
+        r'tenant[-_]?id[=:\s]+[^\s,;]+',
+        'tenant_id=[REDACTED]'
+    )
+    sanitizer.add_pattern(
+        r'customer[-_]?key[=:\s]+[^\s,;]+',
+        'customer_key=[REDACTED]'
+    )
+
+    # Now handles custom patterns too
+    msg = "Failed for tenant_id=acme-corp-12345"
+    result = sanitizer.sanitize(msg)
+    # Returns: "Failed for tenant_id=[REDACTED]"
+
+Checking Safety Before Exposure:
+    from src.glp.api.error_sanitizer import get_sanitizer
+
+    sanitizer = get_sanitizer()
+    error_msg = "Connection timeout after 30s"
+
+    if sanitizer.is_safe(error_msg):
+        # No sensitive data detected, safe to return as-is
+        return {"error": error_msg}
+    else:
+        # Contains sensitive data, sanitize first
+        return {"error": sanitizer.sanitize(error_msg).sanitized_message}
+
+What Gets Sanitized
+-------------------
+The module includes comprehensive pattern matching for:
+
+1. Database Connections:
+   - PostgreSQL: postgresql://user:pass@host/db → [DATABASE_URL]
+   - MySQL: mysql://user:pass@host/db → [DATABASE_URL]
+   - MongoDB: mongodb+srv://user:pass@host/db → [DATABASE_URL]
+   - Redis: redis://user:pass@host:6379 → [REDIS_URL]
+
+2. Authentication:
+   - API keys: api_key=sk_live_abc123 → api_key=[REDACTED]
+   - Bearer tokens: Bearer eyJhbG... → Bearer [REDACTED]
+   - Client secrets: client_secret=abc123 → client_secret=[REDACTED]
+   - JWT tokens: eyJhbGc...eyJzdW...signature → [JWT_REDACTED]
+
+3. Credentials:
+   - Passwords: password=secret123 → password=[REDACTED]
+   - Private keys: -----BEGIN PRIVATE KEY----- → [PRIVATE_KEY]
+   - AWS keys: AKIAIOSFODNN7EXAMPLE → [AWS_ACCESS_KEY]
+
+4. System Information:
+   - File paths: /home/user/app/config.py → [FILE_PATH]
+   - Stack traces: Traceback (most recent... → [STACK_TRACE]
+   - IP addresses: 192.168.1.100 → [IP_ADDRESS]
+   - Environment vars: GLP_CLIENT_SECRET → [ENV_VAR]
+
+5. Other Sensitive Data:
+   - MAC addresses: 00:1B:44:11:3A:B7 → [MAC_ADDRESS]
+   - Base64 strings (40+ chars): YWJjZGVm... → [BASE64_REDACTED]
+   - Hex strings (32+ chars): a1b2c3d4... → [HEX_STRING]
+
+Integration Patterns
+--------------------
+
+With FastAPI HTTPException:
+    from fastapi import HTTPException
+    from src.glp.api.error_sanitizer import sanitize_error_message
+
+    def get_device(device_id: str):
+        try:
+            return fetch_device(device_id)
+        except DatabaseError as e:
+            # Original: "Connection to postgresql://user:pass@host/db failed"
+            safe_msg = sanitize_error_message(str(e), "Database error")
+            # Sanitized: "Database error: Connection to [DATABASE_URL] failed"
+            raise HTTPException(status_code=500, detail=safe_msg)
+
+With Custom Exception Classes:
+    from src.glp.api.error_sanitizer import ErrorSanitizer
+
+    class SafeAPIException(Exception):
+        '''Exception that auto-sanitizes error messages.'''
+
+        def __init__(self, message: str):
+            self.raw_message = message
+            sanitizer = ErrorSanitizer()
+            result = sanitizer.sanitize(message)
+            super().__init__(result.sanitized_message)
+            self.was_sanitized = result.was_sanitized
+
+    # Usage
+    raise SafeAPIException("Failed to auth with api_key=sk_live_abc123")
+    # Client sees: "Failed to auth with api_key=[REDACTED]"
+
+Performance Considerations
+--------------------------
+- Patterns are compiled once at initialization for speed
+- Regex matching is O(n) where n is message length
+- Use singleton get_sanitizer() for shared instance
+- Pattern order matters: specific patterns before generic ones
+
+Security Best Practices
+-----------------------
+1. ALWAYS sanitize errors before client exposure
+2. ALWAYS log original errors internally (server-side only)
+3. NEVER skip sanitization "just this once"
+4. Add custom patterns for organization-specific secrets
+5. Use error_type parameter for context (e.g., "Database error")
+6. Review and update patterns as new secret types emerge
 """
 
 from __future__ import annotations
@@ -45,11 +213,74 @@ class ErrorSanitizer:
     database connection strings, file paths, environment variables,
     and stack traces before returning errors to clients.
 
-    Usage:
+    Basic Usage:
         sanitizer = ErrorSanitizer()
         result = sanitizer.sanitize(error_message)
         # Return result.sanitized_message to client
         # Log original error_message internally
+
+    Advanced Usage Examples:
+
+        # Example 1: Database connection error
+        error = "Cannot connect to postgresql://admin:secret@db.prod.local/users"
+        result = sanitizer.sanitize(error, error_type="Database error")
+        print(result.sanitized_message)
+        # Output: "Database error: Cannot connect to [DATABASE_URL]"
+        print(f"Redacted {result.redaction_count} items")
+        # Output: "Redacted 1 items"
+
+        # Example 2: Multiple sensitive items
+        error = "Auth failed: api_key=sk_live_abc123, secret=xyz789, ip=192.168.1.50"
+        result = sanitizer.sanitize(error)
+        print(result.sanitized_message)
+        # Output: "Auth failed: api_key=[REDACTED], secret=[REDACTED], ip=[IP_ADDRESS]"
+        print(result.was_sanitized)
+        # Output: True
+
+        # Example 3: Stack trace redaction
+        error = '''Traceback (most recent call last):
+          File "/app/handlers.py", line 42, in process
+            connect(os.environ["DATABASE_URL"])
+        DatabaseError: connection refused'''
+        result = sanitizer.sanitize(error)
+        # Stack trace and file paths are redacted
+
+        # Example 4: Custom patterns for your domain
+        sanitizer = ErrorSanitizer()
+        sanitizer.add_pattern(
+            r'order[-_]?id[=:\s]+[A-Z0-9\-]+',
+            'order_id=[REDACTED]'
+        )
+        error = "Payment failed for order_id=ORD-2024-12345"
+        result = sanitizer.sanitize(error)
+        # Output: "Payment failed for order_id=[REDACTED]"
+
+        # Example 5: Check before sanitizing
+        error1 = "Connection timeout after 30 seconds"
+        error2 = "Connection to postgresql://user:pass@host/db failed"
+
+        if sanitizer.is_safe(error1):
+            # Safe to return as-is
+            return error1
+        else:
+            return sanitizer.sanitize(error1).sanitized_message
+
+        if sanitizer.is_safe(error2):
+            return error2  # Won't execute
+        else:
+            return sanitizer.sanitize(error2).sanitized_message
+            # Returns: "Connection to [DATABASE_URL] failed"
+
+        # Example 6: Custom max length
+        long_error_sanitizer = ErrorSanitizer(max_message_length=100)
+        very_long_error = "Error: " + "x" * 200
+        result = long_error_sanitizer.sanitize(very_long_error)
+        print(result.sanitized_message)
+        # Output: "Error: xxxx... [TRUNCATED]" (max 100 chars)
+
+    Attributes:
+        patterns: List of (regex_pattern, replacement) tuples
+        max_message_length: Maximum length of sanitized messages
     """
 
     # Patterns to sanitize with their replacements
