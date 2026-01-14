@@ -7,8 +7,9 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .api.clients_router import router as clients_router
 from .api.dashboard_router import router as dashboard_router
@@ -19,6 +20,9 @@ from .api.dependencies import (
     init_glp_client,
 )
 from .api.router import router
+
+# Import error sanitizer for exception handling
+from ..api.error_sanitizer import sanitize_error_message
 
 # Import reports router
 from ..reports.api import router as reports_router
@@ -250,6 +254,49 @@ async def lifespan(app: FastAPI):
     logger.info("Database pool closed")
 
 
+# Exception handlers for automatic error sanitization
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Handle HTTPException with sanitized error messages.
+
+    Sanitizes the detail field to remove sensitive information before
+    returning to the client. Original error is logged internally.
+    """
+    # Log original error internally
+    logger.warning(f"HTTPException: {exc.status_code} - {exc.detail}")
+
+    # Sanitize error message
+    sanitized_detail = sanitize_error_message(str(exc.detail), error_type=None)
+
+    # Return sanitized response
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": sanitized_detail},
+        headers=getattr(exc, "headers", None),
+    )
+
+
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Handle generic exceptions with sanitized error messages.
+
+    Catches all unhandled exceptions, sanitizes them, and returns
+    500 Internal Server Error. Original exception is logged internally.
+    """
+    # Log original error internally with full traceback
+    logger.exception(f"Unhandled exception: {exc}")
+
+    # Sanitize error message
+    sanitized_message = sanitize_error_message(
+        str(exc),
+        error_type="Internal Server Error"
+    )
+
+    # Return sanitized response
+    return JSONResponse(
+        status_code=500,
+        content={"detail": sanitized_message},
+    )
+
+
 # Create FastAPI application
 app = FastAPI(
     title="HPE GreenLake Device Assignment API",
@@ -274,6 +321,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Register exception handlers for automatic error sanitization
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
 
 # Configure CORS
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
