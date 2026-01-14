@@ -64,7 +64,7 @@ async def get_fields(
         raise
 
 
-@router.post("/custom", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
 async def create_report(
     request: CreateReportRequest,
     pool: asyncpg.Pool = Depends(get_db_pool),
@@ -172,7 +172,7 @@ async def create_report(
         )
 
 
-@router.get("/custom", response_model=ReportListResponse)
+@router.get("/", response_model=ReportListResponse)
 async def list_reports(
     pool: asyncpg.Pool = Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
@@ -244,7 +244,7 @@ async def list_reports(
         )
 
 
-@router.get("/custom/{id}", response_model=ReportResponse)
+@router.get("/{id}", response_model=ReportResponse)
 async def get_report(
     id: str,
     pool: asyncpg.Pool = Depends(get_db_pool),
@@ -319,7 +319,7 @@ async def get_report(
         )
 
 
-@router.put("/custom/{id}", response_model=ReportResponse)
+@router.put("/{id}", response_model=ReportResponse)
 async def update_report(
     id: str,
     request: UpdateReportRequest,
@@ -458,7 +458,7 @@ async def update_report(
         )
 
 
-@router.delete("/custom/{id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_report(
     id: str,
     pool: asyncpg.Pool = Depends(get_db_pool),
@@ -510,7 +510,7 @@ async def delete_report(
         )
 
 
-@router.post("/custom/{id}/execute", response_model=ExecuteReportResponse)
+@router.post("/{id}/execute", response_model=ExecuteReportResponse)
 async def execute_report(
     id: str,
     format: ExportFormat = Query(ExportFormat.JSON, description="Output format"),

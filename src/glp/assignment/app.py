@@ -20,8 +20,9 @@ from .api.dependencies import (
 )
 from .api.router import router
 
-# Import reports router
+# Import reports routers
 from ..reports.api import router as reports_router
+from ..reports.custom_reports_api import router as custom_reports_router
 
 # Import agent router and components (optional - only if agent module exists)
 try:
@@ -329,6 +330,7 @@ app.include_router(router)
 app.include_router(dashboard_router)
 app.include_router(clients_router)
 app.include_router(reports_router)
+app.include_router(custom_reports_router)
 
 # Include agent router if available
 if AGENT_AVAILABLE and agent_router:
