@@ -336,4 +336,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=True,
+        ws_max_size=int(os.getenv("WS_MAX_MESSAGE_SIZE_MB", "1")) * 1024 * 1024,
     )

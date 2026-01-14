@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Optional
 from uuid import UUID
 
@@ -41,8 +42,10 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 # WebSocket message size limits
-MAX_WS_MESSAGE_SIZE_MB = 1
-MAX_WS_MESSAGE_SIZE_BYTES = MAX_WS_MESSAGE_SIZE_MB * 1024 * 1024  # 1 MB
+# Read from environment variable (default: 1 MB)
+# IMPORTANT: This must match Uvicorn's --ws-max-size parameter to prevent memory buffering
+MAX_WS_MESSAGE_SIZE_MB = int(os.getenv("WS_MAX_MESSAGE_SIZE_MB", "1"))
+MAX_WS_MESSAGE_SIZE_BYTES = MAX_WS_MESSAGE_SIZE_MB * 1024 * 1024
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
