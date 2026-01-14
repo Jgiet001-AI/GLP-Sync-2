@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 
 interface DrawerProps {
@@ -19,6 +19,25 @@ const widthClasses = {
 
 export function Drawer({ open, onClose, title, subtitle, children, width = 'lg' }: DrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null)
+  const [isVisible, setIsVisible] = useState(false)
+  const [shouldRender, setShouldRender] = useState(false)
+
+  // Animation state management
+  useEffect(() => {
+    if (open) {
+      // Mount the component, then trigger slide-in animation
+      setShouldRender(true)
+      // Small delay to ensure DOM is ready before animating
+      const timer = setTimeout(() => setIsVisible(true), 10)
+      return () => clearTimeout(timer)
+    } else {
+      // Trigger slide-out animation
+      setIsVisible(false)
+      // Delay unmounting until animation completes (300ms duration)
+      const timer = setTimeout(() => setShouldRender(false), 300)
+      return () => clearTimeout(timer)
+    }
+  }, [open])
 
   // Handle escape key
   useEffect(() => {
@@ -54,13 +73,15 @@ export function Drawer({ open, onClose, title, subtitle, children, width = 'lg' 
     }
   }, [open])
 
-  if (!open) return null
+  if (!shouldRender) return null
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity"
+        className={`absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity duration-300 ${
+          isVisible ? 'opacity-100' : 'opacity-0'
+        }`}
         onClick={onClose}
         aria-hidden="true"
       />
@@ -69,7 +90,9 @@ export function Drawer({ open, onClose, title, subtitle, children, width = 'lg' 
       <div className="fixed inset-y-0 right-0 flex max-w-full pl-10">
         <div
           ref={drawerRef}
-          className={`w-screen ${widthClasses[width]} transform transition-transform duration-300 ease-in-out`}
+          className={`w-screen ${widthClasses[width]} transform transition-transform duration-300 ease-in-out ${
+            isVisible ? 'translate-x-0' : 'translate-x-full'
+          }`}
         >
           <div className="flex h-full flex-col overflow-y-auto bg-slate-800 shadow-xl">
             {/* Header */}
