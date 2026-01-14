@@ -120,7 +120,7 @@ docker compose push
 ### Core Sync
 - `main.py` - CLI entry point for one-time syncs
 - `scheduler.py` - Long-running scheduler with health endpoint
-- `server.py` - FastMCP server (27 read-only database tools)
+- `server.py` - FastMCP server (27 read-only + 5 write tools for device management)
 
 ### API Layer (`src/glp/api/`)
 - `auth.py` - OAuth2 TokenManager with token caching
@@ -287,3 +287,230 @@ async def chat(websocket: WebSocket, ticket: str):
         return
     await agent.stream_response(websocket, message)
 ```
+
+## MCP Server Write Tools
+
+The MCP server (`server.py`) provides 5 write tools for device management operations through the Model Context Protocol. These tools enable AI assistants to perform device operations with built-in rate limiting, confirmation workflows, and error handling.
+
+### Available Write Tools
+
+1. **apply_device_assignments** - Apply subscriptions, applications, and tags to devices
+2. **add_devices** - Add new devices to GreenLake Platform
+3. **archive_devices** - Archive devices (high-risk operation)
+4. **unarchive_devices** - Restore archived devices
+5. **update_device_tags** - Bulk update device tags
+
+### Environment Variables Required
+
+Write operations require GreenLake OAuth2 credentials:
+- `GLP_CLIENT_ID` - GreenLake client ID
+- `GLP_CLIENT_SECRET` - GreenLake client secret
+- `GLP_TOKEN_URL` - OAuth2 token endpoint
+- `DATABASE_URL` - PostgreSQL connection string
+
+### Tool Usage Examples
+
+#### Apply Device Assignments
+Bulk assignment of subscriptions, applications, and tags to devices:
+
+```python
+# Via MCP protocol
+{
+  "name": "apply_device_assignments",
+  "arguments": {
+    "assignments": [
+      {
+        "serial_number": "VNT9KWC01V",
+        "application_id": "aruba_central",
+        "region": "us-west",
+        "subscription_key": "PAT4DYYJAEEEJA",
+        "tags": {"customer": "Acme Corp", "location": "HQ"}
+      }
+    ],
+    "wait_for_completion": true
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "completed",
+  "summary": {
+    "total": 1,
+    "existing_processed": 1,
+    "new_devices_added": 0,
+    "succeeded": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+  "results": [...],
+  "duration_seconds": 5.2
+}
+```
+
+#### Add Devices
+Add new devices to GreenLake Platform:
+
+```python
+{
+  "name": "add_devices",
+  "arguments": {
+    "devices": [
+      {
+        "serial_number": "NEW123456",
+        "mac_address": "AA:BB:CC:DD:EE:FF",
+        "part_number": "JL253A",
+        "device_type": "SWITCH",
+        "tags": {"new": "true"}
+      }
+    ],
+    "wait_for_completion": true
+  }
+}
+```
+
+**Limits:** Maximum 25 devices per call for rate limiting.
+
+#### Archive Devices (High-Risk)
+Archive devices with confirmation workflow:
+
+```python
+# First call - triggers confirmation requirement
+{
+  "name": "archive_devices",
+  "arguments": {
+    "device_ids": ["uuid1", "uuid2", "uuid3"],
+    "sync_after": true,
+    "wait_for_completion": true
+  }
+}
+```
+
+**Response (requires confirmation):**
+```json
+{
+  "status": "confirmation_required",
+  "risk_level": "high",
+  "operation_type": "archive_devices",
+  "device_count": 3,
+  "message": "⚠️ Archive 3 devices - This operation will archive devices...",
+  "confirmation_hint": "Call again with confirmed=true to proceed"
+}
+```
+
+**Confirmed call:**
+```python
+{
+  "name": "archive_devices",
+  "arguments": {
+    "device_ids": ["uuid1", "uuid2", "uuid3"],
+    "confirmed": true,
+    "wait_for_completion": true
+  }
+}
+```
+
+#### Unarchive Devices
+Restore archived devices:
+
+```python
+{
+  "name": "unarchive_devices",
+  "arguments": {
+    "device_ids": ["uuid1", "uuid2"],
+    "sync_after": true,
+    "wait_for_completion": true
+  }
+}
+```
+
+#### Update Device Tags
+Bulk update tags across devices:
+
+```python
+{
+  "name": "update_device_tags",
+  "arguments": {
+    "device_ids": ["uuid1", "uuid2"],
+    "tags": {
+      "environment": "production",  # Add/update tag
+      "old_tag": null                # Remove tag
+    },
+    "wait_for_completion": true
+  }
+}
+```
+
+**Limits:** Maximum 25 devices per call.
+
+### Rate Limiting
+
+Write operations are automatically rate-limited to prevent hitting GreenLake API limits:
+
+- **PATCH operations** (apply_assignments, archive, unarchive, update_tags): 3.5s interval (max 17/min, limit is 20/min)
+- **POST operations** (add_devices): 2.6s interval (max 23/min, limit is 25/min)
+
+Rate limiting is handled transparently using `SequentialRateLimiter` from `src.glp.api.resilience`.
+
+### Confirmation Workflow
+
+High-risk operations trigger confirmation workflows based on:
+
+**Risk Levels:**
+- **LOW**: No confirmation (add_device, update_tags for ≤5 devices)
+- **MEDIUM**: Confirmation recommended (apply_assignments, unarchive)
+- **HIGH**: Confirmation required (archive_devices)
+- **CRITICAL**: Mass operations (>20 devices)
+
+**Risk Elevation:**
+- Operations affecting >5 devices: risk level increases
+- Operations affecting >20 devices: CRITICAL risk level
+
+**Confirmation Process:**
+1. First call returns `status: "confirmation_required"` with risk assessment
+2. User reviews operation details
+3. Second call with `confirmed: true` executes the operation
+
+### Error Handling
+
+All write tools include comprehensive error handling:
+
+```python
+{
+  "status": "error",
+  "error": "GLP client not initialized. Set GLP_CLIENT_ID and GLP_CLIENT_SECRET.",
+  "error_type": "ConfigurationError"
+}
+```
+
+Common error types:
+- `ConfigurationError` - Missing environment variables
+- `ValidationError` - Invalid input (e.g., bad UUID, exceeds device limits)
+- `GLPAPIError` - GreenLake API errors
+- `OperationTimeout` - Operation didn't complete in time
+
+### Best Practices
+
+1. **Use wait_for_completion**: Set to `true` to ensure operations complete and sync results
+2. **Check limits**: Don't exceed 25 devices for add_devices and update_device_tags
+3. **Confirm high-risk operations**: Always review confirmation messages before proceeding
+4. **Handle rate limits**: Tools automatically rate-limit, but avoid tight loops
+5. **Validate UUIDs**: Device IDs must be valid UUIDs for archive/unarchive/update operations
+6. **Sync after changes**: Use `sync_after: true` for archive/unarchive to ensure database reflects changes
+
+### Integration with Agent Chatbot
+
+The agent chatbot (`src/glp/agent/`) can call these MCP tools through the tool registry:
+
+```python
+from src.glp.agent.tools.registry import ToolRegistry
+
+registry = ToolRegistry(mcp_server_url="http://localhost:8010")
+result = await registry.call_tool("add_devices", devices=[...])
+```
+
+The agent includes additional safeguards:
+- Chain-of-thought redaction for security
+- Conversation context for multi-turn operations
+- Semantic memory for learning from past operations

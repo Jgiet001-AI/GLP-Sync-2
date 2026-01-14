@@ -1,21 +1,29 @@
 """
 FastMCP Server for HPE GreenLake Device & Subscription Inventory
 
-A read-only MCP server providing tools, resources, prompts, and sampling
-for querying the PostgreSQL database.
+An MCP server providing read and write tools for HPE GreenLake inventory management.
+
+Read-only tools: Query devices, subscriptions, tags, and analyze inventory data.
+Write tools: Add devices, apply assignments, archive/unarchive devices, update tags.
 
 Usage:
     python server.py                              # stdio transport (default)
     python server.py --transport http --port 8000 # HTTP transport
+
+Environment Variables Required for Write Operations:
+    GLP_CLIENT_ID, GLP_CLIENT_SECRET, GLP_TOKEN_URL - GreenLake OAuth2 credentials
+    DATABASE_URL - PostgreSQL connection string
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 from dotenv import load_dotenv
@@ -25,6 +33,158 @@ from starlette.responses import JSONResponse
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# Write Operation Risk Assessment (for confirmation workflows)
+# =============================================================================
+
+from enum import Enum
+
+
+class RiskLevel(str, Enum):
+    """Risk level of operations for confirmation requirements."""
+
+    LOW = "low"  # No confirmation needed
+    MEDIUM = "medium"  # Confirmation recommended
+    HIGH = "high"  # Confirmation required
+    CRITICAL = "critical"  # Multi-step confirmation required
+
+
+class OperationType(str, Enum):
+    """Types of write operations."""
+
+    ADD_DEVICE = "add_device"
+    UPDATE_TAGS = "update_tags"
+    APPLY_ASSIGNMENTS = "apply_assignments"
+    ARCHIVE_DEVICES = "archive_devices"
+    UNARCHIVE_DEVICES = "unarchive_devices"
+
+
+# Risk assessment configuration
+RISK_THRESHOLDS = {
+    OperationType.ADD_DEVICE: RiskLevel.LOW,
+    OperationType.UPDATE_TAGS: RiskLevel.LOW,
+    OperationType.APPLY_ASSIGNMENTS: RiskLevel.MEDIUM,
+    OperationType.ARCHIVE_DEVICES: RiskLevel.HIGH,
+    OperationType.UNARCHIVE_DEVICES: RiskLevel.MEDIUM,
+}
+
+# Device count thresholds for elevated risk
+BULK_THRESHOLD = 5  # > 5 devices elevates risk
+MASS_THRESHOLD = 20  # > 20 devices requires critical confirmation
+
+
+def _assess_risk(
+    operation_type: OperationType,
+    device_count: int = 0,
+) -> RiskLevel:
+    """Assess the risk level of an operation.
+
+    Args:
+        operation_type: Type of operation
+        device_count: Number of devices affected
+
+    Returns:
+        Assessed risk level
+    """
+    base_risk = RISK_THRESHOLDS.get(operation_type, RiskLevel.MEDIUM)
+
+    # Elevate risk based on number of devices affected
+    if device_count > MASS_THRESHOLD:
+        return RiskLevel.CRITICAL
+    elif device_count > BULK_THRESHOLD:
+        # Elevate by one level
+        if base_risk == RiskLevel.LOW:
+            return RiskLevel.MEDIUM
+        elif base_risk == RiskLevel.MEDIUM:
+            return RiskLevel.HIGH
+
+    return base_risk
+
+
+def _get_confirmation_message(
+    operation_type: OperationType,
+    device_count: int,
+    risk_level: RiskLevel,
+) -> str:
+    """Generate a confirmation message for the user.
+
+    Args:
+        operation_type: Type of operation
+        device_count: Number of devices affected
+        risk_level: Assessed risk level
+
+    Returns:
+        Confirmation message
+    """
+    messages = {
+        OperationType.ARCHIVE_DEVICES: (
+            f"Are you sure you want to archive {device_count} device(s)? "
+            "Archived devices will no longer receive updates and will be hidden from normal views."
+        ),
+        OperationType.UNARCHIVE_DEVICES: (
+            f"Restore {device_count} archived device(s)?"
+        ),
+        OperationType.APPLY_ASSIGNMENTS: (
+            f"Apply assignments to {device_count} device(s)?"
+        ),
+    }
+
+    base_message = messages.get(
+        operation_type,
+        f"Execute {operation_type.value} on {device_count} device(s)?",
+    )
+
+    if risk_level == RiskLevel.CRITICAL:
+        return f"⚠️ WARNING: High-risk operation affecting {device_count} devices. {base_message}"
+
+    return base_message
+
+
+# =============================================================================
+# Assignment Module Dependencies (optional - for write tools)
+# =============================================================================
+
+# Try to import assignment module dependencies for write operations
+try:
+    from src.glp.assignment.adapters import (
+        GLPDeviceManagerAdapter,
+        DeviceSyncerAdapter,
+        PostgresDeviceRepository,
+        PostgresSubscriptionRepository,
+    )
+    from src.glp.assignment.domain.entities import DeviceAssignment, WorkflowAction
+    from src.glp.assignment.use_cases.apply_assignments import ApplyAssignmentsUseCase
+    from src.glp.assignment.use_cases.device_actions import DeviceActionsUseCase
+    from src.glp.api.auth import TokenManager
+    from src.glp.api.client import GLPClient
+    from src.glp.api.device_manager import DeviceManager
+    from src.glp.api.devices import DeviceSyncer
+    from src.glp.api.resilience import SequentialRateLimiter
+    from src.glp.api.subscriptions import SubscriptionSyncer
+
+    ASSIGNMENT_MODULE_AVAILABLE = True
+    logger.info("Assignment module dependencies loaded successfully")
+except ImportError as e:
+    ASSIGNMENT_MODULE_AVAILABLE = False
+    logger.warning(f"Assignment module not available (write tools will not work): {e}")
+    # Define placeholders to avoid NameError
+    GLPDeviceManagerAdapter = None
+    DeviceSyncerAdapter = None
+    PostgresDeviceRepository = None
+    PostgresSubscriptionRepository = None
+    DeviceAssignment = None
+    WorkflowAction = None
+    ApplyAssignmentsUseCase = None
+    DeviceActionsUseCase = None
+    TokenManager = None
+    GLPClient = None
+    DeviceManager = None
+    DeviceSyncer = None
+    SubscriptionSyncer = None
+    SequentialRateLimiter = None
+
 # =============================================================================
 # Database Connection Pool (Lifespan)
 # =============================================================================
@@ -32,11 +192,39 @@ load_dotenv()
 # Global pool reference for REST API access
 _DB_POOL: asyncpg.Pool | None = None
 
+# Global GLP client and dependencies for write operations
+_GLP_CLIENT = None
+_TOKEN_MANAGER = None
+_DEVICE_MANAGER = None
+_DEVICE_SYNCER = None
+_SUBSCRIPTION_SYNCER = None
+
+# Global repositories, adapters, and use cases for write operations
+_DEVICE_REPO = None
+_SUBSCRIPTION_REPO = None
+_DEVICE_MANAGER_ADAPTER = None
+_DEVICE_SYNCER_ADAPTER = None
+_APPLY_ASSIGNMENTS_USE_CASE = None
+_DEVICE_ACTIONS_USE_CASE = None
+
+# Global rate limiters for write operations
+_PATCH_RATE_LIMITER = None  # For PATCH operations (20/min limit)
+_POST_RATE_LIMITER = None   # For POST operations (25/min limit)
+
+# Global pending operations tracking (for confirmation workflows)
+_PENDING_OPERATIONS: dict[str, dict[str, Any]] = {}
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Initialize and cleanup database connection pool."""
-    global _DB_POOL
+    """Initialize and cleanup database connection pool, GLP client, and use cases."""
+    global _DB_POOL, _GLP_CLIENT, _TOKEN_MANAGER, _DEVICE_MANAGER
+    global _DEVICE_SYNCER, _SUBSCRIPTION_SYNCER
+    global _DEVICE_REPO, _SUBSCRIPTION_REPO
+    global _DEVICE_MANAGER_ADAPTER, _DEVICE_SYNCER_ADAPTER
+    global _APPLY_ASSIGNMENTS_USE_CASE, _DEVICE_ACTIONS_USE_CASE
+    global _PATCH_RATE_LIMITER, _POST_RATE_LIMITER
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
@@ -51,10 +239,75 @@ async def lifespan(server: FastMCP):
         max_inactive_connection_lifetime=300,  # Close idle connections after 5 min
     )
     _DB_POOL = pool  # Store globally for REST API access
+
+    # Initialize GLP client for write operations (if assignment module is available)
+    if ASSIGNMENT_MODULE_AVAILABLE:
+        try:
+            _TOKEN_MANAGER = TokenManager()
+            _GLP_CLIENT = GLPClient(_TOKEN_MANAGER)
+            await _GLP_CLIENT.__aenter__()
+            _DEVICE_MANAGER = DeviceManager(_GLP_CLIENT)
+            _DEVICE_SYNCER = DeviceSyncer(_GLP_CLIENT, pool)
+            _SUBSCRIPTION_SYNCER = SubscriptionSyncer(_GLP_CLIENT, pool)
+
+            logger.info("GLP client initialized successfully")
+
+            # Initialize repositories
+            _DEVICE_REPO = PostgresDeviceRepository(pool)
+            _SUBSCRIPTION_REPO = PostgresSubscriptionRepository(pool)
+            logger.info("Repositories initialized successfully")
+
+            # Initialize adapters
+            _DEVICE_MANAGER_ADAPTER = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+            _DEVICE_SYNCER_ADAPTER = DeviceSyncerAdapter(_DEVICE_SYNCER)
+            logger.info("Adapters initialized successfully")
+
+            # Initialize use cases
+            _APPLY_ASSIGNMENTS_USE_CASE = ApplyAssignmentsUseCase(
+                device_repo=_DEVICE_REPO,
+                subscription_repo=_SUBSCRIPTION_REPO,
+                device_manager=_DEVICE_MANAGER_ADAPTER,
+                device_syncer=_DEVICE_SYNCER_ADAPTER,
+            )
+            _DEVICE_ACTIONS_USE_CASE = DeviceActionsUseCase(
+                device_manager=_DEVICE_MANAGER_ADAPTER,
+            )
+            logger.info("Use cases initialized successfully")
+
+            # Initialize rate limiters for write operations
+            # PATCH operations: 3.5s interval (for 20/min limits, yields ~17 req/min)
+            # POST operations: 2.6s interval (for 25/min limits, yields ~23 req/min)
+            _PATCH_RATE_LIMITER = SequentialRateLimiter(operation_type="patch")
+            _POST_RATE_LIMITER = SequentialRateLimiter(operation_type="post")
+            logger.info("Rate limiters initialized successfully")
+
+        except Exception as e:
+            logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
+    else:
+        logger.warning("Assignment module not available - write tools disabled")
+
     try:
         yield {"db_pool": pool}
     finally:
+        # Cleanup (reverse order of initialization)
+        _PATCH_RATE_LIMITER = None
+        _POST_RATE_LIMITER = None
+        _APPLY_ASSIGNMENTS_USE_CASE = None
+        _DEVICE_ACTIONS_USE_CASE = None
+        _DEVICE_MANAGER_ADAPTER = None
+        _DEVICE_SYNCER_ADAPTER = None
+        _DEVICE_REPO = None
+        _SUBSCRIPTION_REPO = None
+
+        # Cleanup GLP client
+        if _GLP_CLIENT:
+            await _GLP_CLIENT.__aexit__(None, None, None)
         _DB_POOL = None
+        _GLP_CLIENT = None
+        _TOKEN_MANAGER = None
+        _DEVICE_MANAGER = None
+        _DEVICE_SYNCER = None
+        _SUBSCRIPTION_SYNCER = None
         await pool.close()
 
 
@@ -65,9 +318,11 @@ async def lifespan(server: FastMCP):
 mcp = FastMCP(
     name="GreenLake Inventory",
     instructions=(
-        "This server provides read-only access to HPE GreenLake device and "
-        "subscription inventory. Use the tools to search devices, list subscriptions, "
-        "and analyze inventory data. All operations are read-only."
+        "This server provides access to HPE GreenLake device and subscription inventory. "
+        "Use the read-only tools to search devices, list subscriptions, and analyze inventory data. "
+        "Use the write tools (add_devices, apply_device_assignments, archive_devices, unarchive_devices, update_device_tags) to add new devices, "
+        "assign subscriptions/applications/tags to devices, archive devices, restore archived devices, and update device tags. "
+        "Write operations require proper GreenLake API credentials."
     ),
     lifespan=lifespan,
 )
@@ -84,7 +339,7 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "healthy",
         "service": "greenlake-mcp",
-        "tools": 27,
+        "tools": 32,  # 27 read-only + 5 write (apply_device_assignments, add_devices, archive_devices, unarchive_devices, update_device_tags)
     })
 
 
@@ -1893,6 +2148,876 @@ If the question cannot be answered with a SELECT query, explain why."""
                 "suggestion": "Try using search_devices, list_devices, or run_query tools.",
             }
         return {"error": error_msg}
+
+
+# =============================================================================
+# Write Tools (Device Assignment)
+# =============================================================================
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def apply_device_assignments(
+    ctx: Context,
+    assignments: list[dict[str, Any]],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Apply device assignments (subscriptions, applications, tags) to devices.
+
+    This tool performs bulk assignment operations following a phased workflow:
+    1. Process existing devices (have UUIDs)
+    2. Add new devices (no UUIDs)
+    3. Refresh DB to get new UUIDs
+    4. Process newly added devices
+
+    Args:
+        ctx: FastMCP context
+        assignments: List of device assignments with the following structure:
+            - serial_number (str, required): Device serial number
+            - mac_address (str, optional): Device MAC address
+            - device_id (str, optional): Device UUID (if known)
+            - device_type (str, optional): NETWORK, COMPUTE, or STORAGE
+            - current_subscription_id (str, optional): Current subscription UUID
+            - current_application_id (str, optional): Current application UUID
+            - current_tags (dict, optional): Current tags
+            - selected_subscription_id (str, optional): New subscription UUID to assign
+            - selected_application_id (str, optional): New application UUID to assign
+            - selected_region (str, optional): Region code (e.g., "us-west")
+            - selected_tags (dict, optional): New tags to assign
+            - keep_current_subscription (bool, optional): Keep current subscription
+            - keep_current_application (bool, optional): Keep current application
+            - keep_current_tags (bool, optional): Keep current tags
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - operations (list): List of operation results
+            - devices_created (int): Number of devices created
+            - applications_assigned (int): Number of application assignments
+            - subscriptions_assigned (int): Number of subscription assignments
+            - tags_updated (int): Number of tag updates
+            - errors (int): Number of errors encountered
+
+    Example:
+        ```python
+        result = await apply_device_assignments(
+            ctx,
+            assignments=[
+                {
+                    "serial_number": "SN123456",
+                    "device_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "selected_subscription_id": "660e8400-e29b-41d4-a716-446655440000",
+                    "selected_application_id": "770e8400-e29b-41d4-a716-446655440000",
+                    "selected_tags": {"env": "production", "location": "us-west"}
+                }
+            ],
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "operations": [],
+            "devices_created": 0,
+            "applications_assigned": 0,
+            "subscriptions_assigned": 0,
+            "tags_updated": 0,
+            "errors": 1,
+        }
+
+    try:
+        # Convert input dictionaries to DeviceAssignment entities
+        device_assignments = []
+        for a in assignments:
+            # Parse UUIDs if provided as strings
+            device_id = UUID(a["device_id"]) if a.get("device_id") else None
+            current_sub_id = UUID(a["current_subscription_id"]) if a.get("current_subscription_id") else None
+            current_app_id = UUID(a["current_application_id"]) if a.get("current_application_id") else None
+            selected_sub_id = UUID(a["selected_subscription_id"]) if a.get("selected_subscription_id") else None
+            selected_app_id = UUID(a["selected_application_id"]) if a.get("selected_application_id") else None
+
+            assignment = DeviceAssignment(
+                serial_number=a["serial_number"],
+                mac_address=a.get("mac_address"),
+                row_number=a.get("row_number", 0),
+                device_id=device_id,
+                device_type=a.get("device_type"),
+                model=a.get("model"),
+                region=a.get("region"),
+                current_subscription_id=current_sub_id,
+                current_subscription_key=a.get("current_subscription_key"),
+                current_application_id=current_app_id,
+                current_tags=a.get("current_tags", {}),
+                selected_subscription_id=selected_sub_id,
+                selected_application_id=selected_app_id,
+                selected_region=a.get("selected_region"),
+                selected_tags=a.get("selected_tags", {}),
+                keep_current_subscription=a.get("keep_current_subscription", False),
+                keep_current_application=a.get("keep_current_application", False),
+                keep_current_tags=a.get("keep_current_tags", False),
+            )
+            device_assignments.append(assignment)
+
+        # Create adapters
+        device_manager = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+        device_repo = PostgresDeviceRepository(_DB_POOL)
+        sync_service = DeviceSyncerAdapter(
+            _DEVICE_SYNCER,
+            _SUBSCRIPTION_SYNCER,
+            db_pool=_DB_POOL,
+        )
+
+        # Execute the use case
+        use_case = ApplyAssignmentsUseCase(
+            device_manager=device_manager,
+            device_repository=device_repo,
+            sync_service=sync_service,
+        )
+
+        result = await use_case.execute(
+            assignments=device_assignments,
+            wait_for_completion=wait_for_completion,
+        )
+
+        # Convert result to dictionary
+        return {
+            "success": result.success,
+            "operations": [
+                {
+                    "success": op.success,
+                    "operation_type": op.operation_type,
+                    "device_ids": [str(d) for d in op.device_ids],
+                    "device_serials": op.device_serials,
+                    "error": op.error,
+                    "operation_url": op.operation_url,
+                }
+                for op in result.operations
+            ],
+            "devices_created": result.devices_created,
+            "applications_assigned": result.applications_assigned,
+            "subscriptions_assigned": result.subscriptions_assigned,
+            "tags_updated": result.tags_updated,
+            "errors": result.errors,
+            "total_duration_seconds": result.total_duration_seconds,
+        }
+
+    except Exception as e:
+        logger.exception("Error applying device assignments")
+        return {
+            "success": False,
+            "error": str(e),
+            "operations": [],
+            "devices_created": 0,
+            "applications_assigned": 0,
+            "subscriptions_assigned": 0,
+            "tags_updated": 0,
+            "errors": 1,
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def add_devices(
+    ctx: Context,
+    devices: list[dict[str, Any]],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Add new devices to GreenLake Platform.
+
+    This tool adds devices to the GreenLake workspace. Each device must have
+    a serial number and meet device-type-specific requirements:
+    - NETWORK devices require mac_address
+    - COMPUTE/STORAGE devices require part_number
+
+    Args:
+        ctx: FastMCP context
+        devices: List of devices to add with the following structure:
+            - serial_number (str, required): Device serial number
+            - mac_address (str, required for NETWORK): MAC address
+            - part_number (str, required for COMPUTE/STORAGE): Part number
+            - device_type (str, optional): NETWORK, COMPUTE, or STORAGE (default: NETWORK)
+            - tags (dict, optional): Tags to assign to the device
+            - location_id (str, optional): Location UUID
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - devices_added (int): Number of devices added successfully
+            - devices_failed (int): Number of failed device additions
+            - results (list): List of per-device results with:
+                - serial_number (str): Device serial number
+                - success (bool): Whether this device was added
+                - device_id (str, optional): Device UUID if successful
+                - error (str, optional): Error message if failed
+                - operation_url (str, optional): URL for status tracking
+            - errors (list): List of error messages
+
+    Example:
+        ```python
+        result = await add_devices(
+            ctx,
+            devices=[
+                {
+                    "serial_number": "TEST123",
+                    "mac_address": "00:11:22:33:44:55",
+                    "device_type": "NETWORK",
+                    "tags": {"env": "production"}
+                },
+                {
+                    "serial_number": "COMPUTE001",
+                    "part_number": "P12345",
+                    "device_type": "COMPUTE"
+                }
+            ],
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "devices_added": 0,
+            "devices_failed": len(devices),
+            "results": [],
+            "errors": ["GLP client not initialized"],
+        }
+
+    try:
+        from src.glp.api.device_manager import DeviceType
+
+        results = []
+        devices_added = 0
+        devices_failed = 0
+        errors = []
+
+        for device in devices:
+            serial_number = device.get("serial_number")
+            if not serial_number:
+                devices_failed += 1
+                errors.append("Device missing serial_number")
+                results.append({
+                    "serial_number": "unknown",
+                    "success": False,
+                    "error": "serial_number is required",
+                })
+                continue
+
+            try:
+                # Get device type (default to NETWORK)
+                device_type_str = device.get("device_type", "NETWORK").upper()
+                try:
+                    device_type = DeviceType(device_type_str)
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid device_type: {device_type_str}. "
+                        f"Must be one of: NETWORK, COMPUTE, STORAGE"
+                    )
+
+                # Extract optional fields
+                part_number = device.get("part_number")
+                mac_address = device.get("mac_address")
+                tags = device.get("tags", {})
+                location_id = device.get("location_id")
+
+                # Call the device manager
+                operation = await _DEVICE_MANAGER.add_device(
+                    serial_number=serial_number,
+                    device_type=device_type,
+                    part_number=part_number,
+                    mac_address=mac_address,
+                    tags=tags if tags else None,
+                    location_id=location_id,
+                    dry_run=False,
+                )
+
+                # Wait for completion if requested
+                device_id = None
+                if wait_for_completion and operation.operation_url:
+                    try:
+                        status = await _DEVICE_MANAGER.wait_for_completion(
+                            operation.operation_url,
+                            timeout=300,  # 5 minutes
+                        )
+                        if status.is_success and status.result:
+                            # Extract device ID from result
+                            device_id = status.result.get("id")
+                    except Exception as wait_error:
+                        logger.warning(
+                            f"Failed to wait for completion of {serial_number}: {wait_error}"
+                        )
+
+                devices_added += 1
+                results.append({
+                    "serial_number": serial_number,
+                    "success": True,
+                    "device_id": device_id,
+                    "operation_url": operation.operation_url,
+                })
+
+            except Exception as e:
+                error_msg = str(e)
+                devices_failed += 1
+                errors.append(f"{serial_number}: {error_msg}")
+                results.append({
+                    "serial_number": serial_number,
+                    "success": False,
+                    "error": error_msg,
+                })
+                logger.error(f"Failed to add device {serial_number}: {e}")
+
+        return {
+            "success": devices_failed == 0,
+            "devices_added": devices_added,
+            "devices_failed": devices_failed,
+            "results": results,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        logger.exception("Error adding devices")
+        return {
+            "success": False,
+            "error": str(e),
+            "devices_added": 0,
+            "devices_failed": len(devices),
+            "results": [],
+            "errors": [str(e)],
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def archive_devices(
+    ctx: Context,
+    device_ids: list[str],
+    wait_for_completion: bool = True,
+    sync_after: bool = True,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Archive devices in GreenLake Platform.
+
+    This tool archives devices in the GreenLake workspace. Archived devices
+    are hidden from normal views but can be unarchived later.
+
+    ⚠️ HIGH-RISK OPERATION: Requires confirmation before execution.
+
+    Args:
+        ctx: FastMCP context
+        device_ids: List of device UUIDs to archive (as strings)
+        wait_for_completion: Whether to wait for async operations to complete
+        sync_after: Whether to sync the database after archiving
+        confirmed: Set to True to bypass confirmation (after user confirmation)
+
+    Returns:
+        Dictionary with operation results:
+            - status (str): "confirmation_required" or "success"
+            - confirmation_message (str): Message to show user (if confirmation required)
+            - operation_id (str): Operation ID for confirmation (if confirmation required)
+            - risk_level (str): Risk level of the operation (if confirmation required)
+            - success (bool): Overall success status (if executed)
+            - action (str): The action performed (ARCHIVE)
+            - devices_processed (int): Total number of devices processed (if executed)
+            - devices_succeeded (int): Number of devices archived successfully (if executed)
+            - devices_failed (int): Number of failed device archival (if executed)
+            - total_duration_seconds (float): Total operation duration (if executed)
+            - failed_device_ids (list[str]): List of failed device UUIDs (if executed)
+            - failed_device_serials (list[str]): List of failed device serial numbers (if executed)
+            - operations (list): List of operation results (if executed)
+
+    Example:
+        ```python
+        # First call - returns confirmation request
+        result = await archive_devices(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ]
+        )
+        # Returns: {"status": "confirmation_required", "message": "...", "operation_id": "..."}
+
+        # Second call - with confirmation
+        result = await archive_devices(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ],
+            confirmed=True
+        )
+        # Executes the operation
+        ```
+    """
+    global _PENDING_OPERATIONS
+
+    # Assess risk level
+    device_count = len(device_ids)
+    risk_level = _assess_risk(OperationType.ARCHIVE_DEVICES, device_count)
+
+    # Check if confirmation is required
+    requires_confirmation = risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+
+    if requires_confirmation and not confirmed:
+        # Generate operation ID
+        from uuid import uuid4
+        operation_id = str(uuid4())
+
+        # Store pending operation
+        _PENDING_OPERATIONS[operation_id] = {
+            "operation_type": OperationType.ARCHIVE_DEVICES,
+            "device_ids": device_ids,
+            "wait_for_completion": wait_for_completion,
+            "sync_after": sync_after,
+            "risk_level": risk_level,
+        }
+
+        # Return confirmation request
+        return {
+            "status": "confirmation_required",
+            "confirmation_message": _get_confirmation_message(
+                OperationType.ARCHIVE_DEVICES,
+                device_count,
+                risk_level,
+            ),
+            "operation_id": operation_id,
+            "risk_level": risk_level.value,
+            "device_count": device_count,
+        }
+
+    # Proceed with execution (confirmed or low/medium risk)
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "action": "ARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+    try:
+        # Convert device_ids to DeviceAssignment entities
+        device_assignments = []
+        for i, device_id_str in enumerate(device_ids):
+            try:
+                device_id = UUID(device_id_str)
+                assignment = DeviceAssignment(
+                    serial_number=f"device_{i}",  # Placeholder, will be fetched
+                    device_id=device_id,
+                )
+                device_assignments.append(assignment)
+            except ValueError as e:
+                logger.error(f"Invalid UUID format: {device_id_str}: {e}")
+                return {
+                    "success": False,
+                    "error": f"Invalid UUID format: {device_id_str}",
+                    "action": "ARCHIVE",
+                    "devices_processed": len(device_ids),
+                    "devices_succeeded": 0,
+                    "devices_failed": len(device_ids),
+                    "total_duration_seconds": 0.0,
+                    "failed_device_ids": device_ids,
+                    "failed_device_serials": [],
+                    "operations": [],
+                }
+
+        # Create adapters
+        device_manager = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+        sync_service = DeviceSyncerAdapter(
+            _DEVICE_SYNCER,
+            _SUBSCRIPTION_SYNCER,
+            db_pool=_DB_POOL,
+        ) if sync_after else None
+
+        # Execute the use case
+        use_case = DeviceActionsUseCase(
+            device_manager=device_manager,
+            sync_service=sync_service,
+        )
+
+        result = await use_case.execute(
+            action=WorkflowAction.ARCHIVE,
+            devices=device_assignments,
+            wait_for_completion=wait_for_completion,
+            sync_after=sync_after,
+        )
+
+        # Convert result to dictionary
+        return {
+            "success": result.success,
+            "action": result.action.value,
+            "devices_processed": result.devices_processed,
+            "devices_succeeded": result.devices_succeeded,
+            "devices_failed": result.devices_failed,
+            "total_duration_seconds": result.total_duration_seconds,
+            "failed_device_ids": [str(d) for d in result.failed_device_ids],
+            "failed_device_serials": result.failed_device_serials,
+            "operations": [
+                {
+                    "success": op.success,
+                    "operation_type": op.operation_type,
+                    "device_ids": [str(d) for d in op.device_ids] if op.device_ids else [],
+                    "device_serials": op.device_serials or [],
+                    "error": op.error,
+                    "operation_url": op.operation_url,
+                }
+                for op in result.operations
+            ],
+        }
+
+    except Exception as e:
+        logger.exception("Error archiving devices")
+        return {
+            "success": False,
+            "error": str(e),
+            "action": "ARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def unarchive_devices(
+    ctx: Context,
+    device_ids: list[str],
+    wait_for_completion: bool = True,
+    sync_after: bool = True,
+    confirmed: bool = False,
+) -> dict[str, Any]:
+    """Unarchive devices in GreenLake Platform.
+
+    This tool unarchives (restores) devices in the GreenLake workspace.
+    Unarchived devices will be visible in normal views again.
+
+    Args:
+        ctx: FastMCP context
+        device_ids: List of device UUIDs to unarchive (as strings)
+        wait_for_completion: Whether to wait for async operations to complete
+        sync_after: Whether to sync the database after unarchiving
+        confirmed: Set to True to bypass confirmation (after user confirmation)
+
+    Returns:
+        Dictionary with operation results:
+            - status (str): "confirmation_required" or "success" (may require confirmation for bulk operations)
+            - confirmation_message (str): Message to show user (if confirmation required)
+            - operation_id (str): Operation ID for confirmation (if confirmation required)
+            - risk_level (str): Risk level of the operation (if confirmation required)
+            - success (bool): Overall success status (if executed)
+            - action (str): The action performed (UNARCHIVE)
+            - devices_processed (int): Total number of devices processed (if executed)
+            - devices_succeeded (int): Number of devices unarchived successfully (if executed)
+            - devices_failed (int): Number of failed device unarchival (if executed)
+            - total_duration_seconds (float): Total operation duration (if executed)
+            - failed_device_ids (list[str]): List of failed device UUIDs (if executed)
+            - failed_device_serials (list[str]): List of failed device serial numbers (if executed)
+            - operations (list): List of operation results (if executed)
+
+    Example:
+        ```python
+        # First call - may return confirmation request for bulk operations (>5 devices)
+        result = await unarchive_devices(
+            ctx,
+            device_ids=["550e8400-e29b-41d4-a716-446655440000", ...]
+        )
+
+        # If confirmation required, call again with confirmed=True
+        result = await unarchive_devices(
+            ctx,
+            device_ids=["550e8400-e29b-41d4-a716-446655440000", ...],
+            confirmed=True
+        )
+        ```
+    """
+    global _PENDING_OPERATIONS
+
+    # Assess risk level
+    device_count = len(device_ids)
+    risk_level = _assess_risk(OperationType.UNARCHIVE_DEVICES, device_count)
+
+    # Check if confirmation is required (for HIGH or CRITICAL risk)
+    requires_confirmation = risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+
+    if requires_confirmation and not confirmed:
+        # Generate operation ID
+        from uuid import uuid4
+        operation_id = str(uuid4())
+
+        # Store pending operation
+        _PENDING_OPERATIONS[operation_id] = {
+            "operation_type": OperationType.UNARCHIVE_DEVICES,
+            "device_ids": device_ids,
+            "wait_for_completion": wait_for_completion,
+            "sync_after": sync_after,
+            "risk_level": risk_level,
+        }
+
+        # Return confirmation request
+        return {
+            "status": "confirmation_required",
+            "confirmation_message": _get_confirmation_message(
+                OperationType.UNARCHIVE_DEVICES,
+                device_count,
+                risk_level,
+            ),
+            "operation_id": operation_id,
+            "risk_level": risk_level.value,
+            "device_count": device_count,
+        }
+
+    # Proceed with execution (confirmed or low/medium risk)
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "action": "UNARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+    try:
+        # Convert device_ids to DeviceAssignment entities
+        device_assignments = []
+        for i, device_id_str in enumerate(device_ids):
+            try:
+                device_id = UUID(device_id_str)
+                assignment = DeviceAssignment(
+                    serial_number=f"device_{i}",  # Placeholder, will be fetched
+                    device_id=device_id,
+                )
+                device_assignments.append(assignment)
+            except ValueError as e:
+                logger.error(f"Invalid UUID format: {device_id_str}: {e}")
+                return {
+                    "success": False,
+                    "error": f"Invalid UUID format: {device_id_str}",
+                    "action": "UNARCHIVE",
+                    "devices_processed": len(device_ids),
+                    "devices_succeeded": 0,
+                    "devices_failed": len(device_ids),
+                    "total_duration_seconds": 0.0,
+                    "failed_device_ids": device_ids,
+                    "failed_device_serials": [],
+                    "operations": [],
+                }
+
+        # Create adapters
+        device_manager = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+        sync_service = DeviceSyncerAdapter(
+            _DEVICE_SYNCER,
+            _SUBSCRIPTION_SYNCER,
+            db_pool=_DB_POOL,
+        ) if sync_after else None
+
+        # Execute the use case
+        use_case = DeviceActionsUseCase(
+            device_manager=device_manager,
+            sync_service=sync_service,
+        )
+
+        result = await use_case.execute(
+            action=WorkflowAction.UNARCHIVE,
+            devices=device_assignments,
+            wait_for_completion=wait_for_completion,
+            sync_after=sync_after,
+        )
+
+        # Convert result to dictionary
+        return {
+            "success": result.success,
+            "action": result.action.value,
+            "devices_processed": result.devices_processed,
+            "devices_succeeded": result.devices_succeeded,
+            "devices_failed": result.devices_failed,
+            "total_duration_seconds": result.total_duration_seconds,
+            "failed_device_ids": [str(d) for d in result.failed_device_ids],
+            "failed_device_serials": result.failed_device_serials,
+            "operations": [
+                {
+                    "success": op.success,
+                    "operation_type": op.operation_type,
+                    "device_ids": [str(d) for d in op.device_ids] if op.device_ids else [],
+                    "device_serials": op.device_serials or [],
+                    "error": op.error,
+                    "operation_url": op.operation_url,
+                }
+                for op in result.operations
+            ],
+        }
+
+    except Exception as e:
+        logger.exception("Error unarchiving devices")
+        return {
+            "success": False,
+            "error": str(e),
+            "action": "UNARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def update_device_tags(
+    ctx: Context,
+    device_ids: list[str],
+    tags: dict[str, str | None],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Update tags on devices in GreenLake Platform.
+
+    This tool adds, updates, or removes tags on devices. Tags are key-value pairs
+    that can be used to organize and categorize devices. Set a tag value to None
+    to remove that tag from the devices.
+
+    Note: Maximum 25 devices per call due to GreenLake API limitations.
+
+    Args:
+        ctx: FastMCP context
+        device_ids: List of device UUIDs to update (as strings, max 25)
+        tags: Tag key-value pairs to set. Set value to None to remove a tag.
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - devices_processed (int): Number of devices processed
+            - tags_updated (int): Number of tag keys updated
+            - operation_url (str, optional): URL for status tracking
+            - error (str, optional): Error message if failed
+
+    Example:
+        ```python
+        # Add/update tags
+        result = await update_device_tags(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ],
+            tags={
+                "environment": "production",
+                "location": "us-west",
+                "owner": "network-team"
+            },
+            wait_for_completion=True
+        )
+
+        # Remove a tag by setting it to None
+        result = await update_device_tags(
+            ctx,
+            device_ids=["550e8400-e29b-41d4-a716-446655440000"],
+            tags={"temporary": None},  # Removes the "temporary" tag
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    # Validate inputs
+    if not device_ids:
+        return {
+            "success": False,
+            "error": "device_ids list cannot be empty",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    if len(device_ids) > 25:
+        return {
+            "success": False,
+            "error": f"Maximum 25 devices per call. Got {len(device_ids)} devices. Please split into smaller batches.",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    if not tags:
+        return {
+            "success": False,
+            "error": "tags dictionary cannot be empty",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    try:
+        # Call the device manager
+        operation = await _DEVICE_MANAGER.update_tags(
+            device_ids=device_ids,
+            tags=tags,
+            dry_run=False,
+        )
+
+        # Wait for completion if requested
+        if wait_for_completion and operation.operation_url:
+            try:
+                status = await _DEVICE_MANAGER.wait_for_completion(
+                    operation.operation_url,
+                    timeout=300,  # 5 minutes
+                )
+                if not status.is_success:
+                    return {
+                        "success": False,
+                        "error": f"Operation failed: {status.error_message or 'Unknown error'}",
+                        "devices_processed": len(device_ids),
+                        "tags_updated": len(tags),
+                        "operation_url": operation.operation_url,
+                    }
+            except Exception as wait_error:
+                logger.warning(f"Failed to wait for completion: {wait_error}")
+                return {
+                    "success": False,
+                    "error": f"Failed to wait for completion: {str(wait_error)}",
+                    "devices_processed": len(device_ids),
+                    "tags_updated": len(tags),
+                    "operation_url": operation.operation_url,
+                }
+
+        return {
+            "success": True,
+            "devices_processed": len(device_ids),
+            "tags_updated": len(tags),
+            "operation_url": operation.operation_url,
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.exception("Error updating device tags")
+        return {
+            "success": False,
+            "error": error_msg,
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
 
 
 # =============================================================================
