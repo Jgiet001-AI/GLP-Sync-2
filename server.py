@@ -108,8 +108,8 @@ mcp = FastMCP(
     instructions=(
         "This server provides access to HPE GreenLake device and subscription inventory. "
         "Use the read-only tools to search devices, list subscriptions, and analyze inventory data. "
-        "Use the write tools (apply_device_assignments) to assign subscriptions, applications, "
-        "and tags to devices. Write operations require proper GreenLake API credentials."
+        "Use the write tools (add_devices, apply_device_assignments) to add new devices and assign "
+        "subscriptions, applications, and tags to devices. Write operations require proper GreenLake API credentials."
     ),
     lifespan=lifespan,
 )
@@ -126,7 +126,7 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "healthy",
         "service": "greenlake-mcp",
-        "tools": 28,  # 27 read-only + 1 write (apply_device_assignments)
+        "tools": 29,  # 27 read-only + 2 write (apply_device_assignments, add_devices)
     })
 
 
@@ -2111,6 +2111,178 @@ async def apply_device_assignments(
             "subscriptions_assigned": 0,
             "tags_updated": 0,
             "errors": 1,
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def add_devices(
+    ctx: Context,
+    devices: list[dict[str, Any]],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Add new devices to GreenLake Platform.
+
+    This tool adds devices to the GreenLake workspace. Each device must have
+    a serial number and meet device-type-specific requirements:
+    - NETWORK devices require mac_address
+    - COMPUTE/STORAGE devices require part_number
+
+    Args:
+        ctx: FastMCP context
+        devices: List of devices to add with the following structure:
+            - serial_number (str, required): Device serial number
+            - mac_address (str, required for NETWORK): MAC address
+            - part_number (str, required for COMPUTE/STORAGE): Part number
+            - device_type (str, optional): NETWORK, COMPUTE, or STORAGE (default: NETWORK)
+            - tags (dict, optional): Tags to assign to the device
+            - location_id (str, optional): Location UUID
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - devices_added (int): Number of devices added successfully
+            - devices_failed (int): Number of failed device additions
+            - results (list): List of per-device results with:
+                - serial_number (str): Device serial number
+                - success (bool): Whether this device was added
+                - device_id (str, optional): Device UUID if successful
+                - error (str, optional): Error message if failed
+                - operation_url (str, optional): URL for status tracking
+            - errors (list): List of error messages
+
+    Example:
+        ```python
+        result = await add_devices(
+            ctx,
+            devices=[
+                {
+                    "serial_number": "TEST123",
+                    "mac_address": "00:11:22:33:44:55",
+                    "device_type": "NETWORK",
+                    "tags": {"env": "production"}
+                },
+                {
+                    "serial_number": "COMPUTE001",
+                    "part_number": "P12345",
+                    "device_type": "COMPUTE"
+                }
+            ],
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "devices_added": 0,
+            "devices_failed": len(devices),
+            "results": [],
+            "errors": ["GLP client not initialized"],
+        }
+
+    try:
+        from src.glp.api.device_manager import DeviceType
+
+        results = []
+        devices_added = 0
+        devices_failed = 0
+        errors = []
+
+        for device in devices:
+            serial_number = device.get("serial_number")
+            if not serial_number:
+                devices_failed += 1
+                errors.append("Device missing serial_number")
+                results.append({
+                    "serial_number": "unknown",
+                    "success": False,
+                    "error": "serial_number is required",
+                })
+                continue
+
+            try:
+                # Get device type (default to NETWORK)
+                device_type_str = device.get("device_type", "NETWORK").upper()
+                try:
+                    device_type = DeviceType(device_type_str)
+                except ValueError:
+                    raise ValueError(
+                        f"Invalid device_type: {device_type_str}. "
+                        f"Must be one of: NETWORK, COMPUTE, STORAGE"
+                    )
+
+                # Extract optional fields
+                part_number = device.get("part_number")
+                mac_address = device.get("mac_address")
+                tags = device.get("tags", {})
+                location_id = device.get("location_id")
+
+                # Call the device manager
+                operation = await _DEVICE_MANAGER.add_device(
+                    serial_number=serial_number,
+                    device_type=device_type,
+                    part_number=part_number,
+                    mac_address=mac_address,
+                    tags=tags if tags else None,
+                    location_id=location_id,
+                    dry_run=False,
+                )
+
+                # Wait for completion if requested
+                device_id = None
+                if wait_for_completion and operation.operation_url:
+                    try:
+                        status = await _DEVICE_MANAGER.wait_for_completion(
+                            operation.operation_url,
+                            timeout=300,  # 5 minutes
+                        )
+                        if status.is_success and status.result:
+                            # Extract device ID from result
+                            device_id = status.result.get("id")
+                    except Exception as wait_error:
+                        logger.warning(
+                            f"Failed to wait for completion of {serial_number}: {wait_error}"
+                        )
+
+                devices_added += 1
+                results.append({
+                    "serial_number": serial_number,
+                    "success": True,
+                    "device_id": device_id,
+                    "operation_url": operation.operation_url,
+                })
+
+            except Exception as e:
+                error_msg = str(e)
+                devices_failed += 1
+                errors.append(f"{serial_number}: {error_msg}")
+                results.append({
+                    "serial_number": serial_number,
+                    "success": False,
+                    "error": error_msg,
+                })
+                logger.error(f"Failed to add device {serial_number}: {e}")
+
+        return {
+            "success": devices_failed == 0,
+            "devices_added": devices_added,
+            "devices_failed": devices_failed,
+            "results": results,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        logger.exception("Error adding devices")
+        return {
+            "success": False,
+            "error": str(e),
+            "devices_added": 0,
+            "devices_failed": len(devices),
+            "results": [],
+            "errors": [str(e)],
         }
 
 
