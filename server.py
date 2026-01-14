@@ -108,8 +108,8 @@ mcp = FastMCP(
     instructions=(
         "This server provides access to HPE GreenLake device and subscription inventory. "
         "Use the read-only tools to search devices, list subscriptions, and analyze inventory data. "
-        "Use the write tools (add_devices, apply_device_assignments, archive_devices, unarchive_devices) to add new devices, "
-        "assign subscriptions/applications/tags to devices, archive devices, and restore archived devices. "
+        "Use the write tools (add_devices, apply_device_assignments, archive_devices, unarchive_devices, update_device_tags) to add new devices, "
+        "assign subscriptions/applications/tags to devices, archive devices, restore archived devices, and update device tags. "
         "Write operations require proper GreenLake API credentials."
     ),
     lifespan=lifespan,
@@ -127,7 +127,7 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "healthy",
         "service": "greenlake-mcp",
-        "tools": 31,  # 27 read-only + 4 write (apply_device_assignments, add_devices, archive_devices, unarchive_devices)
+        "tools": 32,  # 27 read-only + 5 write (apply_device_assignments, add_devices, archive_devices, unarchive_devices, update_device_tags)
     })
 
 
@@ -2588,6 +2588,146 @@ async def unarchive_devices(
             "failed_device_ids": device_ids,
             "failed_device_serials": [],
             "operations": [],
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def update_device_tags(
+    ctx: Context,
+    device_ids: list[str],
+    tags: dict[str, str | None],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Update tags on devices in GreenLake Platform.
+
+    This tool adds, updates, or removes tags on devices. Tags are key-value pairs
+    that can be used to organize and categorize devices. Set a tag value to None
+    to remove that tag from the devices.
+
+    Note: Maximum 25 devices per call due to GreenLake API limitations.
+
+    Args:
+        ctx: FastMCP context
+        device_ids: List of device UUIDs to update (as strings, max 25)
+        tags: Tag key-value pairs to set. Set value to None to remove a tag.
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - devices_processed (int): Number of devices processed
+            - tags_updated (int): Number of tag keys updated
+            - operation_url (str, optional): URL for status tracking
+            - error (str, optional): Error message if failed
+
+    Example:
+        ```python
+        # Add/update tags
+        result = await update_device_tags(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ],
+            tags={
+                "environment": "production",
+                "location": "us-west",
+                "owner": "network-team"
+            },
+            wait_for_completion=True
+        )
+
+        # Remove a tag by setting it to None
+        result = await update_device_tags(
+            ctx,
+            device_ids=["550e8400-e29b-41d4-a716-446655440000"],
+            tags={"temporary": None},  # Removes the "temporary" tag
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    # Validate inputs
+    if not device_ids:
+        return {
+            "success": False,
+            "error": "device_ids list cannot be empty",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    if len(device_ids) > 25:
+        return {
+            "success": False,
+            "error": f"Maximum 25 devices per call. Got {len(device_ids)} devices. Please split into smaller batches.",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    if not tags:
+        return {
+            "success": False,
+            "error": "tags dictionary cannot be empty",
+            "devices_processed": 0,
+            "tags_updated": 0,
+        }
+
+    try:
+        # Call the device manager
+        operation = await _DEVICE_MANAGER.update_tags(
+            device_ids=device_ids,
+            tags=tags,
+            dry_run=False,
+        )
+
+        # Wait for completion if requested
+        if wait_for_completion and operation.operation_url:
+            try:
+                status = await _DEVICE_MANAGER.wait_for_completion(
+                    operation.operation_url,
+                    timeout=300,  # 5 minutes
+                )
+                if not status.is_success:
+                    return {
+                        "success": False,
+                        "error": f"Operation failed: {status.error_message or 'Unknown error'}",
+                        "devices_processed": len(device_ids),
+                        "tags_updated": len(tags),
+                        "operation_url": operation.operation_url,
+                    }
+            except Exception as wait_error:
+                logger.warning(f"Failed to wait for completion: {wait_error}")
+                return {
+                    "success": False,
+                    "error": f"Failed to wait for completion: {str(wait_error)}",
+                    "devices_processed": len(device_ids),
+                    "tags_updated": len(tags),
+                    "operation_url": operation.operation_url,
+                }
+
+        return {
+            "success": True,
+            "devices_processed": len(device_ids),
+            "tags_updated": len(tags),
+            "operation_url": operation.operation_url,
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        logger.exception("Error updating device tags")
+        return {
+            "success": False,
+            "error": error_msg,
+            "devices_processed": 0,
+            "tags_updated": 0,
         }
 
 
