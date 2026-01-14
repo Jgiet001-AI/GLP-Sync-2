@@ -12,16 +12,18 @@ export interface ReportFilters {
   // Dashboard
   expiring_days?: number
   // Devices
-  device_type?: string
-  region?: string
-  assigned_state?: string
+  device_type?: string | string[]
+  region?: string | string[]
+  assigned_state?: string | string[]
   // Subscriptions
-  subscription_type?: string
-  status?: string
+  subscription_type?: string | string[]
+  status?: string | string[]
   // Clients
-  type?: string
-  health?: string
-  site_id?: string
+  type?: string | string[]
+  health?: string | string[]
+  site_id?: string | string[]
+  // Tags (format: "key:value")
+  tags?: string[]
   // Common
   search?: string
   limit?: number
@@ -34,16 +36,46 @@ export type ReportType = 'dashboard' | 'devices' | 'subscriptions' | 'clients' |
 /**
  * Download a report file.
  */
+/**
+ * Build URLSearchParams with proper support for array values.
+ * Arrays are sent as repeated params: ?type=Wired&type=Wireless
+ */
+function buildParams(format: ReportFormat, filters?: ReportFilters): URLSearchParams {
+  const params = new URLSearchParams()
+  params.append('format', format)
+
+  if (!filters) return params
+
+  // Handle each filter - arrays become repeated params
+  const arrayKeys = ['device_type', 'region', 'assigned_state', 'subscription_type', 'status', 'type', 'health', 'site_id', 'tags']
+  const scalarKeys = ['expiring_days', 'search', 'limit']
+
+  for (const key of arrayKeys) {
+    const value = filters[key as keyof ReportFilters]
+    if (value !== undefined && value !== null) {
+      const values = Array.isArray(value) ? value : [value]
+      for (const v of values) {
+        if (v) params.append(key, String(v))
+      }
+    }
+  }
+
+  for (const key of scalarKeys) {
+    const value = filters[key as keyof ReportFilters]
+    if (value !== undefined && value !== null) {
+      params.append(key, String(value))
+    }
+  }
+
+  return params
+}
+
 async function downloadReport(
   reportType: ReportType,
   format: ReportFormat,
   filters?: ReportFilters
 ): Promise<Blob> {
   let url: string
-  const params: Record<string, string | number | undefined> = {
-    format,
-    ...filters,
-  }
 
   switch (reportType) {
     case 'dashboard':
@@ -65,9 +97,14 @@ async function downloadReport(
       throw new Error(`Unknown report type: ${reportType}`)
   }
 
+  // Build params with proper array support
+  const params = buildParams(format, filters)
+
   const response = await api.get(url, {
     params,
     responseType: 'blob',
+    // axios will serialize URLSearchParams correctly
+    paramsSerializer: () => params.toString(),
   })
 
   return response.data
@@ -147,7 +184,7 @@ export const reportsApi = {
    */
   async downloadClientsReport(
     format: ReportFormat = 'xlsx',
-    filters?: Pick<ReportFilters, 'type' | 'status' | 'health' | 'site_id' | 'limit'>
+    filters?: Pick<ReportFilters, 'type' | 'status' | 'health' | 'site_id' | 'tags' | 'limit'>
   ): Promise<void> {
     return this.downloadReport('clients', format, filters)
   },
