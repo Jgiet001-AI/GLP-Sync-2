@@ -7,7 +7,9 @@ Provides REST endpoints and WebSocket handler for the agent chatbot.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 from typing import Any, Optional
 from uuid import UUID
 
@@ -38,6 +40,12 @@ from .schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# WebSocket message size limits
+# Read from environment variable (default: 1 MB)
+# IMPORTANT: This must match Uvicorn's --ws-max-size parameter to prevent memory buffering
+MAX_WS_MESSAGE_SIZE_MB = int(os.getenv("WS_MAX_MESSAGE_SIZE_MB", "1"))
+MAX_WS_MESSAGE_SIZE_BYTES = MAX_WS_MESSAGE_SIZE_MB * 1024 * 1024
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -417,8 +425,35 @@ async def websocket_endpoint(
 
     try:
         while True:
-            # Receive message
-            data = await websocket.receive_json()
+            # Receive message with size limit
+            raw_message = await websocket.receive_text()
+
+            # Check message size
+            message_size = len(raw_message.encode('utf-8'))
+            if message_size > MAX_WS_MESSAGE_SIZE_BYTES:
+                logger.warning(
+                    f"WebSocket message too large: {message_size} bytes "
+                    f"(limit: {MAX_WS_MESSAGE_SIZE_BYTES})"
+                )
+                await websocket.send_json({
+                    "type": "error",
+                    "content": f"Message too large. Maximum size is {MAX_WS_MESSAGE_SIZE_MB} MB",
+                    "error_type": "message_too_large",
+                })
+                continue
+
+            # Parse JSON manually
+            try:
+                data = json.loads(raw_message)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid JSON in WebSocket message: {e}")
+                await websocket.send_json({
+                    "type": "error",
+                    "content": "Invalid JSON message",
+                    "error_type": "invalid_json",
+                })
+                continue
+
             msg_type = data.get("type", "chat")
 
             if msg_type == "chat":
