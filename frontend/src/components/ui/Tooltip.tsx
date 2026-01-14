@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 
 interface TooltipProps {
   content: React.ReactNode
@@ -8,19 +8,46 @@ interface TooltipProps {
 }
 
 export function Tooltip({ content, children, position = 'top', delay = 200 }: TooltipProps) {
+  const [mounting, setMounting] = useState(false)
   const [visible, setVisible] = useState(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fadeOutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showTooltip = () => {
-    timeoutRef.current = setTimeout(() => setVisible(true), delay)
+    // Clear any pending hide timeout
+    if (fadeOutRef.current) {
+      clearTimeout(fadeOutRef.current)
+      fadeOutRef.current = null
+    }
+
+    // Mount the element first, then make it visible after a brief delay
+    setMounting(true)
+    timeoutRef.current = setTimeout(() => {
+      setVisible(true)
+    }, delay)
   }
 
   const hideTooltip = () => {
+    // Clear show timeout if still pending
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current)
+      timeoutRef.current = null
     }
+
+    // Fade out first, then unmount after transition completes
     setVisible(false)
+    fadeOutRef.current = setTimeout(() => {
+      setMounting(false)
+    }, 150) // Match transition duration
   }
+
+  // Cleanup timeouts on unmount
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
+      if (fadeOutRef.current) clearTimeout(fadeOutRef.current)
+    }
+  }, [])
 
   const positionClasses = {
     top: 'bottom-full left-1/2 -translate-x-1/2 mb-2',
@@ -45,9 +72,11 @@ export function Tooltip({ content, children, position = 'top', delay = 200 }: To
       onBlur={hideTooltip}
     >
       {children}
-      {visible && (
+      {mounting && (
         <div
-          className={`absolute z-50 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-white shadow-xl ${positionClasses[position]}`}
+          className={`absolute z-50 whitespace-nowrap rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs text-white shadow-xl transition-opacity duration-150 ${
+            visible ? 'opacity-100' : 'opacity-0'
+          } ${positionClasses[position]}`}
           role="tooltip"
         >
           {content}
@@ -74,7 +103,7 @@ export function ChartTooltip({ visible, content, x, y }: ChartTooltipProps) {
 
   return (
     <div
-      className="pointer-events-none fixed z-50 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs shadow-xl"
+      className="pointer-events-none fixed z-50 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs shadow-xl transition-opacity duration-150 opacity-100"
       style={{
         left: x,
         top: y,
