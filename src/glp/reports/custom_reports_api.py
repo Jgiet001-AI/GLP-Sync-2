@@ -31,6 +31,7 @@ from .schemas import (
     ReportResponse,
     UpdateReportRequest,
 )
+from .security import SecurityValidationError, validate_report_config
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,16 @@ async def create_report(
 
         # Convert config to JSON for storage
         config_json = request.config.model_dump()
+        config_json_str = json.dumps(config_json)
+
+        # Security validation: check config size and complexity
+        try:
+            validate_report_config(request.config, config_json_str)
+        except SecurityValidationError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Security validation failed: {str(e)}",
+            )
 
         async with pool.acquire() as conn:
             # Insert the new report and return the created record
@@ -125,7 +136,7 @@ async def create_report(
                 request.name,
                 request.description,
                 created_by,
-                json.dumps(config_json),
+                config_json_str,
                 request.is_shared,
                 json.dumps(request.shared_with),
             )
@@ -363,8 +374,18 @@ async def update_report(
                 param_idx += 1
 
             if request.config is not None:
+                # Security validation for updated config
+                config_json_str = json.dumps(request.config.model_dump())
+                try:
+                    validate_report_config(request.config, config_json_str)
+                except SecurityValidationError as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Security validation failed: {str(e)}",
+                    )
+
                 update_fields.append(f"config = ${param_idx}")
-                params.append(json.dumps(request.config.model_dump()))
+                params.append(config_json_str)
                 param_idx += 1
 
             if request.is_shared is not None:
@@ -552,6 +573,16 @@ async def execute_report(
         # Parse the report configuration
         config_data = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
         config = ReportConfig(**config_data)
+
+        # Security validation (defense in depth - config should already be validated on create/update)
+        try:
+            validate_report_config(config)
+        except SecurityValidationError as e:
+            logger.error(f"Security validation failed for report {id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid report configuration: {str(e)}",
+            )
 
         # Build the SQL query using QueryBuilder
         try:
