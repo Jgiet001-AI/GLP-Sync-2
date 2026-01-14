@@ -62,6 +62,7 @@ from .providers import (
     LLMProviderConfig,
     AnthropicProvider,
     OpenAIProvider,
+    OllamaProvider,
 )
 
 # Security
@@ -101,6 +102,7 @@ __all__ = [
     "LLMProviderConfig",
     "AnthropicProvider",
     "OpenAIProvider",
+    "OllamaProvider",
     # Security
     "CoTRedactor",
     "TicketAuth",
