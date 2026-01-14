@@ -832,14 +832,15 @@ export function ClientsPage() {
                   />
                 </div>
 
-                {/* Export Report button */}
+                {/* Export Report button - pass full arrays for multi-select */}
                 <ReportButton
                   reportType="clients"
                   variant="secondary"
                   filters={{
-                    type: filters.type?.[0],
-                    health: filters.health?.[0],
-                    status: filters.status?.[0],
+                    type: filters.type,
+                    health: filters.health,
+                    status: filters.status,
+                    site_id: filters.site_id,
                   }}
                 />
 

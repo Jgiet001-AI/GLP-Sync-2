@@ -252,8 +252,8 @@ async def export_devices(
                 region,
                 device_name,
                 assigned_state,
-                city as location_city,
-                country as location_country,
+                location_city,
+                location_country,
                 raw_data->'subscriptions'->0->>'subscription_key' as subscription_key,
                 raw_data->'subscriptions'->0->>'subscription_type' as subscription_type,
                 raw_data->'subscriptions'->0->>'end_time' as subscription_end,
@@ -434,38 +434,79 @@ async def export_subscriptions(
 @router.get("/clients/export")
 async def export_clients(
     format: str = Query("xlsx", regex="^(csv|xlsx)$"),
-    type: Optional[str] = Query(None, description="Filter by type (Wired/Wireless)"),
-    status: Optional[str] = Query(None, description="Filter by status"),
-    health: Optional[str] = Query(None, description="Filter by health"),
-    site_id: Optional[str] = Query(None, description="Filter by site ID"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum records"),
+    type: Optional[list[str]] = Query(None, description="Filter by type (Wired/Wireless) - multi-select"),
+    status: Optional[list[str]] = Query(None, description="Filter by status - multi-select"),
+    health: Optional[list[str]] = Query(None, description="Filter by health - multi-select"),
+    site_id: Optional[list[str]] = Query(None, description="Filter by site ID - multi-select"),
+    tags: Optional[list[str]] = Query(None, description="Filter by tags in key:value format"),
+    limit: int = Query(100000, ge=1, le=100000, description="Maximum records (default: all)"),
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Export network clients as Excel or CSV."""
+    """Export network clients as Excel or CSV.
+
+    Supports multi-select filters via repeated query params:
+    - ?type=Wired&type=Wireless&health=Good&health=Fair
+    - ?tags=env:prod&tags=team:network (AND semantics - all tags must match)
+
+    Default limit increased to 100000 to export all records.
+    """
     where_clauses = []
     params = []
     param_idx = 1
 
+    # Multi-select filters using ANY() with proper text[] casting
     if type:
-        where_clauses.append(f"c.type = ${param_idx}")
+        where_clauses.append(f"c.type = ANY(${param_idx}::text[])")
         params.append(type)
         param_idx += 1
 
     if status:
-        where_clauses.append(f"c.status = ${param_idx}")
+        where_clauses.append(f"c.status = ANY(${param_idx}::text[])")
         params.append(status)
         param_idx += 1
 
     if health:
-        where_clauses.append(f"c.health = ${param_idx}")
+        where_clauses.append(f"c.health = ANY(${param_idx}::text[])")
         params.append(health)
         param_idx += 1
 
     if site_id:
-        where_clauses.append(f"c.site_id = ${param_idx}")
+        where_clauses.append(f"c.site_id = ANY(${param_idx}::text[])")
         params.append(site_id)
         param_idx += 1
+
+    # Tag filtering with AND semantics (all tags must match)
+    # Tags are in "key:value" format
+    # Note: clients connect to devices via connected_device_serial -> devices.serial_number
+    # device_tags uses tag_key and tag_value columns (not key/value)
+    if tags:
+        # Validate and limit tags (max 10 for DoS prevention)
+        valid_tags = []
+        for tag in tags[:10]:  # Limit to 10 tags
+            if ":" in tag:
+                parts = tag.split(":", 1)
+                # Also limit key/value length for security
+                key = parts[0].strip()[:100]
+                value = parts[1].strip()[:200] if len(parts) > 1 else ""
+                if key and value:
+                    valid_tags.append((key, value))
+
+        # Each tag adds an EXISTS condition (AND semantics)
+        # Join through connected_device_serial to find device tags
+        for tag_key, tag_value in valid_tags:
+            where_clauses.append(f"""
+                EXISTS (
+                    SELECT 1 FROM device_tags dt
+                    INNER JOIN devices d ON dt.device_id = d.id
+                    WHERE d.serial_number = c.connected_device_serial
+                    AND dt.tag_key = ${param_idx}
+                    AND dt.tag_value = ${param_idx + 1}
+                )
+            """)
+            params.append(tag_key)
+            params.append(tag_value)
+            param_idx += 2
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
@@ -500,19 +541,21 @@ async def export_clients(
             SELECT COUNT(*) FROM clients c {where_sql}
         """, *params)
 
-        # Get summary stats
-        summary = await conn.fetchrow("""
+        # Get summary stats - FILTERED to match exported data
+        # This ensures KPIs and charts reflect the actual exported rows
+        summary = await conn.fetchrow(f"""
             SELECT
                 COUNT(*) as total_clients,
-                COUNT(*) FILTER (WHERE status = 'Connected') as connected,
-                COUNT(*) FILTER (WHERE type = 'Wired') as wired,
-                COUNT(*) FILTER (WHERE type = 'Wireless') as wireless,
-                COUNT(*) FILTER (WHERE health = 'Good') as health_good,
-                COUNT(*) FILTER (WHERE health = 'Fair') as health_fair,
-                COUNT(*) FILTER (WHERE health = 'Poor') as health_poor,
-                COUNT(*) FILTER (WHERE health IS NULL OR health NOT IN ('Good', 'Fair', 'Poor')) as health_unknown
-            FROM clients
-        """)
+                COUNT(*) FILTER (WHERE c.status = 'Connected') as connected,
+                COUNT(*) FILTER (WHERE c.type = 'Wired') as wired,
+                COUNT(*) FILTER (WHERE c.type = 'Wireless') as wireless,
+                COUNT(*) FILTER (WHERE c.health = 'Good') as health_good,
+                COUNT(*) FILTER (WHERE c.health = 'Fair') as health_fair,
+                COUNT(*) FILTER (WHERE c.health = 'Poor') as health_poor,
+                COUNT(*) FILTER (WHERE c.health IS NULL OR c.health NOT IN ('Good', 'Fair', 'Poor')) as health_unknown
+            FROM clients c
+            {where_sql}
+        """, *params)
 
     data = {
         "items": [dict(r) for r in clients],
