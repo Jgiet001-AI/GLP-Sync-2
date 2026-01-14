@@ -39,6 +39,10 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
+# WebSocket message size limits
+MAX_WS_MESSAGE_SIZE_MB = 1
+MAX_WS_MESSAGE_SIZE_BYTES = MAX_WS_MESSAGE_SIZE_MB * 1024 * 1024  # 1 MB
+
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
 
