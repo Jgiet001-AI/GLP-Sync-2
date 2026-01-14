@@ -32,6 +32,7 @@ from .schemas import (
     ConversationListItem,
     ConversationListResponse,
     ConversationResponse,
+    MAX_MESSAGE_LENGTH,
     MemoryStatsResponse,
     MessageResponse,
     TicketResponse,
@@ -428,6 +429,24 @@ async def websocket_endpoint(
 
                 # Start new chat
                 message = data.get("message", "")
+
+                # Validate message length
+                if not message or not message.strip():
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": "Message cannot be empty",
+                        "error_type": "validation_error",
+                    })
+                    continue
+
+                if len(message) > MAX_MESSAGE_LENGTH:
+                    await websocket.send_json({
+                        "type": "error",
+                        "content": f"Message exceeds maximum length of {MAX_MESSAGE_LENGTH} characters (received {len(message)} characters)",
+                        "error_type": "validation_error",
+                    })
+                    continue
+
                 conversation_id = data.get("conversation_id")
 
                 if conversation_id:
