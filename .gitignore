@@ -41,3 +41,4 @@ node_modules/
 .worktrees/
 .security-key
 logs/security/
+**/.DS_Store
