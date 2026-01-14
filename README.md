@@ -73,6 +73,7 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Security Disclosure Policy](#security-disclosure-policy)
   - [Security Best Practices Summary](#security-best-practices-summary)
   - [Additional Resources](#additional-resources)
+- [FAQ](#faq)
 - [License](#license)
 
 ## Features
@@ -1545,6 +1546,1025 @@ Send details to: **[maintainer email - replace with actual email]**
 - [PostgreSQL Security](https://www.postgresql.org/docs/current/auth-methods.html)
 - [JWT Best Practices](https://tools.ietf.org/html/rfc8725)
 - [Python Security Guide](https://python.readthedocs.io/en/latest/library/security_warnings.html)
+
+## FAQ
+
+### What is HPE GreenLake Platform?
+
+[HPE GreenLake Platform](https://www.hpe.com/us/en/greenlake.html) is HPE's as-a-service cloud platform that provides IT infrastructure and services with a pay-per-use consumption model. It offers unified management, monitoring, and provisioning of compute, storage, and networking resources across on-premises, edge, and cloud environments.
+
+This project syncs device inventory, subscription data, and service entitlements from GreenLake's REST API to a local PostgreSQL database for analysis, reporting, and integration with other systems.
+
+### Do I need GreenLake credentials to use this?
+
+**Yes, you need valid GreenLake API credentials** to sync data from the platform:
+- **`GLP_CLIENT_ID`** - OAuth2 client ID
+- **`GLP_CLIENT_SECRET`** - OAuth2 client secret
+- **`GLP_TOKEN_URL`** - OAuth2 token endpoint (usually `https://sso.common.cloud.hpe.com/as/token.oauth2`)
+
+These credentials must be obtained from your GreenLake administrator or through the [HPE GreenLake Developer Portal](https://developer.greenlake.hpe.com/).
+
+**Without credentials:**
+- You can still run the dashboard and database components
+- The sync services will fail authentication
+- Use the `--json-only` CLI mode to test with sample data
+
+**Development mode:** The interactive setup wizard (`./setup.sh`) offers a "demo mode" option that uses mock data for testing the UI without real credentials.
+
+### Can I use this without Docker?
+
+**Yes, but Docker is strongly recommended** for ease of deployment and dependency management.
+
+#### Without Docker (Manual Setup)
+
+**Requirements:**
+- Python 3.11+ with `uv` package manager
+- PostgreSQL 16+ with `pgvector` extension
+- Node.js 22+ with npm
+- Redis 7+ (optional, required for AI chatbot)
+
+**Backend setup:**
+```bash
+# Install Python dependencies
+uv sync
+
+# Set up database
+psql -U postgres -f db/schema.sql
+psql -U postgres -f db/subscriptions_schema.sql
+psql -U postgres -f db/migrations/*.sql
+
+# Configure environment
+cp .env.example .env
+nano .env  # Edit with your credentials
+
+# Run API server
+uv run uvicorn src.glp.assignment.app:app --reload --port 8000
+
+# Run scheduler (separate terminal)
+python scheduler.py
+```
+
+**Frontend setup:**
+```bash
+cd frontend
+npm install
+npm run dev  # Development server on port 5173
+npm run build  # Production build
+```
+
+**Why Docker is recommended:**
+- Pre-configured services with correct versions
+- Automatic database initialization with migrations
+- Network isolation and security hardening
+- One-command deployment with `docker compose up`
+- Production-ready with security best practices
+
+### Which AI provider should I choose (Claude vs GPT)?
+
+The AI chatbot supports both Anthropic Claude (primary) and OpenAI GPT (fallback). **Choose based on your priorities:**
+
+#### Anthropic Claude (Recommended)
+
+**Best for:**
+- Longer context windows (200k tokens)
+- Better reasoning and instruction following
+- Superior code understanding
+- More detailed technical explanations
+
+**Configuration:**
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Pricing:** ~$0.015/1k tokens (Claude 3.5 Sonnet)
+
+#### OpenAI GPT
+
+**Best for:**
+- Lower cost for simple queries
+- Faster response times
+- Existing OpenAI infrastructure
+
+**Configuration:**
+```bash
+OPENAI_API_KEY=sk-...
+```
+
+**Pricing:** ~$0.002/1k tokens (GPT-4o mini)
+
+#### Using Both
+
+The chatbot will automatically fall back to OpenAI if Anthropic fails:
+```bash
+ANTHROPIC_API_KEY=sk-ant-...  # Primary
+OPENAI_API_KEY=sk-...          # Fallback
+```
+
+**Embeddings:** Regardless of chat provider, semantic memory uses OpenAI's `text-embedding-3-large` model for best accuracy.
+
+**Free tier:** Both providers offer free trial credits for testing.
+
+### How much does it cost to run?
+
+Costs depend on infrastructure choice and usage patterns:
+
+#### Cloud Hosting (AWS/Azure/GCP)
+
+**Minimal deployment (t3.medium equivalent):**
+- **Compute:** $30-50/month (2 vCPU, 4GB RAM)
+- **Database:** $20-30/month (managed PostgreSQL)
+- **Storage:** $5-10/month (50GB SSD)
+- **Total:** ~$55-90/month
+
+**Production deployment (t3.large equivalent):**
+- **Compute:** $60-100/month (2 vCPU, 8GB RAM)
+- **Database:** $40-80/month (managed PostgreSQL with backups)
+- **Storage:** $10-20/month (100GB SSD)
+- **Load balancer:** $15-20/month
+- **Total:** ~$125-220/month
+
+#### Self-Hosted (On-Premises/Homelab)
+
+**Hardware only:**
+- **Server:** One-time cost (can use existing hardware)
+- **Power:** $5-20/month (depending on usage)
+- **Internet:** Included in existing connection
+- **Total:** ~$5-20/month (operational costs only)
+
+#### AI Chatbot Costs (Optional)
+
+**Light usage (100k tokens/day):**
+- **Claude:** ~$45/month
+- **GPT-4o mini:** ~$6/month
+
+**Heavy usage (1M tokens/day):**
+- **Claude:** ~$450/month
+- **GPT-4o mini:** ~$60/month
+
+**Note:** The AI chatbot is completely optional. Core sync functionality has no per-request API costs.
+
+#### Free Tier (Development)
+
+**Local Docker deployment:**
+- **Cost:** $0 (uses local resources)
+- **Requirements:** Docker Desktop, 4GB RAM, 10GB disk
+
+### Can I deploy this to production?
+
+**Yes, this project is production-ready** with security hardening, health checks, and multi-arch Docker images.
+
+#### Production Deployment Options
+
+##### 1. Docker Compose (docker-compose.prod.yml)
+
+Uses pre-built multi-arch images from Docker Hub:
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+**Features:**
+- Pre-built images (no local compilation)
+- Security hardening enabled by default
+- Health checks for all services
+- Automatic restarts
+
+##### 2. Kubernetes
+
+Helm charts available in `k8s/` directory:
+```bash
+helm install glp-sync ./k8s/helm/glp-sync \
+  --set env.GLP_CLIENT_ID=$GLP_CLIENT_ID \
+  --set env.GLP_CLIENT_SECRET=$GLP_CLIENT_SECRET
+```
+
+##### 3. Cloud Platforms
+
+- **AWS ECS/Fargate** - Use Docker images with task definitions
+- **Azure Container Instances** - Deploy with ARM templates
+- **Google Cloud Run** - Deploy with `gcloud run deploy`
+
+#### Production Checklist
+
+Before deploying to production, ensure:
+
+- [ ] **Strong secrets generated** - Use the security section's generators
+- [ ] **Authentication enabled** - `DISABLE_AUTH=false`, `REQUIRE_AUTH=true`
+- [ ] **TLS/HTTPS configured** - Use reverse proxy (nginx, Traefik, Caddy)
+- [ ] **Database backups** - Configure automated PostgreSQL backups
+- [ ] **Environment variables secure** - Never commit `.env` to Git
+- [ ] **Monitoring setup** - Health checks, log aggregation, alerts
+- [ ] **Resource limits** - Set CPU/memory limits in docker-compose.yml
+- [ ] **Firewall rules** - Restrict ingress to HTTPS (443) only
+- [ ] **CORS configured** - Set `CORS_ORIGINS` to your frontend domain
+- [ ] **Vulnerability scanning** - Run Trivy before deployment
+
+See the [Security](#security) section for detailed best practices.
+
+### How do I backup my data?
+
+PostgreSQL database contains all synced device/subscription data. **Regular backups are critical for production deployments.**
+
+#### Automated Backups (Recommended)
+
+##### Using pg_dump (Logical Backup)
+
+```bash
+#!/bin/bash
+# backup-db.sh - Run daily via cron
+
+BACKUP_DIR="/backups"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_FILE="$BACKUP_DIR/glp_sync_$TIMESTAMP.sql.gz"
+
+# Backup database (compressed)
+docker compose exec -T postgres pg_dump -U glpuser glp_sync | gzip > "$BACKUP_FILE"
+
+# Keep only last 30 days
+find "$BACKUP_DIR" -name "glp_sync_*.sql.gz" -mtime +30 -delete
+
+echo "Backup completed: $BACKUP_FILE"
+```
+
+**Add to crontab:**
+```bash
+0 2 * * * /path/to/backup-db.sh >> /var/log/glp-backup.log 2>&1
+```
+
+##### Using Docker Volume Snapshots
+
+```bash
+# Stop database (ensures consistency)
+docker compose stop postgres
+
+# Backup volume
+docker run --rm \
+  -v glp-sync-2_postgres-data:/source:ro \
+  -v /backups:/backup \
+  alpine tar czf /backup/postgres-data-$(date +%Y%m%d).tar.gz -C /source .
+
+# Restart database
+docker compose start postgres
+```
+
+#### Manual Backup (One-Time)
+
+```bash
+# Export entire database
+docker compose exec postgres pg_dump -U glpuser glp_sync > glp_sync_backup.sql
+
+# Export with data only (no schema)
+docker compose exec postgres pg_dump -U glpuser --data-only glp_sync > data_only.sql
+
+# Export compressed
+docker compose exec postgres pg_dump -U glpuser glp_sync | gzip > glp_sync_backup.sql.gz
+```
+
+#### Restore from Backup
+
+```bash
+# Restore full database
+docker compose exec -T postgres psql -U glpuser glp_sync < glp_sync_backup.sql
+
+# Restore compressed backup
+gunzip < glp_sync_backup.sql.gz | docker compose exec -T postgres psql -U glpuser glp_sync
+```
+
+#### Cloud Backup Solutions
+
+- **AWS RDS** - Automated daily snapshots with 7-day retention
+- **Azure Database for PostgreSQL** - Point-in-time restore up to 35 days
+- **Google Cloud SQL** - Automated backups with configurable retention
+- **Managed PostgreSQL** (DigitalOcean, Heroku) - Automated daily backups
+
+#### What to Back Up
+
+| Component | Frequency | Method |
+|-----------|-----------|--------|
+| **PostgreSQL database** | Daily | `pg_dump` or volume snapshot |
+| **Environment variables** | On change | Encrypted secrets vault (Vault, AWS Secrets Manager) |
+| **Docker volumes** | Weekly | Volume snapshot |
+| **Configuration files** | On change | Git repository (without secrets) |
+
+#### Testing Backups
+
+**Always test your backups regularly:**
+```bash
+# Restore to test database
+createdb glp_sync_test
+psql glp_sync_test < glp_sync_backup.sql
+
+# Verify data integrity
+psql glp_sync_test -c "SELECT COUNT(*) FROM devices;"
+psql glp_sync_test -c "SELECT COUNT(*) FROM subscriptions;"
+
+# Clean up
+dropdb glp_sync_test
+```
+
+### What ports need to be exposed?
+
+Port requirements depend on deployment mode:
+
+#### Production Deployment (Public Internet)
+
+**Externally exposed (public-facing):**
+| Port | Service | Protocol | Required? | Notes |
+|------|---------|----------|-----------|-------|
+| **80** | Frontend (nginx) | HTTP | Yes | Redirect to HTTPS |
+| **443** | Frontend (nginx) | HTTPS | Yes | TLS termination with reverse proxy |
+
+**Internal only (Docker network):**
+| Port | Service | Protocol | Purpose |
+|------|---------|----------|---------|
+| 5432 | PostgreSQL | TCP | Database connections |
+| 6379 | Redis | TCP | WebSocket ticket auth |
+| 8000 | API Server | HTTP | Backend API (proxied by nginx) |
+| 8010 | MCP Server | HTTP | AI assistant tools |
+| 8080 | Scheduler | HTTP | Health checks |
+
+#### Development Deployment (Local)
+
+All ports exposed to localhost:
+| Port | Service | Access URL |
+|------|---------|------------|
+| **80** | Frontend | http://localhost |
+| 5432 | PostgreSQL | localhost:5432 (for SQL clients) |
+| 6379 | Redis | localhost:6379 (for Redis CLI) |
+| 8000 | API Server | http://localhost:8000/api |
+| 8010 | MCP Server | http://localhost:8010 |
+| 8080 | Scheduler | http://localhost:8080/health |
+
+#### Docker Compose Configuration
+
+**Production (docker-compose.prod.yml):**
+```yaml
+services:
+  frontend:
+    ports:
+      - "80:80"      # Only expose frontend
+      - "443:443"    # HTTPS (if configured)
+
+  postgres:
+    # No ports exposed (internal only)
+
+  api-server:
+    # No ports exposed (proxied by nginx)
+```
+
+**Development (docker-compose.yml):**
+```yaml
+services:
+  postgres:
+    ports:
+      - "5432:5432"  # Expose for database tools
+```
+
+#### Firewall Configuration
+
+**Production server:**
+```bash
+# Allow HTTPS (recommended)
+ufw allow 443/tcp
+
+# Allow HTTP (for Let's Encrypt and redirect to HTTPS)
+ufw allow 80/tcp
+
+# Allow SSH (for management)
+ufw allow 22/tcp
+
+# Block all other inbound traffic
+ufw default deny incoming
+ufw enable
+```
+
+**Cloud security groups (AWS example):**
+- **Inbound:** 443/tcp (0.0.0.0/0), 80/tcp (0.0.0.0/0), 22/tcp (your-ip/32)
+- **Outbound:** All traffic allowed (for API calls to GreenLake)
+
+### Can I use this with on-premises GreenLake?
+
+**Yes, this works with both HPE GreenLake Cloud and on-premises Private Cloud deployments.**
+
+#### Configuration for On-Premises GreenLake
+
+Update the `GLP_BASE_URL` environment variable to point to your on-premises instance:
+
+```bash
+# .env file
+GLP_BASE_URL=https://greenlake.your-company.com
+GLP_TOKEN_URL=https://greenlake.your-company.com/as/token.oauth2
+GLP_CLIENT_ID=your-client-id
+GLP_CLIENT_SECRET=your-client-secret
+```
+
+#### API Endpoint Requirements
+
+Your on-premises GreenLake must support these API endpoints:
+- **OAuth2 token endpoint** - `/as/token.oauth2`
+- **Devices API** - `/api/compute/v1beta1/devices` (paginated)
+- **Subscriptions API** - `/api/subs-billing/v1/subscriptions` (paginated)
+- **Device management API** - `/api/compute/v2beta1/devices` (optional, for write operations)
+
+#### Network Connectivity
+
+Ensure network access from your deployment to GreenLake:
+```bash
+# Test connectivity
+curl -I https://greenlake.your-company.com
+
+# Test OAuth2 endpoint
+curl -X POST https://greenlake.your-company.com/as/token.oauth2 \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=your-client-id" \
+  -d "client_secret=your-client-secret"
+```
+
+**Firewall requirements:**
+- Allow outbound HTTPS (443) to your GreenLake instance
+- No inbound connections required (sync is pull-based)
+
+#### TLS Certificates
+
+For on-premises deployments with self-signed certificates:
+```bash
+# Option 1: Trust the certificate (development only)
+export CURL_CA_BUNDLE=/path/to/your-ca-bundle.crt
+
+# Option 2: Disable SSL verification (INSECURE - not recommended)
+# Add to docker-compose.yml:
+environment:
+  - PYTHONHTTPSVERIFY=0
+```
+
+**Production:** Always use valid TLS certificates (Let's Encrypt, corporate CA)
+
+#### Hybrid Deployments
+
+You can sync from multiple GreenLake instances by running separate deployments:
+```bash
+# Instance 1 - Cloud
+docker compose -f docker-compose.cloud.yml up -d
+
+# Instance 2 - On-premises
+docker compose -f docker-compose.onprem.yml up -d
+```
+
+Each deployment maintains its own database and can be configured with different credentials.
+
+### How often does the sync run?
+
+Sync frequency is configurable based on your needs:
+
+#### Default Behavior
+
+**Automated sync (scheduler service):**
+- **Default interval:** Every 60 minutes
+- **Configurable via:** `SYNC_INTERVAL_MINUTES` environment variable
+- **Health checks:** Every 30 seconds on port 8080
+
+```bash
+# .env file
+SYNC_INTERVAL_MINUTES=60  # Sync every hour
+```
+
+#### Custom Intervals
+
+**Recommended intervals based on use case:**
+
+| Use Case | Interval | Configuration | Rationale |
+|----------|----------|---------------|-----------|
+| **Development/Testing** | 5 minutes | `SYNC_INTERVAL_MINUTES=5` | Rapid iteration and testing |
+| **Light production** | 60 minutes | `SYNC_INTERVAL_MINUTES=60` | Default (balanced) |
+| **Heavy production** | 30 minutes | `SYNC_INTERVAL_MINUTES=30` | More up-to-date data |
+| **Low-change environments** | 240 minutes (4 hours) | `SYNC_INTERVAL_MINUTES=240` | Reduce API load |
+| **Once daily** | 1440 minutes (24 hours) | `SYNC_INTERVAL_MINUTES=1440` | Nightly batch sync |
+
+**Example configuration:**
+```bash
+# docker-compose.yml
+services:
+  scheduler:
+    environment:
+      - SYNC_INTERVAL_MINUTES=30  # Sync every 30 minutes
+```
+
+#### Manual Sync (One-Time)
+
+**CLI (without scheduler):**
+```bash
+# Sync both devices and subscriptions
+python main.py
+
+# Devices only
+python main.py --devices
+
+# Subscriptions only
+python main.py --subscriptions
+```
+
+**Docker one-off sync:**
+```bash
+# Run sync once and exit
+docker compose run --rm sync-once
+```
+
+#### Sync Performance
+
+**Typical sync duration:**
+- **100 devices:** 10-30 seconds
+- **1,000 devices:** 1-3 minutes
+- **10,000 devices:** 10-20 minutes
+- **Subscriptions:** Usually faster (50 items per page vs 2,000 for devices)
+
+**Factors affecting sync time:**
+- GreenLake API response times
+- Network latency
+- Database write performance
+- Number of devices/subscriptions
+
+#### Monitoring Sync Operations
+
+**View sync history:**
+```sql
+-- Last 10 sync operations
+SELECT * FROM sync_history ORDER BY sync_started_at DESC LIMIT 10;
+
+-- Sync statistics
+SELECT
+  sync_type,
+  COUNT(*) as total_runs,
+  AVG(items_synced) as avg_items,
+  AVG(EXTRACT(EPOCH FROM (sync_completed_at - sync_started_at))) as avg_duration_seconds
+FROM sync_history
+WHERE sync_status = 'completed'
+GROUP BY sync_type;
+```
+
+**Health check endpoint:**
+```bash
+# Check scheduler health
+curl http://localhost:8080/health
+
+# Response (healthy):
+{
+  "status": "healthy",
+  "last_sync": "2024-01-13T20:30:00Z",
+  "next_sync": "2024-01-13T21:30:00Z"
+}
+```
+
+#### Best Practices
+
+1. **Start conservative** - Begin with 60-minute intervals and adjust based on observed data change frequency
+2. **Monitor API quotas** - Check if your GreenLake API has rate limits
+3. **Use circuit breaker** - Built-in resilience layer prevents cascading failures
+4. **Schedule off-peak** - For daily syncs, run during low-traffic hours (2-4 AM)
+5. **Test incrementally** - Use manual sync to test before enabling automated scheduler
+
+### How do I upgrade to a new version?
+
+Upgrading depends on your deployment method:
+
+#### Docker Compose (Recommended)
+
+**Using Docker Hub images (docker-compose.prod.yml):**
+```bash
+# Pull latest images
+docker compose -f docker-compose.prod.yml pull
+
+# Restart services with new images
+docker compose -f docker-compose.prod.yml up -d
+
+# View updated versions
+docker compose -f docker-compose.prod.yml images
+```
+
+**Building locally (docker-compose.yml):**
+```bash
+# Pull latest code
+git fetch origin
+git checkout main
+git pull origin main
+
+# Rebuild images
+docker compose build --no-cache
+
+# Restart services
+docker compose up -d
+```
+
+#### Manual Installation
+
+```bash
+# Pull latest code
+git pull origin main
+
+# Update Python dependencies
+uv sync --upgrade
+
+# Update frontend dependencies
+cd frontend && npm install && cd ..
+
+# Restart services
+# (depends on your process manager - systemd, supervisor, etc.)
+```
+
+#### Database Migrations
+
+**Check for pending migrations:**
+```bash
+# View migration files
+ls -la db/migrations/
+
+# Apply migrations manually (if needed)
+docker compose exec postgres psql -U glp -d greenlake -f /docker-entrypoint-initdb.d/migrations/XXXX_migration_name.sql
+```
+
+**Automatic migrations:** The PostgreSQL container automatically applies schema files on first startup. For existing databases, migrations must be applied manually.
+
+#### Rolling Back
+
+If an upgrade causes issues:
+```bash
+# Docker Hub images - use specific version tag
+docker compose -f docker-compose.prod.yml pull jgiet001/glp-sync:v0.1.0
+docker compose -f docker-compose.prod.yml up -d
+
+# Local build - checkout previous commit
+git checkout <previous-commit-sha>
+docker compose build
+docker compose up -d
+```
+
+#### Release Notes
+
+Always check the [GitHub Releases](https://github.com/Jgiet001-AI/GLP-Sync-2/releases) page for:
+- Breaking changes
+- Required migrations
+- New environment variables
+- Deprecation notices
+
+### How do I reset/delete all data?
+
+To completely reset the database and start fresh:
+
+#### Full Reset (⚠️ DATA LOSS)
+
+```bash
+# Stop all services
+docker compose down
+
+# Remove database volume
+docker volume rm glp-sync-2_postgres_data
+
+# Remove Redis data (WebSocket tickets, cache)
+docker volume rm glp-sync-2_redis_data
+
+# Restart services (schema will auto-apply)
+docker compose up -d
+```
+
+#### Selective Data Deletion
+
+**Delete devices only:**
+```sql
+-- Connect to database
+docker compose exec postgres psql -U glp -d greenlake
+
+-- Delete all devices (cascades to device_tags, device_subscriptions)
+TRUNCATE TABLE devices CASCADE;
+
+-- Verify
+SELECT COUNT(*) FROM devices;  -- Should return 0
+```
+
+**Delete subscriptions only:**
+```sql
+-- Delete all subscriptions (cascades to subscription_tags)
+TRUNCATE TABLE subscriptions CASCADE;
+```
+
+**Delete sync history:**
+```sql
+-- Delete old sync logs (keep last 30 days)
+DELETE FROM sync_history WHERE created_at < NOW() - INTERVAL '30 days';
+
+-- Or delete all sync history
+TRUNCATE TABLE sync_history;
+```
+
+**Delete AI chat history:**
+```sql
+-- Delete all conversations and messages
+TRUNCATE TABLE agent_messages CASCADE;
+TRUNCATE TABLE agent_conversations CASCADE;
+```
+
+#### Restart from Scratch (Keep Configuration)
+
+```bash
+# Stop services
+docker compose down
+
+# Remove only data volumes (keeps configuration)
+docker volume rm glp-sync-2_postgres_data glp-sync-2_redis_data
+
+# Restart
+docker compose up -d
+
+# Run initial sync
+docker compose exec scheduler python main.py
+```
+
+### Can I run multiple instances/tenants?
+
+**Yes, this supports multi-tenant deployments.** Each tenant should have its own isolated deployment.
+
+#### Option 1: Separate Docker Compose Stacks
+
+```bash
+# Tenant 1
+cd /opt/glp-sync-tenant1
+cp .env.example .env
+nano .env  # Configure tenant1 credentials
+docker compose -p tenant1 up -d
+
+# Tenant 2
+cd /opt/glp-sync-tenant2
+cp .env.example .env
+nano .env  # Configure tenant2 credentials
+docker compose -p tenant2 up -d
+```
+
+**Port conflicts:** Modify `docker-compose.yml` to use different host ports:
+```yaml
+# Tenant 1 - ports 80, 5432, 8000
+frontend:
+  ports:
+    - "80:80"
+
+# Tenant 2 - ports 8081, 5433, 8001
+frontend:
+  ports:
+    - "8081:80"
+postgres:
+  ports:
+    - "5433:5432"
+```
+
+#### Option 2: Shared Database with Row-Level Security
+
+**Not currently supported out-of-the-box.** The schema does not include tenant isolation at the database level. For multi-tenant scenarios, use Option 1 (separate stacks).
+
+**Future enhancement:** Planned support for `tenant_id` column with Row-Level Security (RLS) policies.
+
+#### Option 3: Kubernetes Namespaces
+
+```bash
+# Deploy to separate namespaces
+kubectl create namespace tenant1
+kubectl create namespace tenant2
+
+# Install Helm chart for each tenant
+helm install glp-sync ./k8s/helm/glp-sync \
+  --namespace tenant1 \
+  --set env.GLP_CLIENT_ID=$TENANT1_CLIENT_ID
+
+helm install glp-sync ./k8s/helm/glp-sync \
+  --namespace tenant2 \
+  --set env.GLP_CLIENT_ID=$TENANT2_CLIENT_ID
+```
+
+### What browsers are supported?
+
+The React dashboard is built with modern web standards and supports:
+
+#### Fully Supported (Tested)
+
+| Browser | Minimum Version | Notes |
+|---------|-----------------|-------|
+| **Google Chrome** | 90+ | Recommended for best performance |
+| **Microsoft Edge** | 90+ | Chromium-based, full support |
+| **Mozilla Firefox** | 88+ | Full support |
+| **Safari** | 14+ | macOS/iOS, full support |
+
+#### Partially Supported
+
+| Browser | Minimum Version | Limitations |
+|---------|-----------------|-------------|
+| **Safari** | 13 | WebSocket may have issues on older versions |
+| **Firefox ESR** | 78+ | Older versions may lack ES2020 features |
+
+#### Not Supported
+
+- **Internet Explorer** - All versions (deprecated by Microsoft)
+- **Legacy Edge** (pre-Chromium) - Versions <79
+
+#### Required Features
+
+The dashboard requires these modern browser capabilities:
+- **ES2020 JavaScript** - `async`/`await`, optional chaining, nullish coalescing
+- **WebSocket** - For AI chatbot real-time streaming
+- **Fetch API** - For API requests
+- **CSS Grid** - For responsive layouts
+- **Local Storage** - For persisting user preferences
+
+#### Testing Your Browser
+
+Visit the dashboard and open browser console:
+```javascript
+// Check WebSocket support
+console.log('WebSocket' in window);  // Should be true
+
+// Check Fetch API
+console.log('fetch' in window);  // Should be true
+```
+
+If the dashboard fails to load, check:
+1. Browser version is up-to-date
+2. JavaScript is enabled
+3. Browser console for errors (F12 or Cmd+Option+I)
+
+### What's the difference between docker-compose.yml and docker-compose.prod.yml?
+
+There are three Docker Compose files for different use cases:
+
+#### docker-compose.yml (Development)
+
+**Best for:** Local development, testing, customization
+
+**Features:**
+- **Builds locally** - Compiles code from source (slower startup)
+- **All ports exposed** - PostgreSQL, Redis, API server accessible for debugging
+- **Live reload** - Frontend auto-refreshes on code changes (with volume mounts)
+- **Development mode** - Authentication can be disabled for testing
+- **Verbose logging** - More detailed logs for debugging
+
+**Usage:**
+```bash
+docker compose up -d
+```
+
+#### docker-compose.prod.yml (Production)
+
+**Best for:** Production deployments, quick setup, CI/CD
+
+**Features:**
+- **Pre-built images** - Pulls from Docker Hub (fast startup)
+- **Minimal ports** - Only frontend (80/443) exposed
+- **Security hardening** - Non-root users, dropped capabilities, read-only filesystems
+- **Resource limits** - CPU/memory constraints to prevent resource exhaustion
+- **Health checks** - Automatic restart on failure
+- **Production logging** - JSON-formatted, structured logs
+
+**Usage:**
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+#### docker-compose.secure.yml (Security Hardened)
+
+**Best for:** High-security environments, compliance requirements
+
+**Features:**
+- All production features, plus:
+- **No host ports** - PostgreSQL/Redis only accessible via Docker network
+- **Strict capabilities** - PostgreSQL runs with minimal capabilities
+- **Read-only root FS** - All writable areas use tmpfs
+- **SCRAM-SHA-256** - Strong PostgreSQL authentication
+
+**Usage:**
+```bash
+docker compose -f docker-compose.secure.yml up -d
+```
+
+#### Comparison Table
+
+| Feature | docker-compose.yml | docker-compose.prod.yml | docker-compose.secure.yml |
+|---------|-------------------|------------------------|---------------------------|
+| **Image source** | Local build | Docker Hub | Docker Hub |
+| **Startup time** | Slow (builds) | Fast (pulls) | Fast (pulls) |
+| **PostgreSQL port** | Exposed (5432) | Localhost only | Not exposed |
+| **Authentication** | Optional | Required | Required |
+| **Security hardening** | Basic | Advanced | Maximum |
+| **Resource limits** | None | Moderate | Strict |
+| **Best for** | Development | Production | High-security prod |
+
+#### Switching Between Modes
+
+```bash
+# From development to production
+docker compose down
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+
+# From production to development
+docker compose -f docker-compose.prod.yml down
+docker compose build
+docker compose up -d
+```
+
+**Note:** Database data persists across mode switches (stored in Docker volumes).
+
+### Where can I get help?
+
+If you're stuck or need assistance:
+
+#### Documentation
+
+1. **README** - This file contains comprehensive setup and usage guides
+2. **CLAUDE.md** - Technical architecture and development patterns
+3. **Troubleshooting section** - Common issues and solutions (see above)
+4. **API documentation** - OpenAPI spec at `http://localhost:8000/docs`
+
+#### Community Support
+
+- **GitHub Issues** - [Report bugs or request features](https://github.com/Jgiet001-AI/GLP-Sync-2/issues)
+- **GitHub Discussions** - [Ask questions and share ideas](https://github.com/Jgiet001-AI/GLP-Sync-2/discussions)
+- **Pull Requests** - [Contribute fixes and improvements](https://github.com/Jgiet001-AI/GLP-Sync-2/pulls)
+
+#### Before Asking for Help
+
+**Gather diagnostic information:**
+
+1. **Check logs** - Most issues are explained in logs:
+   ```bash
+   docker compose logs > debug-logs.txt
+   docker compose logs api-server > api-logs.txt
+   docker compose logs scheduler > scheduler-logs.txt
+   ```
+
+2. **Verify environment** - Share configuration (redact secrets):
+   ```bash
+   docker compose config > docker-config.txt
+   cat .env | grep -v "SECRET\|PASSWORD\|KEY" > env-sanitized.txt
+   ```
+
+3. **Test connectivity** - Verify network access:
+   ```bash
+   curl -I http://localhost:8000/api/health
+   curl -I https://global.api.greenlake.hpe.com
+   ```
+
+4. **Check versions** - Include in your issue report:
+   ```bash
+   docker --version
+   docker compose version
+   python --version
+   node --version
+   ```
+
+#### Creating a Good Issue Report
+
+Include in your GitHub issue:
+- **Clear title** - Summarize the problem
+- **Description** - What you expected vs what happened
+- **Steps to reproduce** - How to recreate the issue
+- **Environment details** - OS, Docker version, deployment mode
+- **Logs** - Relevant excerpts (not the entire log file)
+- **Screenshots** - For UI issues
+
+**Example:**
+```markdown
+**Title:** API server fails to start with "Database connection refused"
+
+**Environment:**
+- OS: Ubuntu 22.04
+- Docker: 24.0.6
+- Docker Compose: 2.21.0
+- Deployment: docker-compose.yml (local build)
+
+**Steps to reproduce:**
+1. Clone repository
+2. Copy .env.example to .env
+3. Run `docker compose up -d`
+4. Check logs: `docker compose logs api-server`
+
+**Expected:** API server starts successfully
+**Actual:** Container exits with error "Database connection refused"
+
+**Logs:**
+```
+api-server | ERROR: could not connect to server: Connection refused
+api-server |   Is the server running on host "postgres" (172.18.0.2) and accepting
+api-server |   TCP/IP connections on port 5432?
+```
+```
+
+#### Response Time
+
+- **Bug reports** - Typically within 2-3 days
+- **Feature requests** - Discussion within 1 week
+- **Security issues** - Within 48 hours (use private reporting)
+
+#### Commercial Support
+
+For enterprise support, custom development, or consulting:
+- Contact via GitHub Issues with `[Commercial Support]` tag
+- Or email directly (see repository maintainer profile)
+
+**We're here to help!** Don't hesitate to ask questions or report issues. Every issue report helps improve the project for everyone.
 
 ## License
 
