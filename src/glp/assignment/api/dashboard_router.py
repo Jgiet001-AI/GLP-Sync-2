@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .dependencies import get_db_pool, verify_api_key
@@ -120,6 +120,7 @@ class DashboardResponse(BaseModel):
 
 @router.get("", response_model=DashboardResponse)
 async def get_dashboard(
+    response: Response,
     expiring_days: int = Query(default=90, ge=1, le=365, description="Days to look ahead for expiring items"),
     sync_history_limit: int = Query(default=10, ge=1, le=50, description="Number of sync history records to return"),
     pool=Depends(get_db_pool),
@@ -130,6 +131,9 @@ async def get_dashboard(
     Returns comprehensive statistics about devices, subscriptions,
     expiring items, and sync history.
     """
+    # Set Cache-Control header for 30 seconds
+    response.headers["Cache-Control"] = "public, max-age=30"
+
     async with pool.acquire() as conn:
         # 1. Device Statistics
         device_stats_row = await conn.fetchrow("""
@@ -1026,10 +1030,14 @@ class FilterOptions(BaseModel):
 
 @router.get("/filters", response_model=FilterOptions)
 async def get_filter_options(
+    response: Response,
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
     """Get available filter options for devices and subscriptions."""
+    # Set Cache-Control header for 5 minutes (300 seconds)
+    response.headers["Cache-Control"] = "public, max-age=300"
+
     async with pool.acquire() as conn:
         device_types = await conn.fetch("""
             SELECT DISTINCT device_type FROM devices WHERE device_type IS NOT NULL ORDER BY device_type
