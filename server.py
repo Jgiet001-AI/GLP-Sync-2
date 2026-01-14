@@ -1,12 +1,18 @@
 """
 FastMCP Server for HPE GreenLake Device & Subscription Inventory
 
-A read-only MCP server providing tools, resources, prompts, and sampling
-for querying the PostgreSQL database.
+An MCP server providing read and write tools for HPE GreenLake inventory management.
+
+Read-only tools: Query devices, subscriptions, tags, and analyze inventory data.
+Write tools: Add devices, apply assignments, archive/unarchive devices, update tags.
 
 Usage:
     python server.py                              # stdio transport (default)
     python server.py --transport http --port 8000 # HTTP transport
+
+Environment Variables Required for Write Operations:
+    GLP_CLIENT_ID, GLP_CLIENT_SECRET, GLP_TOKEN_URL - GreenLake OAuth2 credentials
+    DATABASE_URL - PostgreSQL connection string
 """
 
 from __future__ import annotations
