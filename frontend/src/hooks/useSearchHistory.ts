@@ -41,7 +41,7 @@ const STORAGE_KEY_PREFIX = 'glp_search_history'
 
 // API client for search history
 const searchHistoryApiClient = axios.create({
-  baseURL: '/api/search-history',
+  baseURL: '/api/dashboard/search-history',
   headers: {
     'Content-Type': 'application/json',
   },
