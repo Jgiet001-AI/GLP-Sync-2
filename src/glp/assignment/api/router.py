@@ -10,6 +10,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
+from ...api.error_sanitizer import sanitize_error_message
 from ..domain.entities import DeviceAssignment
 from ..domain.ports import (
     IDeviceManagerPort,
@@ -83,30 +84,30 @@ async def upload_excel(
     """
     # Validate file type
     if not file.filename:
-        raise HTTPException(status_code=400, detail="Filename is required")
+        raise HTTPException(status_code=400, detail=sanitize_error_message("Filename is required"))
 
     if not file.filename.endswith((".xlsx", ".xls", ".csv")):
         raise HTTPException(
             status_code=400,
-            detail="File must be an Excel (.xlsx, .xls) or CSV (.csv) file",
+            detail=sanitize_error_message("File must be an Excel (.xlsx, .xls) or CSV (.csv) file"),
         )
 
     # Check content-length header if available (early rejection)
     if file.size and file.size > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB",
+            detail=sanitize_error_message(f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB"),
         )
 
     # Read file content with size limit
     content = await file.read()
     if len(content) == 0:
-        raise HTTPException(status_code=400, detail="File is empty")
+        raise HTTPException(status_code=400, detail=sanitize_error_message("File is empty"))
 
     if len(content) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
-            detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB",
+            detail=sanitize_error_message(f"File too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB"),
         )
 
     # Process the Excel file
@@ -380,7 +381,7 @@ async def apply_assignments_stream(
             logger.exception("Error in apply-stream")
             await publish({
                 "type": "error",
-                "error": str(e),
+                "error": sanitize_error_message(str(e)),
             })
         finally:
             stop_event.set()

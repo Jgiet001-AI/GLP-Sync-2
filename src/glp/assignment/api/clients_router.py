@@ -11,6 +11,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
+from src.glp.api.error_sanitizer import sanitize_error_message
+
 from .dependencies import get_db_pool, verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -608,7 +610,10 @@ async def get_site_clients(
             site_id
         )
         if not site:
-            raise HTTPException(status_code=404, detail=f"Site {site_id} not found")
+            raise HTTPException(
+                status_code=404,
+                detail=sanitize_error_message(f"Site {site_id} not found")
+            )
 
         # Build WHERE clause
         where_clauses = [
@@ -913,7 +918,10 @@ async def trigger_clients_sync(
 
     except Exception as e:
         logger.error(f"Clients sync failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=sanitize_error_message(f"Sync failed: {e}")
+        )
 
 
 @router.get("/health")

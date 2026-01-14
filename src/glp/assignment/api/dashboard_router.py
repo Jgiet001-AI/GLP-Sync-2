@@ -8,6 +8,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
+from src.glp.api.error_sanitizer import sanitize_error_message
+
 from .dependencies import get_db_pool, verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -643,12 +645,17 @@ async def trigger_sync(
         _sync_status["error"] = str(e)
         raise HTTPException(
             status_code=500,
-            detail=f"Configuration error: {e}. Check GLP_CLIENT_ID, GLP_CLIENT_SECRET, GLP_TOKEN_URL environment variables."
+            detail=sanitize_error_message(
+                f"Configuration error: {e}. Check GLP_CLIENT_ID, GLP_CLIENT_SECRET, GLP_TOKEN_URL environment variables."
+            )
         )
 
     except Exception as e:
         _sync_status["error"] = str(e)
-        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=sanitize_error_message(f"Sync failed: {e}")
+        )
 
     finally:
         _sync_status["is_running"] = False
