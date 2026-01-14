@@ -91,6 +91,39 @@ class SyncHistoryItem(BaseModel):
     duration_ms: Optional[int] = None
 
 
+class SearchHistoryItem(BaseModel):
+    """Search history record."""
+    id: str
+    tenant_id: str
+    user_id: str
+    query: str
+    search_type: str
+    result_count: Optional[int] = None
+    created_at: datetime
+    metadata: dict = Field(default_factory=dict)
+
+
+class SearchHistoryResponse(BaseModel):
+    """List of search history records."""
+    items: list[SearchHistoryItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class CreateSearchHistoryRequest(BaseModel):
+    """Request to create a search history record."""
+    tenant_id: str
+    user_id: str
+    query: str
+    search_type: str
+    result_count: Optional[int] = None
+    metadata: dict = Field(default_factory=dict)
+
+
+class SearchSuggestionsResponse(BaseModel):
+    """List of search suggestions based on history."""
+    suggestions: list[str] = Field(default_factory=list)
+
+
 class DashboardResponse(BaseModel):
     """Complete dashboard data."""
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1058,3 +1091,249 @@ async def get_filter_options(
             subscription_types=[r['subscription_type'] for r in sub_types],
             subscription_statuses=[r['subscription_status'] for r in sub_statuses],
         )
+
+
+@router.get("/search-history", response_model=SearchHistoryResponse)
+async def get_search_history(
+    tenant_id: str = Query(..., description="Tenant identifier for multi-tenancy isolation"),
+    user_id: str = Query(..., description="User identifier"),
+    search_type: Optional[str] = Query(default=None, description="Filter by search type (device or subscription)"),
+    limit: int = Query(default=50, ge=1, le=200, description="Maximum number of search history items to return"),
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Get search history for a specific tenant and user.
+
+    Returns recent search queries filtered by tenant_id and user_id,
+    sorted by created_at DESC (most recent first).
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            # Return empty response if table doesn't exist yet
+            return SearchHistoryResponse(items=[], total=0)
+
+        # Build the query dynamically
+        where_clauses = ["tenant_id = $1", "user_id = $2"]
+        params = [tenant_id, user_id]
+        param_idx = 3
+
+        if search_type:
+            where_clauses.append(f"search_type = ${param_idx}")
+            params.append(search_type)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Count total matching records
+        count_sql = f"SELECT COUNT(*) FROM search_history WHERE {where_sql}"
+        total = await conn.fetchval(count_sql, *params)
+
+        # Fetch search history items
+        query_sql = f"""
+            SELECT
+                id::text,
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                created_at,
+                metadata
+            FROM search_history
+            WHERE {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ${param_idx}
+        """
+        params.append(limit)
+
+        rows = await conn.fetch(query_sql, *params)
+
+        items = [
+            SearchHistoryItem(
+                id=row['id'],
+                tenant_id=row['tenant_id'],
+                user_id=row['user_id'],
+                query=row['query'],
+                search_type=row['search_type'],
+                result_count=row['result_count'],
+                created_at=row['created_at'],
+                metadata=row['metadata'] or {},
+            )
+            for row in rows
+        ]
+
+        return SearchHistoryResponse(items=items, total=total)
+
+
+@router.post("/search-history", response_model=SearchHistoryItem, status_code=201)
+async def create_search_history(
+    request: CreateSearchHistoryRequest,
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Create a new search history record.
+
+    Records a user's search query with tenant/user isolation.
+    Returns the created record with HTTP 201 status.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            raise HTTPException(
+                status_code=503,
+                detail="Search history table not available. Run database migrations."
+            )
+
+        # Insert the search history record
+        row = await conn.fetchrow("""
+            INSERT INTO search_history (
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING
+                id::text,
+                tenant_id,
+                user_id,
+                query,
+                search_type,
+                result_count,
+                created_at,
+                metadata
+        """,
+            request.tenant_id,
+            request.user_id,
+            request.query,
+            request.search_type,
+            request.result_count,
+            json_module.dumps(request.metadata),
+        )
+
+        return SearchHistoryItem(
+            id=row['id'],
+            tenant_id=row['tenant_id'],
+            user_id=row['user_id'],
+            query=row['query'],
+            search_type=row['search_type'],
+            result_count=row['result_count'],
+            created_at=row['created_at'],
+            metadata=row['metadata'] or {},
+        )
+
+
+@router.delete("/search-history/{id}", status_code=204)
+async def delete_search_history(
+    id: str,
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Delete a search history record by ID.
+
+    Returns HTTP 204 No Content on successful deletion.
+    Raises 404 if the record doesn't exist.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            raise HTTPException(
+                status_code=503,
+                detail="Search history table not available. Run database migrations."
+            )
+
+        # Delete the search history record
+        result = await conn.execute("""
+            DELETE FROM search_history WHERE id = $1::uuid
+        """, id)
+
+        # Check if a record was actually deleted
+        # result is a string like "DELETE 1" or "DELETE 0"
+        rows_deleted = int(result.split()[-1])
+        if rows_deleted == 0:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Search history record with id '{id}' not found"
+            )
+
+
+@router.get("/search-suggestions", response_model=SearchSuggestionsResponse)
+async def get_search_suggestions(
+    tenant_id: str = Query(..., description="Tenant identifier for multi-tenancy isolation"),
+    user_id: str = Query(..., description="User identifier"),
+    prefix: str = Query(..., min_length=1, description="Search query prefix to match"),
+    search_type: Optional[str] = Query(default=None, description="Filter by search type (device or subscription)"),
+    limit: int = Query(default=5, ge=1, le=20, description="Maximum number of suggestions to return"),
+    pool=Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Get search suggestions based on previous search history.
+
+    Returns unique search queries that match the given prefix, filtered by tenant/user.
+    Results are sorted by most recent first, limited to the specified number of suggestions.
+    """
+    async with pool.acquire() as conn:
+        # Check if search_history table exists
+        table_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'search_history'
+            )
+        """)
+
+        if not table_exists:
+            # Return empty suggestions if table doesn't exist yet
+            return SearchSuggestionsResponse(suggestions=[])
+
+        # Build the query dynamically
+        where_clauses = ["tenant_id = $1", "user_id = $2", "query ILIKE $3"]
+        params = [tenant_id, user_id, f"{prefix}%"]
+        param_idx = 4
+
+        if search_type:
+            where_clauses.append(f"search_type = ${param_idx}")
+            params.append(search_type)
+            param_idx += 1
+
+        where_sql = " AND ".join(where_clauses)
+
+        # Fetch unique suggestions matching the prefix, ordered by most recent
+        # Use GROUP BY to enable ORDER BY MAX(created_at) for unique queries
+        query_sql = f"""
+            SELECT query
+            FROM search_history
+            WHERE {where_sql}
+            GROUP BY query
+            ORDER BY MAX(created_at) DESC
+            LIMIT ${param_idx}
+        """
+        params.append(limit)
+
+        rows = await conn.fetch(query_sql, *params)
+
+        suggestions = [row['query'] for row in rows]
+
+        return SearchSuggestionsResponse(suggestions=suggestions)
