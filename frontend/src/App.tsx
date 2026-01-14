@@ -2,7 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'react-hot-toast'
-import { LayoutDashboard, Upload, Menu, X, Server, Shield, Search, Command, Users } from 'lucide-react'
+import { LayoutDashboard, Upload, Menu, X, Server, Shield, Search, Command, Users, FileText } from 'lucide-react'
 import { CommandPalette } from './components/ui/CommandPalette'
 import { Breadcrumbs } from './components/navigation/Breadcrumbs'
 import { ChatWidget } from './components/chat'
@@ -16,6 +16,7 @@ const DevicesList = lazy(() => import('./pages/DevicesList').then(m => ({ defaul
 const SubscriptionsList = lazy(() => import('./pages/SubscriptionsList').then(m => ({ default: m.SubscriptionsList })))
 const DeviceAssignment = lazy(() => import('./pages/DeviceAssignment').then(m => ({ default: m.DeviceAssignment })))
 const ClientsPage = lazy(() => import('./pages/ClientsPage').then(m => ({ default: m.ClientsPage })))
+const ReportBuilder = lazy(() => import('./pages/ReportBuilder').then(m => ({ default: m.ReportBuilder })))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -60,6 +61,7 @@ const navItems = [
   { path: '/subscriptions', label: 'Subscriptions', icon: Shield },
   { path: '/clients', label: 'Clients', icon: Users },
   { path: '/assignment', label: 'Assignment', icon: Upload },
+  { path: '/reports/builder', label: 'Reports', icon: FileText },
 ] as const
 
 function Navigation({ onOpenSearch }: { onOpenSearch: () => void }) {
@@ -205,6 +207,7 @@ function App() {
                   <Route path="/subscriptions" element={<SubscriptionsList />} />
                   <Route path="/clients" element={<ClientsPage />} />
                   <Route path="/assignment" element={<DeviceAssignment />} />
+                  <Route path="/reports/builder" element={<ReportBuilder />} />
                 </Routes>
               </Suspense>
             </main>
