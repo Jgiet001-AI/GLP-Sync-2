@@ -76,6 +76,13 @@ ALLOWED_FIELDS = {
         "updated_at",
         "synced_at",
     },
+    "device_tags": {
+        # Tag fields (joined from device_tags table)
+        "device_id",
+        "tag_key",
+        "tag_value",
+        "synced_at",
+    },
     "subscriptions": {
         # Primary identifiers
         "id",
@@ -154,6 +161,13 @@ FIELD_TYPES = {
         "updated_at": FieldType.DATETIME,
         "synced_at": FieldType.DATETIME,
     },
+    "device_tags": {
+        # Tag fields
+        "device_id": FieldType.UUID,
+        "tag_key": FieldType.STRING,
+        "tag_value": FieldType.STRING,
+        "synced_at": FieldType.DATETIME,
+    },
     "subscriptions": {
         # Primary identifiers
         "id": FieldType.UUID,
@@ -228,6 +242,13 @@ FIELD_DISPLAY_NAMES = {
         # Timestamps
         "created_at": "Created At",
         "updated_at": "Updated At",
+        "synced_at": "Synced At",
+    },
+    "device_tags": {
+        # Tag fields
+        "device_id": "Device ID",
+        "tag_key": "Tag Key",
+        "tag_value": "Tag Value",
         "synced_at": "Synced At",
     },
     "subscriptions": {
@@ -551,13 +572,13 @@ class QueryBuilder:
         return "SELECT " + ", ".join(select_items)
 
     def _build_from(self, config: ReportConfig) -> str:
-        """Build the FROM clause.
+        """Build the FROM clause with JOINs if needed.
 
         Args:
             config: The report configuration
 
         Returns:
-            The FROM clause
+            The FROM clause with any necessary JOINs
         """
         # Determine which tables are needed
         tables = set()
@@ -569,18 +590,36 @@ class QueryBuilder:
             table = filter_config.table or self._infer_table(filter_config.field)
             tables.add(table)
 
+        for group_config in config.grouping:
+            table = group_config.table or self._infer_table(group_config.field)
+            tables.add(table)
+
+        for sort_config in config.sorting:
+            table = sort_config.table or self._infer_table(sort_config.field)
+            tables.add(table)
+
         if not tables:
             # Default to devices if no tables specified
             tables.add("devices")
 
-        if len(tables) == 1:
+        # Handle device_tags JOIN
+        if "device_tags" in tables and "devices" in tables:
+            # Remove device_tags from tables set (it will be JOINed)
+            tables.remove("device_tags")
+            # Build FROM clause with JOIN
+            return "FROM devices\nLEFT JOIN device_tags ON devices.id = device_tags.device_id"
+        elif "device_tags" in tables:
+            # If only device_tags is requested, we still need devices
+            tables.remove("device_tags")
+            tables.add("devices")
+            return "FROM devices\nLEFT JOIN device_tags ON devices.id = device_tags.device_id"
+        elif len(tables) == 1:
             # Single table query
             return f"FROM {list(tables)[0]}"
         else:
-            # Multi-table query - for now, we only support single table
-            # Future enhancement: support JOINs
+            # Multi-table query - not yet supported except for device_tags
             raise QueryBuilderError(
-                "Multi-table queries are not yet supported. "
+                "Multi-table queries are not yet supported except for device_tags. "
                 "Please select fields from only one table."
             )
 
@@ -848,6 +887,10 @@ def get_available_tables() -> list[TableMetadata]:
         "devices": {
             "display_name": "Devices",
             "description": "Device inventory from HPE GreenLake",
+        },
+        "device_tags": {
+            "display_name": "Device Tags",
+            "description": "Device tags for filtering by custom metadata",
         },
         "subscriptions": {
             "display_name": "Subscriptions",
