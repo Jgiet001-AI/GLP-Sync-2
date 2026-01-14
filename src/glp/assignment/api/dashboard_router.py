@@ -796,8 +796,8 @@ async def list_devices(
     """Get paginated list of devices with optional filtering and search.
 
     Central status filter:
-    - 'online': Devices in Central with status = 'Up'
-    - 'offline': Devices in Central with status != 'Up'
+    - 'online': Devices in Central with status = 'ONLINE'
+    - 'offline': Devices in Central with status = 'OFFLINE' or NULL
     - 'not_in_central': Devices not in Aruba Central
     """
     async with pool.acquire() as conn:
@@ -846,9 +846,9 @@ async def list_devices(
         # Central status filter
         if central_status:
             if central_status == 'online':
-                where_clauses.append("d.in_central = TRUE AND d.central_status = 'Up'")
+                where_clauses.append("d.in_central = TRUE AND d.central_status = 'ONLINE'")
             elif central_status == 'offline':
-                where_clauses.append("d.in_central = TRUE AND (d.central_status IS NULL OR d.central_status != 'Up')")
+                where_clauses.append("d.in_central = TRUE AND (d.central_status IS NULL OR d.central_status = 'OFFLINE')")
             elif central_status == 'not_in_central':
                 where_clauses.append("(d.in_central = FALSE OR d.in_central IS NULL)")
 
