@@ -98,7 +98,7 @@ export function ChatWidget({
 
   const widgetClasses = isExpanded
     ? 'fixed inset-4 z-50'
-    : `fixed ${positionClasses} z-50 w-96 h-[600px]`
+    : `fixed ${positionClasses} z-50 w-[calc(100vw-3rem)] sm:w-96 max-w-md h-[600px]`
 
   return (
     <div
