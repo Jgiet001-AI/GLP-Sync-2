@@ -218,7 +218,7 @@ export function ProgressModal({
                   ? 'bg-rose-500'
                   : isComplete
                     ? 'bg-emerald-500'
-                    : 'bg-gradient-to-r from-hpe-green to-hpe-blue animate-pulse'
+                    : 'bg-gradient-to-r from-hpe-green to-hpe-blue animate-pulse progress-shine'
               )}
               style={{ width: `${progressPercent}%` }}
             />
@@ -253,7 +253,7 @@ export function ProgressModal({
               {/* Batch progress bar */}
               <div className="h-1.5 bg-slate-600 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-hpe-green transition-all duration-300"
+                  className="h-full bg-hpe-green transition-all duration-300 progress-shine"
                   style={{ width: `${(batchProgress.currentBatch / batchProgress.totalBatches) * 100}%` }}
                 />
               </div>

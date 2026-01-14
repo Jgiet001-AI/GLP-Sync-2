@@ -170,11 +170,13 @@ function ProgressBar({
   max,
   label,
   color = 'emerald',
+  loading = false,
 }: {
   value: number
   max: number
   label?: string
   color?: 'emerald' | 'amber' | 'rose' | 'sky' | 'violet'
+  loading?: boolean
 }) {
   const percent = max > 0 ? (value / max) * 100 : 0
   const colorClasses = {
@@ -195,7 +197,7 @@ function ProgressBar({
       )}
       <div className="h-2 overflow-hidden rounded-full bg-slate-700/50">
         <div
-          className={`h-full ${colorClasses[color]} transition-all duration-1000 ease-out`}
+          className={`h-full ${colorClasses[color]} transition-all duration-1000 ease-out ${loading ? 'progress-shine' : ''}`}
           style={{ width: `${percent}%` }}
         />
       </div>
@@ -213,6 +215,7 @@ function HorizontalBarChart({
   renderValue,
   renderTooltip,
   getHref,
+  loading = false,
 }: {
   data: { [key: string]: unknown }[]
   valueKey: string
@@ -222,6 +225,7 @@ function HorizontalBarChart({
   renderValue?: (item: { [key: string]: unknown }) => React.ReactNode
   renderTooltip?: (item: { [key: string]: unknown }) => React.ReactNode
   getHref?: (item: { [key: string]: unknown }) => string
+  loading?: boolean
 }) {
   const max = maxValue || Math.max(...data.map((d) => d[valueKey] as number))
 
@@ -257,7 +261,7 @@ function HorizontalBarChart({
             >
               <div className="h-3 w-full overflow-hidden rounded-full bg-slate-700/30">
                 <div
-                  className={`h-full rounded-full bg-gradient-to-r ${colors[idx % colors.length]} transition-all duration-700 ease-out group-hover:brightness-110`}
+                  className={`h-full rounded-full bg-gradient-to-r ${colors[idx % colors.length]} transition-all duration-700 ease-out group-hover:brightness-110 ${loading ? 'progress-shine' : ''}`}
                   style={{ width: `${percent}%` }}
                 />
               </div>
@@ -654,6 +658,7 @@ export function Dashboard() {
                   data={device_by_type as unknown as { [key: string]: unknown }[]}
                   valueKey="count"
                   labelKey="device_type"
+                  loading={isSyncing}
                   getHref={(item) => {
                     const dt = item as unknown as DeviceTypeBreakdown
                     return `/devices?device_type=${encodeURIComponent(dt.device_type)}`
@@ -707,6 +712,7 @@ export function Dashboard() {
                   data={subscription_by_type as unknown as { [key: string]: unknown }[]}
                   valueKey="total_quantity"
                   labelKey="subscription_type"
+                  loading={isSyncing}
                   getHref={(item) => {
                     const st = item as unknown as SubscriptionTypeBreakdown
                     return `/subscriptions?subscription_type=${encodeURIComponent(st.subscription_type)}`
@@ -816,6 +822,7 @@ export function Dashboard() {
                     max={subscription_stats.total_licenses}
                     label="Used licenses"
                     color="emerald"
+                    loading={isSyncing}
                   />
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-4 text-center">
