@@ -10,6 +10,7 @@
 3. [Database Schema](#database-schema)
 4. [Backend Structure](#backend-structure)
 5. [LLM Provider Interface](#llm-provider-interface)
+   - [Extended Thinking Support](#extended-thinking-support)
 6. [Tool System](#tool-system)
 7. [Memory System](#memory-system)
 8. [Streaming Contract](#streaming-contract)
@@ -406,6 +407,122 @@ class ILLMProvider(ABC):
         """Return the model identifier."""
         pass
 ```
+
+### Extended Thinking Support
+
+**Purpose**: Enable Claude models (Sonnet 4+) to use chain-of-thought reasoning for complex queries requiring deeper analysis.
+
+#### When Extended Thinking is Used
+
+Extended thinking is beneficial for queries involving:
+- **Multi-factor analysis**: "Which devices should I prioritize for subscription renewal based on usage, warranty status, and cost?"
+- **Data correlation**: "What patterns exist between device failures and subscription tiers?"
+- **Complex recommendations**: "Suggest an optimal device assignment strategy for our new office"
+- **Compliance analysis**: "Which devices are at risk of non-compliance with our security policies?"
+
+#### How It Works
+
+```python
+# Configuration
+config = LLMProviderConfig(
+    api_key=os.getenv("ANTHROPIC_API_KEY"),
+    model="claude-sonnet-4-5-20250929",
+    enable_thinking=True,           # Enable extended thinking
+    thinking_budget=10000,          # Token budget for reasoning (default: 10000)
+)
+
+# During API call (Anthropic provider only)
+if self._supports_thinking and self.config.enable_thinking:
+    kwargs["thinking"] = {
+        "type": "enabled",
+        "budget_tokens": self.config.thinking_budget,
+    }
+    kwargs["temperature"] = 1  # Required for thinking mode
+```
+
+#### Message History Integration
+
+Extended thinking works seamlessly with full conversation history:
+
+```python
+# Full history is always passed, regardless of thinking mode
+messages = self._format_messages_for_api(conversation.messages)
+
+# Thinking parameters are separate from message content
+response = await self.client.messages.create(
+    model=self.config.model,
+    messages=messages,  # Full conversation context
+    thinking={"type": "enabled", "budget_tokens": 10000},
+    stream=True,
+)
+```
+
+#### Streaming Events
+
+When thinking is enabled, additional events are emitted:
+
+| Event Type | Purpose | Data |
+|------------|---------|------|
+| `thinking_delta` | Streaming CoT reasoning | Redacted text chunks |
+| `text_delta` | Final response content | User-facing text |
+
+**Security**: Thinking content is **always redacted** before storage using `CoTRedactor` to remove sensitive data (passwords, API keys, IP addresses).
+
+#### Configuration Options
+
+**Environment Variables** (`.env`):
+```bash
+# Enable extended thinking for complex queries
+ENABLE_THINKING=true
+
+# Token budget for reasoning (affects cost and latency)
+# Default: 10000 tokens (~7,500 words of reasoning)
+# Range: 1000-32000 tokens
+THINKING_BUDGET=10000
+```
+
+**AgentConfig** (programmatic):
+```python
+from src.glp.agent.orchestrator.agent import AgentConfig
+
+config = AgentConfig(
+    enable_thinking=True,      # Enable/disable thinking
+    thinking_budget=10000,     # Optional custom budget (None = use default)
+)
+```
+
+#### Performance Considerations
+
+- **Latency**: Adds 5-15 seconds for complex reasoning (still < 30s total)
+- **Cost**: Thinking tokens are billed at standard input rates
+- **Budget recommendations**:
+  - Simple queries: 5,000 tokens
+  - Moderate complexity: 10,000 tokens (default)
+  - High complexity: 20,000+ tokens
+
+#### Supported Models
+
+| Model | Thinking Support | Min Version |
+|-------|-----------------|-------------|
+| Claude Sonnet 4 | ✅ Yes | `claude-sonnet-4-20250514` |
+| Claude Sonnet 4.5 | ✅ Yes | `claude-sonnet-4-5-20250929` |
+| Claude Opus 4 | ✅ Yes | `claude-opus-4-20250514` |
+| GPT-4, GPT-5 | ❌ No | - |
+| Ollama | ❌ No | - |
+
+#### Database Storage
+
+```sql
+-- Agent messages table includes thinking_summary
+CREATE TABLE agent_messages (
+    ...
+    content TEXT NOT NULL,              -- Final response content
+    thinking_summary TEXT,              -- REDACTED CoT summary (never raw)
+    ...
+);
+```
+
+**Important**: Raw thinking content is **never stored**. Only redacted summaries are persisted for debugging and audit purposes.
 
 ---
 
