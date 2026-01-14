@@ -740,13 +740,22 @@ async def list_devices(
     region: Optional[str] = Query(default=None, description="Filter by region"),
     assigned_state: Optional[str] = Query(default=None, description="Filter by assignment state"),
     subscription_key: Optional[str] = Query(default=None, description="Filter by subscription key"),
+    central_status: Optional[str] = Query(default=None, description="Filter by Aruba Central status: online, offline, not_in_central"),
+    tag_key: Optional[str] = Query(default=None, description="Filter by device tag key"),
+    tag_value: Optional[str] = Query(default=None, description="Filter by device tag value"),
     include_archived: bool = Query(default=False, description="Include archived devices"),
     sort_by: str = Query(default="updated_at", description="Sort field"),
     sort_order: str = Query(default="desc", description="Sort order (asc/desc)"),
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Get paginated list of devices with optional filtering and search."""
+    """Get paginated list of devices with optional filtering and search.
+
+    Central status filter:
+    - 'online': Devices in Central with status = 'Up'
+    - 'offline': Devices in Central with status != 'Up'
+    - 'not_in_central': Devices not in Aruba Central
+    """
     async with pool.acquire() as conn:
         # Build the query dynamically
         where_clauses = []
@@ -781,6 +790,36 @@ async def list_devices(
         if subscription_key:
             where_clauses.append(f"s.key = ${param_idx}")
             params.append(subscription_key)
+            param_idx += 1
+
+        # Central status filter
+        if central_status:
+            if central_status == 'online':
+                where_clauses.append("d.in_central = TRUE AND d.central_status = 'Up'")
+            elif central_status == 'offline':
+                where_clauses.append("d.in_central = TRUE AND (d.central_status IS NULL OR d.central_status != 'Up')")
+            elif central_status == 'not_in_central':
+                where_clauses.append("(d.in_central = FALSE OR d.in_central IS NULL)")
+
+        # Tag filters - JOIN with device_tags table
+        if tag_key:
+            where_clauses.append(f"""
+                EXISTS (
+                    SELECT 1 FROM device_tags dt
+                    WHERE dt.device_id = d.id AND dt.tag_key = ${param_idx}
+                )
+            """)
+            params.append(tag_key)
+            param_idx += 1
+
+        if tag_value:
+            where_clauses.append(f"""
+                EXISTS (
+                    SELECT 1 FROM device_tags dt
+                    WHERE dt.device_id = d.id AND dt.tag_value = ${param_idx}
+                )
+            """)
+            params.append(tag_value)
             param_idx += 1
 
         where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"

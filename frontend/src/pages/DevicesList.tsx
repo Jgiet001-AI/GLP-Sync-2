@@ -53,6 +53,9 @@ interface DeviceFilters {
   region?: string
   assigned_state?: string
   subscription_key?: string
+  central_status?: string  // online, offline, not_in_central
+  tag_key?: string
+  tag_value?: string
   search?: string
   [key: string]: string | undefined
 }
@@ -69,13 +72,16 @@ export function DevicesList() {
       region: undefined,
       assigned_state: undefined,
       subscription_key: undefined,
+      central_status: undefined,
+      tag_key: undefined,
+      tag_value: undefined,
       search: undefined,
     },
   })
 
   const [searchInput, setSearchInput] = useState(state.filters.search || '')
   const [showFilters, setShowFilters] = useState(
-    !!(state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key)
+    !!(state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key || state.filters.central_status || state.filters.tag_key || state.filters.tag_value)
   )
   const [selectedDevice, setSelectedDevice] = useState<DeviceListItem | null>(null)
 
@@ -84,10 +90,10 @@ export function DevicesList() {
     if (state.filters.search && state.filters.search !== searchInput) {
       setSearchInput(state.filters.search)
     }
-    if (state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key) {
+    if (state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key || state.filters.central_status || state.filters.tag_key || state.filters.tag_value) {
       setShowFilters(true)
     }
-  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.search])
+  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.central_status, state.filters.tag_key, state.filters.tag_value, state.filters.search])
 
   // Debounced search
   const debouncedSearch = useDebouncedSearch(searchInput, 300)
@@ -135,7 +141,7 @@ export function DevicesList() {
     toast.success(`${label} copied to clipboard`)
   }, [])
 
-  const hasActiveFilters = state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.search || state.filters.subscription_key
+  const hasActiveFilters = state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.search || state.filters.subscription_key || state.filters.central_status || state.filters.tag_key || state.filters.tag_value
 
   // Generate filter chips from active params
   const filterChips = useMemo<FilterChip[]>(() => {
@@ -173,6 +179,34 @@ export function DevicesList() {
         color: 'rose',
       })
     }
+    if (state.filters.central_status) {
+      const displayValue = state.filters.central_status === 'online' ? 'Central Online' :
+                           state.filters.central_status === 'offline' ? 'Central Offline' :
+                           'Not in Central'
+      chips.push({
+        key: 'central_status',
+        label: 'Central',
+        value: state.filters.central_status,
+        displayValue,
+        color: state.filters.central_status === 'online' ? 'emerald' : state.filters.central_status === 'offline' ? 'amber' : 'slate',
+      })
+    }
+    if (state.filters.tag_key) {
+      chips.push({
+        key: 'tag_key',
+        label: 'Tag Key',
+        value: state.filters.tag_key,
+        color: 'sky',
+      })
+    }
+    if (state.filters.tag_value) {
+      chips.push({
+        key: 'tag_value',
+        label: 'Tag Value',
+        value: state.filters.tag_value,
+        color: 'sky',
+      })
+    }
     if (state.filters.search) {
       chips.push({
         key: 'search',
@@ -182,7 +216,7 @@ export function DevicesList() {
       })
     }
     return chips
-  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.search])
+  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.central_status, state.filters.tag_key, state.filters.tag_value, state.filters.search])
 
   // Remove a specific filter
   const removeFilter = useCallback((key: string) => {
@@ -306,7 +340,7 @@ export function DevicesList() {
                 Filters
                 {hasActiveFilters && (
                   <span className="ml-1 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-white">
-                    {[state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.search].filter(Boolean).length}
+                    {[state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.central_status, state.filters.tag_key, state.filters.tag_value, state.filters.search].filter(Boolean).length}
                   </span>
                 )}
               </button>
@@ -345,7 +379,7 @@ export function DevicesList() {
               className="mb-6 rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 backdrop-blur-sm animate-fade-slide-down"
               data-testid="filter-panel"
             >
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {/* Device Type Filter */}
                 <div>
                   <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
@@ -398,6 +432,51 @@ export function DevicesList() {
                     <option value="ASSIGNED_TO_SERVICE">Assigned</option>
                     <option value="UNASSIGNED">Unassigned</option>
                   </select>
+                </div>
+
+                {/* Central Status Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Aruba Central Status
+                  </label>
+                  <select
+                    value={state.filters.central_status || ''}
+                    onChange={(e) => handleFilterChange('central_status', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
+                  >
+                    <option value="">All Devices</option>
+                    <option value="online">Central Online</option>
+                    <option value="offline">Central Offline</option>
+                    <option value="not_in_central">Not in Central</option>
+                  </select>
+                </div>
+
+                {/* Tag Key Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Tag Key
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. environment"
+                    value={state.filters.tag_key || ''}
+                    onChange={(e) => handleFilterChange('tag_key', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+
+                {/* Tag Value Filter */}
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-slate-400">
+                    Tag Value
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. production"
+                    value={state.filters.tag_value || ''}
+                    onChange={(e) => handleFilterChange('tag_value', e.target.value)}
+                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                  />
                 </div>
               </div>
             </div>
