@@ -429,3 +429,55 @@ async def update_report(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update report: {str(e)}",
         )
+
+
+@router.delete("/custom/{id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_report(
+    id: str,
+    pool: asyncpg.Pool = Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Delete a custom report by ID.
+
+    This endpoint permanently deletes a report template. The operation
+    cannot be undone.
+
+    Args:
+        id: Report ID (UUID)
+        pool: Database connection pool
+        _auth: API key authentication
+
+    Returns:
+        None (204 No Content on success)
+
+    Raises:
+        HTTPException: 404 if report not found, 500 if database error occurs
+    """
+    try:
+        async with pool.acquire() as conn:
+            # Delete the report and check if it existed
+            result = await conn.execute(
+                "DELETE FROM custom_reports WHERE id = $1",
+                id,
+            )
+
+        # PostgreSQL returns "DELETE n" where n is the number of rows deleted
+        rows_deleted = int(result.split()[-1]) if result else 0
+
+        if rows_deleted == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Report with id '{id}' not found",
+            )
+
+        # Return None with 204 No Content status
+        return None
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting report {id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete report: {str(e)}",
+        )
