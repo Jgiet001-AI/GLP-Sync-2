@@ -4,6 +4,7 @@ import { Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from 'lucide-react
 import clsx from 'clsx'
 import toast from 'react-hot-toast'
 import { assignmentApi } from '../api/client'
+import { normalizeDeviceType } from '../utils/deviceType'
 import type { DeviceAssignment, AddDevicesResponse } from '../types'
 
 interface AddDevicesPanelProps {
@@ -138,7 +139,7 @@ export function AddDevicesPanel({ devices, onDevicesAdded }: AddDevicesPanelProp
                     </td>
                     <td className="px-3 py-2 font-mono text-slate-300">{device.serial_number}</td>
                     <td className="px-3 py-2 font-mono text-slate-400">{device.mac_address}</td>
-                    <td className="px-3 py-2 text-slate-400">{device.device_type || 'NETWORK'}</td>
+                    <td className="px-3 py-2 text-slate-400">{normalizeDeviceType(device.device_type)}</td>
                   </tr>
                 ))}
               </tbody>

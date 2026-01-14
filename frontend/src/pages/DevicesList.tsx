@@ -9,6 +9,7 @@ import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import { SortableHeader } from '../components/shared/SortableHeader'
 import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
 import { usePaginatedList } from '../hooks/usePaginatedList'
+import { normalizeDeviceType } from '../utils/deviceType'
 import {
   Server,
   Search,
@@ -655,7 +656,8 @@ function DeviceDetailContent({
   onCopySerial: () => void
   onCopyMac: () => void
 }) {
-  const Icon = deviceIcons[device.device_type || 'UNKNOWN'] || Server
+  const displayType = normalizeDeviceType(device.device_type)
+  const Icon = deviceIcons[displayType] || Server
   const isAssigned = device.assigned_state === 'ASSIGNED_TO_SERVICE'
 
   return (
@@ -708,7 +710,7 @@ function DeviceDetailContent({
       <DetailSection title="Device Information">
         <DetailRow label="Serial Number" value={device.serial_number} mono />
         <DetailRow label="MAC Address" value={device.mac_address} mono />
-        <DetailRow label="Device Type" value={device.device_type} />
+        <DetailRow label="Device Type" value={displayType} />
         <DetailRow label="Model" value={device.model} />
         <DetailRow label="Device Name" value={device.device_name} />
       </DetailSection>
@@ -889,7 +891,8 @@ const DeviceRow = memo(function DeviceRow({
   onCopySerial: () => void
   onCopyMac: () => void
 }) {
-  const Icon = deviceIcons[device.device_type || 'UNKNOWN'] || Server
+  const displayType = normalizeDeviceType(device.device_type)
+  const Icon = deviceIcons[displayType] || Server
   const isAssigned = device.assigned_state === 'ASSIGNED_TO_SERVICE'
 
   const menuItems = [
@@ -938,7 +941,7 @@ const DeviceRow = memo(function DeviceRow({
       </td>
       <td className="whitespace-nowrap px-4 py-3">
         <span className="inline-flex items-center rounded-md bg-slate-700/50 px-2 py-1 text-xs font-medium text-slate-300">
-          {device.device_type || 'Unknown'}
+          {displayType}
         </span>
       </td>
       <td className="whitespace-nowrap px-4 py-3 text-sm text-slate-300">

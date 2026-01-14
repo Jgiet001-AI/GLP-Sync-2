@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { dashboardApiClient } from '../api/client'
 import { useBackgroundTasks } from '../contexts/BackgroundTaskContext'
 import { Tooltip } from '../components/ui/Tooltip'
+import { normalizeDeviceType } from '../utils/deviceType'
 import {
   Server,
   Shield,
@@ -665,11 +666,12 @@ export function Dashboard() {
                   }}
                   renderLabel={(item) => {
                     const dt = item as unknown as DeviceTypeBreakdown
-                    const Icon = deviceIcons[dt.device_type] || Server
+                    const displayType = normalizeDeviceType(dt.device_type)
+                    const Icon = deviceIcons[displayType] || Server
                     return (
                       <>
                         <Icon className="h-4 w-4 text-slate-400" />
-                        <span>{dt.device_type}</span>
+                        <span>{displayType}</span>
                       </>
                     )
                   }}
@@ -686,9 +688,10 @@ export function Dashboard() {
                   }}
                   renderTooltip={(item) => {
                     const dt = item as unknown as DeviceTypeBreakdown
+                    const displayType = normalizeDeviceType(dt.device_type)
                     return (
                       <div className="space-y-1">
-                        <p className="font-medium">{dt.device_type}</p>
+                        <p className="font-medium">{displayType}</p>
                         <p>Total: {dt.count.toLocaleString()}</p>
                         <p>Assigned: {dt.assigned.toLocaleString()}</p>
                         <p>Unassigned: {dt.unassigned.toLocaleString()}</p>

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { dashboardApiClient, clientsApiClient } from '../../api/client'
 import { useSearchHistory, useSearchNamespace } from '../../hooks/useSearchHistory'
+import { normalizeDeviceType } from '../../utils/deviceType'
 import type { DeviceListItem, SubscriptionListItem } from '../../types'
 import type { ClientItem } from '../../api/client'
 import {
@@ -210,12 +211,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     // Device results
     if (deviceResults?.items) {
       deviceResults.items.forEach((device: DeviceListItem) => {
-        const Icon = deviceIcons[device.device_type || 'UNKNOWN'] || Server
+        const displayType = normalizeDeviceType(device.device_type)
+        const Icon = deviceIcons[displayType] || Server
         results.push({
           type: 'device',
           id: `device-${device.id}`,
           title: device.serial_number,
-          subtitle: `${device.device_type || 'Device'} · ${device.mac_address || 'No MAC'}${device.region ? ` · ${device.region}` : ''}`,
+          subtitle: `${displayType} · ${device.mac_address || 'No MAC'}${device.region ? ` · ${device.region}` : ''}`,
           icon: Icon,
           href: `/devices?search=${encodeURIComponent(device.serial_number)}`,
           color: 'sky',
