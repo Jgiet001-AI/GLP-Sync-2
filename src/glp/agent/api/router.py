@@ -21,6 +21,7 @@ from fastapi import (
     status,
 )
 
+from ...api.error_sanitizer import sanitize_error_message
 from ..domain.entities import UserContext
 from ..orchestrator import AgentOrchestrator
 from ..security import TicketAuth
@@ -487,9 +488,11 @@ async def websocket_endpoint(
     except Exception as e:
         logger.exception(f"WebSocket error: {e}")
         try:
+            # Sanitize error message before sending to client
+            sanitized = sanitize_error_message(str(e), "WebSocket error")
             await websocket.send_json({
                 "type": "error",
-                "content": f"Error: {str(e)}",
+                "content": sanitized,
             })
         except Exception:
             pass
@@ -523,8 +526,10 @@ async def _stream_chat(
         raise
     except Exception as e:
         logger.exception(f"Chat streaming error: {e}")
+        # Sanitize error message before sending to client
+        sanitized = sanitize_error_message(str(e), "Chat error")
         await websocket.send_json({
             "type": "error",
-            "content": f"Error: {str(e)}",
+            "content": sanitized,
             "error_type": "fatal",
         })
