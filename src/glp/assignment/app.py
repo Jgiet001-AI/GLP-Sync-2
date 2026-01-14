@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.clients_router import router as clients_router
 from .api.dashboard_router import router as dashboard_router
+from .api.health_router import router as health_router
 from .api.dependencies import (
     close_db_pool,
     close_glp_client,
@@ -306,6 +307,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(dashboard_router)
 app.include_router(clients_router)
+app.include_router(health_router)
 app.include_router(reports_router)
 
 # Include agent router if available
