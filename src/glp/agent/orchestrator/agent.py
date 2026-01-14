@@ -65,6 +65,8 @@ class AgentConfig:
         confirmation_ttl_seconds: TTL for pending confirmations (default 1 hour)
         temperature: LLM temperature
         max_tokens: Maximum tokens per response
+        enable_thinking: Whether to enable extended thinking mode
+        thinking_budget: Token budget for extended thinking
     """
 
     system_prompt: str = """You are a specialized AI assistant for the HPE GreenLake Device Inventory System.
@@ -115,6 +117,8 @@ For modifications (POST, PATCH, DELETE):
     confirmation_ttl_seconds: int = 3600  # 1 hour
     temperature: float = 0.7
     max_tokens: Optional[int] = None
+    enable_thinking: bool = False
+    thinking_budget: Optional[int] = None
 
 
 class AgentOrchestrator:
