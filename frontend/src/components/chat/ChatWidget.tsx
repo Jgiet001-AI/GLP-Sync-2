@@ -19,7 +19,7 @@ import {
   Wifi,
   WifiOff,
 } from 'lucide-react'
-import { useChat } from '../../hooks/useChat'
+import { useChat, MAX_MESSAGE_LENGTH } from '../../hooks/useChat'
 import { ChatMessage } from './ChatMessage'
 
 interface ChatWidgetProps {
@@ -271,7 +271,7 @@ export function ChatWidget({
           ) : (
             <button
               type="submit"
-              disabled={!inputValue.trim() || !isConnected}
+              disabled={!inputValue.trim() || !isConnected || inputValue.length > MAX_MESSAGE_LENGTH}
               className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-600 text-white hover:bg-emerald-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Send message"
             >
@@ -279,6 +279,37 @@ export function ChatWidget({
             </button>
           )}
         </div>
+
+        {/* Character counter - show when typing */}
+        {inputValue.length > 0 && (
+          <div className="mt-2 flex items-center justify-between text-xs">
+            <span
+              className={`${
+                inputValue.length > MAX_MESSAGE_LENGTH
+                  ? 'text-red-400'
+                  : inputValue.length > MAX_MESSAGE_LENGTH * 0.9
+                  ? 'text-amber-400'
+                  : 'text-slate-500'
+              }`}
+            >
+              {inputValue.length} / {MAX_MESSAGE_LENGTH} characters
+            </span>
+            {inputValue.length > MAX_MESSAGE_LENGTH * 0.9 && (
+              <span
+                className={`flex items-center gap-1 ${
+                  inputValue.length > MAX_MESSAGE_LENGTH
+                    ? 'text-red-400'
+                    : 'text-amber-400'
+                }`}
+              >
+                <AlertTriangle className="h-3 w-3" />
+                {inputValue.length > MAX_MESSAGE_LENGTH
+                  ? 'Message too long'
+                  : 'Approaching limit'}
+              </span>
+            )}
+          </div>
+        )}
       </form>
     </div>
   )

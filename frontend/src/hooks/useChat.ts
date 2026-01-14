@@ -71,6 +71,9 @@ const INITIAL_RECONNECT_DELAY = 1000 // 1 second
 const MAX_RECONNECT_DELAY = 30000 // 30 seconds
 const HEARTBEAT_INTERVAL = 30000 // 30 seconds
 
+// Message validation
+export const MAX_MESSAGE_LENGTH = 10000 // Maximum message length in characters
+
 export interface UseChatOptions {
   apiBaseUrl?: string
   /**
@@ -402,6 +405,21 @@ export function useChat(options: UseChatOptions = {}) {
   const sendMessage = useCallback((message: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setState(prev => ({ ...prev, error: 'Not connected' }))
+      return
+    }
+
+    // Validate message length
+    const trimmedMessage = message.trim()
+    if (!trimmedMessage) {
+      setState(prev => ({ ...prev, error: 'Message cannot be empty' }))
+      return
+    }
+
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      setState(prev => ({
+        ...prev,
+        error: `Message is too long. Maximum ${MAX_MESSAGE_LENGTH} characters allowed (you have ${message.length})`,
+      }))
       return
     }
 
