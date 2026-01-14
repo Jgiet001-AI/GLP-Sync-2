@@ -79,7 +79,9 @@ export function Drawer({ open, onClose, title, subtitle, children, width = 'lg' 
     <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity"
+        className={`absolute inset-0 bg-slate-900/80 backdrop-blur-sm transition-opacity duration-300 ${
+          isVisible ? 'opacity-100' : 'opacity-0'
+        }`}
         onClick={onClose}
         aria-hidden="true"
       />
@@ -88,7 +90,9 @@ export function Drawer({ open, onClose, title, subtitle, children, width = 'lg' 
       <div className="fixed inset-y-0 right-0 flex max-w-full pl-10">
         <div
           ref={drawerRef}
-          className={`w-screen ${widthClasses[width]} transform transition-transform duration-300 ease-in-out`}
+          className={`w-screen ${widthClasses[width]} transform transition-transform duration-300 ease-in-out ${
+            isVisible ? 'translate-x-0' : 'translate-x-full'
+          }`}
         >
           <div className="flex h-full flex-col overflow-y-auto bg-slate-800 shadow-xl">
             {/* Header */}
