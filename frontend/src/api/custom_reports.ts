@@ -16,7 +16,7 @@ import type {
 import { ApiError } from '../types'
 
 const api = axios.create({
-  baseURL: '/api/reports',
+  baseURL: '/api/reports/custom',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -61,7 +61,7 @@ export const customReportsApi = {
    * List all saved custom reports.
    */
   async listReports(page = 1, pageSize = 50): Promise<CustomReportListResponse> {
-    const response = await api.get<CustomReportListResponse>('/custom', {
+    const response = await api.get<CustomReportListResponse>('/', {
       params: { page, page_size: pageSize },
     })
     return response.data
@@ -71,7 +71,7 @@ export const customReportsApi = {
    * Get a single custom report by ID.
    */
   async getReport(id: string): Promise<CustomReportResponse> {
-    const response = await api.get<CustomReportResponse>(`/custom/${id}`)
+    const response = await api.get<CustomReportResponse>(`/${id}`)
     return response.data
   },
 
@@ -79,7 +79,7 @@ export const customReportsApi = {
    * Create a new custom report.
    */
   async createReport(request: CreateReportRequest): Promise<CustomReportResponse> {
-    const response = await api.post<CustomReportResponse>('/custom', request)
+    const response = await api.post<CustomReportResponse>('/', request)
     return response.data
   },
 
@@ -90,7 +90,7 @@ export const customReportsApi = {
     id: string,
     request: UpdateReportRequest
   ): Promise<CustomReportResponse> {
-    const response = await api.put<CustomReportResponse>(`/custom/${id}`, request)
+    const response = await api.put<CustomReportResponse>(`/${id}`, request)
     return response.data
   },
 
@@ -98,7 +98,7 @@ export const customReportsApi = {
    * Delete a custom report.
    */
   async deleteReport(id: string): Promise<void> {
-    await api.delete(`/custom/${id}`)
+    await api.delete(`/${id}`)
   },
 
   /**
@@ -115,7 +115,7 @@ export const customReportsApi = {
     }
 
     const response = await api.post<ExecuteReportResponse>(
-      `/custom/${id}/execute`,
+      `/${id}/execute`,
       request
     )
     return response.data
@@ -130,7 +130,7 @@ export const customReportsApi = {
     filename?: string
   ): Promise<void> {
     const response = await api.post(
-      `/custom/${id}/execute`,
+      `/${id}/execute`,
       { format, page: 1, page_size: 999999 },
       { responseType: 'blob' }
     )

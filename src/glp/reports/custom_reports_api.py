@@ -34,7 +34,7 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/reports", tags=["custom-reports"])
+router = APIRouter(prefix="/api/reports/custom", tags=["custom-reports"])
 
 
 @router.get("/fields", response_model=FieldsResponse)
