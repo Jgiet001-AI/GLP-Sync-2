@@ -9,18 +9,24 @@ Security:
 - Parameterized queries for all user inputs
 """
 
+import io
 import json
 import logging
+import time
 from datetime import datetime
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 
 from ..assignment.api.dependencies import get_db_pool, verify_api_key
-from .query_builder import get_available_tables
+from .query_builder import QueryBuilder, QueryBuilderError, get_available_tables
 from .schemas import (
     CreateReportRequest,
+    ExecuteReportResponse,
+    ExportFormat,
     FieldsResponse,
+    ReportConfig,
     ReportListResponse,
     ReportResponse,
     UpdateReportRequest,
@@ -481,3 +487,201 @@ async def delete_report(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete report: {str(e)}",
         )
+
+
+@router.post("/custom/{id}/execute", response_model=ExecuteReportResponse)
+async def execute_report(
+    id: str,
+    format: ExportFormat = Query(ExportFormat.JSON, description="Output format"),
+    page: int = Query(1, ge=1, description="Page number for pagination"),
+    page_size: int = Query(100, ge=1, le=1000, description="Rows per page"),
+    pool: asyncpg.Pool = Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Execute a custom report and return the results.
+
+    This endpoint runs a saved report template and returns the results in the
+    requested format. The report configuration is used to generate a SQL query
+    that is executed against the database.
+
+    Supports three output formats:
+    - JSON: Returns structured JSON with metadata (default)
+    - CSV: Downloads results as CSV file
+    - XLSX: Downloads results as Excel file
+
+    The endpoint also updates the report's execution statistics (last_executed_at
+    and execution_count).
+
+    Args:
+        id: Report ID (UUID)
+        format: Output format (json, csv, xlsx)
+        page: Page number for pagination (default: 1)
+        page_size: Number of rows per page (default: 100, max: 1000)
+        pool: Database connection pool
+        _auth: API key authentication
+
+    Returns:
+        ExecuteReportResponse: For JSON format with results and metadata
+        StreamingResponse: For CSV/XLSX formats as file download
+
+    Raises:
+        HTTPException: 404 if report not found, 400 if query build fails,
+                      500 if execution error occurs
+    """
+    try:
+        # Fetch the report configuration
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    id,
+                    name,
+                    config
+                FROM custom_reports
+                WHERE id = $1
+                """,
+                id,
+            )
+
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Report with id '{id}' not found",
+            )
+
+        # Parse the report configuration
+        config_data = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+        config = ReportConfig(**config_data)
+
+        # Build the SQL query using QueryBuilder
+        try:
+            builder = QueryBuilder()
+            offset = (page - 1) * page_size
+            sql, params = builder.build_query(config, offset=offset)
+        except QueryBuilderError as e:
+            logger.error(f"Error building query for report {id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid report configuration: {str(e)}",
+            )
+
+        # Execute the query and measure execution time
+        start_time = time.perf_counter()
+
+        async with pool.acquire() as conn:
+            # Convert parameter dict to positional list for asyncpg
+            # asyncpg expects $1, $2, etc. but we need to map our param names
+            param_values = []
+            query_with_placeholders = sql
+
+            # Replace named parameters ($param_1, $param_2) with positional ones ($1, $2)
+            for i, (param_name, param_value) in enumerate(sorted(params.items()), start=1):
+                query_with_placeholders = query_with_placeholders.replace(f"${param_name}", f"${i}")
+                param_values.append(param_value)
+
+            # Execute the query
+            rows = await conn.fetch(query_with_placeholders, *param_values)
+
+        execution_time = (time.perf_counter() - start_time) * 1000  # Convert to ms
+
+        # Update report execution statistics
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE custom_reports
+                SET
+                    last_executed_at = $1,
+                    execution_count = execution_count + 1
+                WHERE id = $2
+                """,
+                datetime.now(),
+                id,
+            )
+
+        # Convert rows to list of dicts
+        data = [dict(row) for row in rows]
+
+        # Extract column names from first row (if any)
+        columns = list(data[0].keys()) if data else []
+
+        # Handle different output formats
+        if format == ExportFormat.JSON:
+            # Return JSON response with metadata
+            return ExecuteReportResponse(
+                success=True,
+                columns=columns,
+                data=data,
+                total_rows=len(data),
+                page=page,
+                page_size=page_size,
+                execution_time_ms=execution_time,
+                generated_sql=sql,
+                errors=[],
+            )
+        elif format == ExportFormat.CSV:
+            # Generate CSV and return as download
+            csv_content = _generate_csv(data, columns)
+            filename = f"{row['name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+            return StreamingResponse(
+                io.BytesIO(csv_content.encode("utf-8")),
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+                    "Pragma": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                },
+            )
+        elif format == ExportFormat.XLSX:
+            # For now, XLSX is not implemented - return error
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="XLSX export format is not yet implemented. Please use JSON or CSV.",
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing report {id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute report: {str(e)}",
+        )
+
+
+def _generate_csv(data: list[dict], columns: list[str]) -> str:
+    """Generate CSV content from query results.
+
+    Args:
+        data: List of row dictionaries
+        columns: List of column names in order
+
+    Returns:
+        CSV content as string
+    """
+    import csv
+    from io import StringIO
+
+    output = StringIO()
+
+    if not data:
+        return ""
+
+    writer = csv.DictWriter(output, fieldnames=columns)
+    writer.writeheader()
+
+    for row in data:
+        # Convert any non-string values to strings for CSV
+        csv_row = {}
+        for col in columns:
+            value = row.get(col)
+            if value is None:
+                csv_row[col] = ""
+            elif isinstance(value, (datetime,)):
+                csv_row[col] = value.isoformat()
+            else:
+                csv_row[col] = str(value)
+        writer.writerow(csv_row)
+
+    return output.getvalue()
