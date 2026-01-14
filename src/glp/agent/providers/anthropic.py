@@ -205,18 +205,16 @@ class AnthropicProvider(BaseLLMProvider):
             "messages": api_messages,
         }
 
-        # Extended thinking requires complex message handling for tool results
-        # Disable for now until proper thinking block propagation is implemented
-        # TODO: Implement proper thinking support with message history
-        # if self._supports_thinking:
-        #     thinking_budget = 8000
-        #     kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-        #     kwargs["temperature"] = 1  # Required for extended thinking
-        #     # max_tokens must be greater than thinking budget
-        #     kwargs["max_tokens"] = max(thinking_budget + 4096, max_tokens or 0)
-        # else:
-        kwargs["temperature"] = temperature
-        kwargs["max_tokens"] = max_tokens or self.config.max_tokens
+        # Enable extended thinking if supported and configured
+        if self._supports_thinking and self.config.enable_thinking:
+            thinking_budget = self.config.thinking_budget
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+            kwargs["temperature"] = 1  # Required for extended thinking
+            # max_tokens must be greater than thinking budget
+            kwargs["max_tokens"] = max(thinking_budget + 4096, max_tokens or 0)
+        else:
+            kwargs["temperature"] = temperature
+            kwargs["max_tokens"] = max_tokens or self.config.max_tokens
 
         if system:
             kwargs["system"] = system
