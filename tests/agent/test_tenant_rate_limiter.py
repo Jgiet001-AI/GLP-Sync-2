@@ -12,7 +12,6 @@ These tests verify the rate limiter works correctly under various
 failure scenarios and enforces limits as expected.
 """
 import asyncio
-import time
 from typing import Optional
 
 import pytest
@@ -23,7 +22,6 @@ from src.glp.agent.security.tenant_rate_limiter import (
     RateLimitExceededError,
     TenantRateLimiter,
 )
-
 
 # ============================================
 # InMemoryRateLimiter Tests
