@@ -276,6 +276,9 @@ class CircuitBreaker:
         # Flag to ensure only one probe request runs in HALF_OPEN state
         self._half_open_probe_in_progress = False
 
+        # Auto-register this circuit breaker in the global registry
+        register_circuit_breaker(self)
+
     @property
     def state(self) -> CircuitState:
         """Get current circuit state."""
