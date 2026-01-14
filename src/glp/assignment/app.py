@@ -29,6 +29,7 @@ try:
         AgentConfig,
         AgentOrchestrator,
         AnthropicProvider,
+        OllamaProvider,
         OpenAIProvider,
         ToolRegistry,
     )
@@ -76,12 +77,14 @@ def _init_agent_orchestrator(redis_client=None) -> None:
         logger.info("Agent module not available, skipping orchestrator init")
         return
 
-    # Check for API keys
+    # Check for API keys and Ollama config
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
+    ollama_model = os.getenv("OLLAMA_MODEL")
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 
-    if not anthropic_key and not openai_key:
-        logger.warning("No LLM API keys configured (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
+    if not anthropic_key and not openai_key and not ollama_model:
+        logger.warning("No LLM API keys configured (ANTHROPIC_API_KEY or OPENAI_API_KEY) and no OLLAMA_MODEL set")
         return
 
     llm_provider = None
@@ -109,6 +112,19 @@ def _init_agent_orchestrator(redis_client=None) -> None:
             logger.info(f"Using OpenAI provider with model: {config.model}")
         except Exception as e:
             logger.warning(f"Failed to initialize OpenAI provider: {e}")
+
+    # Fall back to Ollama if Anthropic and OpenAI failed
+    if not llm_provider and ollama_model:
+        try:
+            config = LLMProviderConfig(
+                api_key="not-needed",  # Ollama doesn't require API key
+                model=ollama_model,
+                base_url=ollama_base_url or "http://localhost:11434",
+            )
+            llm_provider = OllamaProvider(config)
+            logger.info(f"Using Ollama provider with model: {config.model}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Ollama provider: {e}")
 
     if not llm_provider:
         logger.warning("No LLM provider could be initialized - chatbot will be unavailable")
