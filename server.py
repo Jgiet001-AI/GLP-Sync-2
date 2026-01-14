@@ -30,6 +30,113 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # =============================================================================
+# Write Operation Risk Assessment (for confirmation workflows)
+# =============================================================================
+
+from enum import Enum
+
+
+class RiskLevel(str, Enum):
+    """Risk level of operations for confirmation requirements."""
+
+    LOW = "low"  # No confirmation needed
+    MEDIUM = "medium"  # Confirmation recommended
+    HIGH = "high"  # Confirmation required
+    CRITICAL = "critical"  # Multi-step confirmation required
+
+
+class OperationType(str, Enum):
+    """Types of write operations."""
+
+    ADD_DEVICE = "add_device"
+    UPDATE_TAGS = "update_tags"
+    APPLY_ASSIGNMENTS = "apply_assignments"
+    ARCHIVE_DEVICES = "archive_devices"
+    UNARCHIVE_DEVICES = "unarchive_devices"
+
+
+# Risk assessment configuration
+RISK_THRESHOLDS = {
+    OperationType.ADD_DEVICE: RiskLevel.LOW,
+    OperationType.UPDATE_TAGS: RiskLevel.LOW,
+    OperationType.APPLY_ASSIGNMENTS: RiskLevel.MEDIUM,
+    OperationType.ARCHIVE_DEVICES: RiskLevel.HIGH,
+    OperationType.UNARCHIVE_DEVICES: RiskLevel.MEDIUM,
+}
+
+# Device count thresholds for elevated risk
+BULK_THRESHOLD = 5  # > 5 devices elevates risk
+MASS_THRESHOLD = 20  # > 20 devices requires critical confirmation
+
+
+def _assess_risk(
+    operation_type: OperationType,
+    device_count: int = 0,
+) -> RiskLevel:
+    """Assess the risk level of an operation.
+
+    Args:
+        operation_type: Type of operation
+        device_count: Number of devices affected
+
+    Returns:
+        Assessed risk level
+    """
+    base_risk = RISK_THRESHOLDS.get(operation_type, RiskLevel.MEDIUM)
+
+    # Elevate risk based on number of devices affected
+    if device_count > MASS_THRESHOLD:
+        return RiskLevel.CRITICAL
+    elif device_count > BULK_THRESHOLD:
+        # Elevate by one level
+        if base_risk == RiskLevel.LOW:
+            return RiskLevel.MEDIUM
+        elif base_risk == RiskLevel.MEDIUM:
+            return RiskLevel.HIGH
+
+    return base_risk
+
+
+def _get_confirmation_message(
+    operation_type: OperationType,
+    device_count: int,
+    risk_level: RiskLevel,
+) -> str:
+    """Generate a confirmation message for the user.
+
+    Args:
+        operation_type: Type of operation
+        device_count: Number of devices affected
+        risk_level: Assessed risk level
+
+    Returns:
+        Confirmation message
+    """
+    messages = {
+        OperationType.ARCHIVE_DEVICES: (
+            f"Are you sure you want to archive {device_count} device(s)? "
+            "Archived devices will no longer receive updates and will be hidden from normal views."
+        ),
+        OperationType.UNARCHIVE_DEVICES: (
+            f"Restore {device_count} archived device(s)?"
+        ),
+        OperationType.APPLY_ASSIGNMENTS: (
+            f"Apply assignments to {device_count} device(s)?"
+        ),
+    }
+
+    base_message = messages.get(
+        operation_type,
+        f"Execute {operation_type.value} on {device_count} device(s)?",
+    )
+
+    if risk_level == RiskLevel.CRITICAL:
+        return f"⚠️ WARNING: High-risk operation affecting {device_count} devices. {base_message}"
+
+    return base_message
+
+
+# =============================================================================
 # Assignment Module Dependencies (optional - for write tools)
 # =============================================================================
 
@@ -97,6 +204,9 @@ _DEVICE_ACTIONS_USE_CASE = None
 # Global rate limiters for write operations
 _PATCH_RATE_LIMITER = None  # For PATCH operations (20/min limit)
 _POST_RATE_LIMITER = None   # For POST operations (25/min limit)
+
+# Global pending operations tracking (for confirmation workflows)
+_PENDING_OPERATIONS: dict[str, dict[str, Any]] = {}
 
 
 @asynccontextmanager
@@ -2380,43 +2490,99 @@ async def archive_devices(
     device_ids: list[str],
     wait_for_completion: bool = True,
     sync_after: bool = True,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Archive devices in GreenLake Platform.
 
     This tool archives devices in the GreenLake workspace. Archived devices
     are hidden from normal views but can be unarchived later.
 
+    ⚠️ HIGH-RISK OPERATION: Requires confirmation before execution.
+
     Args:
         ctx: FastMCP context
         device_ids: List of device UUIDs to archive (as strings)
         wait_for_completion: Whether to wait for async operations to complete
         sync_after: Whether to sync the database after archiving
+        confirmed: Set to True to bypass confirmation (after user confirmation)
 
     Returns:
         Dictionary with operation results:
-            - success (bool): Overall success status
+            - status (str): "confirmation_required" or "success"
+            - confirmation_message (str): Message to show user (if confirmation required)
+            - operation_id (str): Operation ID for confirmation (if confirmation required)
+            - risk_level (str): Risk level of the operation (if confirmation required)
+            - success (bool): Overall success status (if executed)
             - action (str): The action performed (ARCHIVE)
-            - devices_processed (int): Total number of devices processed
-            - devices_succeeded (int): Number of devices archived successfully
-            - devices_failed (int): Number of failed device archival
-            - total_duration_seconds (float): Total operation duration
-            - failed_device_ids (list[str]): List of failed device UUIDs
-            - failed_device_serials (list[str]): List of failed device serial numbers
-            - operations (list): List of operation results
+            - devices_processed (int): Total number of devices processed (if executed)
+            - devices_succeeded (int): Number of devices archived successfully (if executed)
+            - devices_failed (int): Number of failed device archival (if executed)
+            - total_duration_seconds (float): Total operation duration (if executed)
+            - failed_device_ids (list[str]): List of failed device UUIDs (if executed)
+            - failed_device_serials (list[str]): List of failed device serial numbers (if executed)
+            - operations (list): List of operation results (if executed)
 
     Example:
         ```python
+        # First call - returns confirmation request
+        result = await archive_devices(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ]
+        )
+        # Returns: {"status": "confirmation_required", "message": "...", "operation_id": "..."}
+
+        # Second call - with confirmation
         result = await archive_devices(
             ctx,
             device_ids=[
                 "550e8400-e29b-41d4-a716-446655440000",
                 "660e8400-e29b-41d4-a716-446655440001"
             ],
-            wait_for_completion=True,
-            sync_after=True
+            confirmed=True
         )
+        # Executes the operation
         ```
     """
+    global _PENDING_OPERATIONS
+
+    # Assess risk level
+    device_count = len(device_ids)
+    risk_level = _assess_risk(OperationType.ARCHIVE_DEVICES, device_count)
+
+    # Check if confirmation is required
+    requires_confirmation = risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+
+    if requires_confirmation and not confirmed:
+        # Generate operation ID
+        from uuid import uuid4
+        operation_id = str(uuid4())
+
+        # Store pending operation
+        _PENDING_OPERATIONS[operation_id] = {
+            "operation_type": OperationType.ARCHIVE_DEVICES,
+            "device_ids": device_ids,
+            "wait_for_completion": wait_for_completion,
+            "sync_after": sync_after,
+            "risk_level": risk_level,
+        }
+
+        # Return confirmation request
+        return {
+            "status": "confirmation_required",
+            "confirmation_message": _get_confirmation_message(
+                OperationType.ARCHIVE_DEVICES,
+                device_count,
+                risk_level,
+            ),
+            "operation_id": operation_id,
+            "risk_level": risk_level.value,
+            "device_count": device_count,
+        }
+
+    # Proceed with execution (confirmed or low/medium risk)
     # Check if GLP client is initialized
     if _DEVICE_MANAGER is None:
         return {
@@ -2524,6 +2690,7 @@ async def unarchive_devices(
     device_ids: list[str],
     wait_for_completion: bool = True,
     sync_after: bool = True,
+    confirmed: bool = False,
 ) -> dict[str, Any]:
     """Unarchive devices in GreenLake Platform.
 
@@ -2535,32 +2702,77 @@ async def unarchive_devices(
         device_ids: List of device UUIDs to unarchive (as strings)
         wait_for_completion: Whether to wait for async operations to complete
         sync_after: Whether to sync the database after unarchiving
+        confirmed: Set to True to bypass confirmation (after user confirmation)
 
     Returns:
         Dictionary with operation results:
-            - success (bool): Overall success status
+            - status (str): "confirmation_required" or "success" (may require confirmation for bulk operations)
+            - confirmation_message (str): Message to show user (if confirmation required)
+            - operation_id (str): Operation ID for confirmation (if confirmation required)
+            - risk_level (str): Risk level of the operation (if confirmation required)
+            - success (bool): Overall success status (if executed)
             - action (str): The action performed (UNARCHIVE)
-            - devices_processed (int): Total number of devices processed
-            - devices_succeeded (int): Number of devices unarchived successfully
-            - devices_failed (int): Number of failed device unarchival
-            - total_duration_seconds (float): Total operation duration
-            - failed_device_ids (list[str]): List of failed device UUIDs
-            - failed_device_serials (list[str]): List of failed device serial numbers
-            - operations (list): List of operation results
+            - devices_processed (int): Total number of devices processed (if executed)
+            - devices_succeeded (int): Number of devices unarchived successfully (if executed)
+            - devices_failed (int): Number of failed device unarchival (if executed)
+            - total_duration_seconds (float): Total operation duration (if executed)
+            - failed_device_ids (list[str]): List of failed device UUIDs (if executed)
+            - failed_device_serials (list[str]): List of failed device serial numbers (if executed)
+            - operations (list): List of operation results (if executed)
 
     Example:
         ```python
+        # First call - may return confirmation request for bulk operations (>5 devices)
         result = await unarchive_devices(
             ctx,
-            device_ids=[
-                "550e8400-e29b-41d4-a716-446655440000",
-                "660e8400-e29b-41d4-a716-446655440001"
-            ],
-            wait_for_completion=True,
-            sync_after=True
+            device_ids=["550e8400-e29b-41d4-a716-446655440000", ...]
+        )
+
+        # If confirmation required, call again with confirmed=True
+        result = await unarchive_devices(
+            ctx,
+            device_ids=["550e8400-e29b-41d4-a716-446655440000", ...],
+            confirmed=True
         )
         ```
     """
+    global _PENDING_OPERATIONS
+
+    # Assess risk level
+    device_count = len(device_ids)
+    risk_level = _assess_risk(OperationType.UNARCHIVE_DEVICES, device_count)
+
+    # Check if confirmation is required (for HIGH or CRITICAL risk)
+    requires_confirmation = risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+
+    if requires_confirmation and not confirmed:
+        # Generate operation ID
+        from uuid import uuid4
+        operation_id = str(uuid4())
+
+        # Store pending operation
+        _PENDING_OPERATIONS[operation_id] = {
+            "operation_type": OperationType.UNARCHIVE_DEVICES,
+            "device_ids": device_ids,
+            "wait_for_completion": wait_for_completion,
+            "sync_after": sync_after,
+            "risk_level": risk_level,
+        }
+
+        # Return confirmation request
+        return {
+            "status": "confirmation_required",
+            "confirmation_message": _get_confirmation_message(
+                OperationType.UNARCHIVE_DEVICES,
+                device_count,
+                risk_level,
+            ),
+            "operation_id": operation_id,
+            "risk_level": risk_level.value,
+            "device_count": device_count,
+        }
+
+    # Proceed with execution (confirmed or low/medium risk)
     # Check if GLP client is initialized
     if _DEVICE_MANAGER is None:
         return {
