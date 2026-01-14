@@ -128,6 +128,21 @@ export function DevicesList() {
     staleTime: 60000,
   })
 
+  // Normalize device types (merge IAP into AP) and deduplicate
+  const normalizedFilterOptions = useMemo(() => {
+    if (!filterOptions) return filterOptions
+
+    const normalizedTypes = filterOptions.device_types
+      .map(type => normalizeDeviceType(type))
+      .filter((type, index, self) => self.indexOf(type) === index) // Remove duplicates
+      .sort()
+
+    return {
+      ...filterOptions,
+      device_types: normalizedTypes,
+    }
+  }, [filterOptions])
+
   const handleFilterChange = useCallback((key: keyof DeviceFilters, value: string | undefined) => {
     handlers.handleFilterChange(key, value)
   }, [handlers])
@@ -152,6 +167,7 @@ export function DevicesList() {
         key: 'device_type',
         label: 'Type',
         value: state.filters.device_type,
+        displayValue: normalizeDeviceType(state.filters.device_type),
         color: 'sky',
       })
     }
@@ -392,7 +408,7 @@ export function DevicesList() {
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
                   >
                     <option value="">All Types</option>
-                    {filterOptions.device_types.map((type) => (
+                    {normalizedFilterOptions?.device_types.map((type) => (
                       <option key={type} value={type}>
                         {type}
                       </option>
@@ -411,7 +427,7 @@ export function DevicesList() {
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
                   >
                     <option value="">All Regions</option>
-                    {filterOptions.regions.map((region) => (
+                    {normalizedFilterOptions?.regions.map((region) => (
                       <option key={region} value={region}>
                         {region}
                       </option>
