@@ -12,10 +12,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 from dotenv import load_dotenv
@@ -25,6 +27,8 @@ from starlette.responses import JSONResponse
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # =============================================================================
 # Database Connection Pool (Lifespan)
 # =============================================================================
@@ -32,11 +36,20 @@ load_dotenv()
 # Global pool reference for REST API access
 _DB_POOL: asyncpg.Pool | None = None
 
+# Global GLP client and dependencies for write operations
+_GLP_CLIENT = None
+_TOKEN_MANAGER = None
+_DEVICE_MANAGER = None
+_DEVICE_SYNCER = None
+_SUBSCRIPTION_SYNCER = None
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Initialize and cleanup database connection pool."""
-    global _DB_POOL
+    """Initialize and cleanup database connection pool and GLP client."""
+    global _DB_POOL, _GLP_CLIENT, _TOKEN_MANAGER, _DEVICE_MANAGER
+    global _DEVICE_SYNCER, _SUBSCRIPTION_SYNCER
+
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL environment variable is required")
@@ -51,10 +64,38 @@ async def lifespan(server: FastMCP):
         max_inactive_connection_lifetime=300,  # Close idle connections after 5 min
     )
     _DB_POOL = pool  # Store globally for REST API access
+
+    # Initialize GLP client for write operations
+    try:
+        from src.glp.api.auth import TokenManager
+        from src.glp.api.client import GLPClient
+        from src.glp.api.device_manager import DeviceManager
+        from src.glp.api.devices import DeviceSyncer
+        from src.glp.api.subscriptions import SubscriptionSyncer
+
+        _TOKEN_MANAGER = TokenManager()
+        _GLP_CLIENT = GLPClient(_TOKEN_MANAGER)
+        await _GLP_CLIENT.__aenter__()
+        _DEVICE_MANAGER = DeviceManager(_GLP_CLIENT)
+        _DEVICE_SYNCER = DeviceSyncer(_GLP_CLIENT, pool)
+        _SUBSCRIPTION_SYNCER = SubscriptionSyncer(_GLP_CLIENT, pool)
+
+        logger.info("GLP client initialized successfully")
+    except Exception as e:
+        logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
+
     try:
         yield {"db_pool": pool}
     finally:
+        # Cleanup GLP client
+        if _GLP_CLIENT:
+            await _GLP_CLIENT.__aexit__(None, None, None)
         _DB_POOL = None
+        _GLP_CLIENT = None
+        _TOKEN_MANAGER = None
+        _DEVICE_MANAGER = None
+        _DEVICE_SYNCER = None
+        _SUBSCRIPTION_SYNCER = None
         await pool.close()
 
 
@@ -65,9 +106,10 @@ async def lifespan(server: FastMCP):
 mcp = FastMCP(
     name="GreenLake Inventory",
     instructions=(
-        "This server provides read-only access to HPE GreenLake device and "
-        "subscription inventory. Use the tools to search devices, list subscriptions, "
-        "and analyze inventory data. All operations are read-only."
+        "This server provides access to HPE GreenLake device and subscription inventory. "
+        "Use the read-only tools to search devices, list subscriptions, and analyze inventory data. "
+        "Use the write tools (apply_device_assignments) to assign subscriptions, applications, "
+        "and tags to devices. Write operations require proper GreenLake API credentials."
     ),
     lifespan=lifespan,
 )
@@ -84,7 +126,7 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "healthy",
         "service": "greenlake-mcp",
-        "tools": 27,
+        "tools": 28,  # 27 read-only + 1 write (apply_device_assignments)
     })
 
 
@@ -1893,6 +1935,183 @@ If the question cannot be answered with a SELECT query, explain why."""
                 "suggestion": "Try using search_devices, list_devices, or run_query tools.",
             }
         return {"error": error_msg}
+
+
+# =============================================================================
+# Write Tools (Device Assignment)
+# =============================================================================
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def apply_device_assignments(
+    ctx: Context,
+    assignments: list[dict[str, Any]],
+    wait_for_completion: bool = True,
+) -> dict[str, Any]:
+    """Apply device assignments (subscriptions, applications, tags) to devices.
+
+    This tool performs bulk assignment operations following a phased workflow:
+    1. Process existing devices (have UUIDs)
+    2. Add new devices (no UUIDs)
+    3. Refresh DB to get new UUIDs
+    4. Process newly added devices
+
+    Args:
+        ctx: FastMCP context
+        assignments: List of device assignments with the following structure:
+            - serial_number (str, required): Device serial number
+            - mac_address (str, optional): Device MAC address
+            - device_id (str, optional): Device UUID (if known)
+            - device_type (str, optional): NETWORK, COMPUTE, or STORAGE
+            - current_subscription_id (str, optional): Current subscription UUID
+            - current_application_id (str, optional): Current application UUID
+            - current_tags (dict, optional): Current tags
+            - selected_subscription_id (str, optional): New subscription UUID to assign
+            - selected_application_id (str, optional): New application UUID to assign
+            - selected_region (str, optional): Region code (e.g., "us-west")
+            - selected_tags (dict, optional): New tags to assign
+            - keep_current_subscription (bool, optional): Keep current subscription
+            - keep_current_application (bool, optional): Keep current application
+            - keep_current_tags (bool, optional): Keep current tags
+        wait_for_completion: Whether to wait for async operations to complete
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - operations (list): List of operation results
+            - devices_created (int): Number of devices created
+            - applications_assigned (int): Number of application assignments
+            - subscriptions_assigned (int): Number of subscription assignments
+            - tags_updated (int): Number of tag updates
+            - errors (int): Number of errors encountered
+
+    Example:
+        ```python
+        result = await apply_device_assignments(
+            ctx,
+            assignments=[
+                {
+                    "serial_number": "SN123456",
+                    "device_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "selected_subscription_id": "660e8400-e29b-41d4-a716-446655440000",
+                    "selected_application_id": "770e8400-e29b-41d4-a716-446655440000",
+                    "selected_tags": {"env": "production", "location": "us-west"}
+                }
+            ],
+            wait_for_completion=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "operations": [],
+            "devices_created": 0,
+            "applications_assigned": 0,
+            "subscriptions_assigned": 0,
+            "tags_updated": 0,
+            "errors": 1,
+        }
+
+    try:
+        # Import required classes
+        from src.glp.assignment.adapters import (
+            GLPDeviceManagerAdapter,
+            PostgresDeviceRepository,
+            DeviceSyncerAdapter,
+        )
+        from src.glp.assignment.domain.entities import DeviceAssignment
+        from src.glp.assignment.use_cases.apply_assignments import ApplyAssignmentsUseCase
+
+        # Convert input dictionaries to DeviceAssignment entities
+        device_assignments = []
+        for a in assignments:
+            # Parse UUIDs if provided as strings
+            device_id = UUID(a["device_id"]) if a.get("device_id") else None
+            current_sub_id = UUID(a["current_subscription_id"]) if a.get("current_subscription_id") else None
+            current_app_id = UUID(a["current_application_id"]) if a.get("current_application_id") else None
+            selected_sub_id = UUID(a["selected_subscription_id"]) if a.get("selected_subscription_id") else None
+            selected_app_id = UUID(a["selected_application_id"]) if a.get("selected_application_id") else None
+
+            assignment = DeviceAssignment(
+                serial_number=a["serial_number"],
+                mac_address=a.get("mac_address"),
+                row_number=a.get("row_number", 0),
+                device_id=device_id,
+                device_type=a.get("device_type"),
+                model=a.get("model"),
+                region=a.get("region"),
+                current_subscription_id=current_sub_id,
+                current_subscription_key=a.get("current_subscription_key"),
+                current_application_id=current_app_id,
+                current_tags=a.get("current_tags", {}),
+                selected_subscription_id=selected_sub_id,
+                selected_application_id=selected_app_id,
+                selected_region=a.get("selected_region"),
+                selected_tags=a.get("selected_tags", {}),
+                keep_current_subscription=a.get("keep_current_subscription", False),
+                keep_current_application=a.get("keep_current_application", False),
+                keep_current_tags=a.get("keep_current_tags", False),
+            )
+            device_assignments.append(assignment)
+
+        # Create adapters
+        device_manager = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+        device_repo = PostgresDeviceRepository(_DB_POOL)
+        sync_service = DeviceSyncerAdapter(
+            _DEVICE_SYNCER,
+            _SUBSCRIPTION_SYNCER,
+            db_pool=_DB_POOL,
+        )
+
+        # Execute the use case
+        use_case = ApplyAssignmentsUseCase(
+            device_manager=device_manager,
+            device_repository=device_repo,
+            sync_service=sync_service,
+        )
+
+        result = await use_case.execute(
+            assignments=device_assignments,
+            wait_for_completion=wait_for_completion,
+        )
+
+        # Convert result to dictionary
+        return {
+            "success": result.success,
+            "operations": [
+                {
+                    "success": op.success,
+                    "operation_type": op.operation_type,
+                    "device_ids": [str(d) for d in op.device_ids],
+                    "device_serials": op.device_serials,
+                    "error": op.error,
+                    "operation_url": op.operation_url,
+                }
+                for op in result.operations
+            ],
+            "devices_created": result.devices_created,
+            "applications_assigned": result.applications_assigned,
+            "subscriptions_assigned": result.subscriptions_assigned,
+            "tags_updated": result.tags_updated,
+            "errors": result.errors,
+            "total_duration_seconds": result.total_duration_seconds,
+        }
+
+    except Exception as e:
+        logger.exception("Error applying device assignments")
+        return {
+            "success": False,
+            "error": str(e),
+            "operations": [],
+            "devices_created": 0,
+            "applications_assigned": 0,
+            "subscriptions_assigned": 0,
+            "tags_updated": 0,
+            "errors": 1,
+        }
 
 
 # =============================================================================
