@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..assignment.api.dependencies import get_db_pool, verify_api_key
 from .query_builder import get_available_tables
-from .schemas import CreateReportRequest, FieldsResponse, ReportResponse
+from .schemas import CreateReportRequest, FieldsResponse, ReportListResponse, ReportResponse
 
 logger = logging.getLogger(__name__)
 
@@ -145,4 +145,76 @@ async def create_report(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create report: {str(e)}",
+        )
+
+
+@router.get("/custom", response_model=ReportListResponse)
+async def list_reports(
+    pool: asyncpg.Pool = Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """List all saved custom reports.
+
+    Returns a summary list of all custom report templates. This endpoint
+    does not include the full report configuration - use GET /custom/{id}
+    to retrieve the complete report details.
+
+    Args:
+        pool: Database connection pool
+        _auth: API key authentication
+
+    Returns:
+        ReportListResponse: List of report summaries with pagination metadata
+
+    Raises:
+        HTTPException: 500 if database error occurs
+    """
+    try:
+        async with pool.acquire() as conn:
+            # Get all reports ordered by most recently updated
+            rows = await conn.fetch(
+                """
+                SELECT
+                    id,
+                    name,
+                    description,
+                    created_by,
+                    is_shared,
+                    created_at,
+                    updated_at,
+                    last_executed_at,
+                    execution_count
+                FROM custom_reports
+                ORDER BY updated_at DESC
+                """
+            )
+
+            # Convert rows to response items
+            reports = [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "created_by": row["created_by"],
+                    "is_shared": row["is_shared"],
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                    "last_executed_at": row["last_executed_at"],
+                    "execution_count": row["execution_count"],
+                }
+                for row in rows
+            ]
+
+            return ReportListResponse(
+                reports=reports,
+                total=len(reports),
+                page=1,
+                page_size=len(reports),
+            )
+
+    except Exception as e:
+        logger.error(f"Error listing reports: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list reports: {str(e)}",
         )
