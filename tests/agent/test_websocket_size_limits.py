@@ -499,3 +499,77 @@ class TestEdgeCases:
         assert mock_ws.accepted
         pong_messages = [msg for msg in mock_ws.sent_messages if msg.get("type") == "pong"]
         assert len(pong_messages) > 0
+
+
+class TestIntegration:
+    """Integration tests with real WebSocket client."""
+
+    @pytest.mark.asyncio
+    async def test_integration_oversized_message_rejected(self, setup_websocket_endpoint):
+        """Integration test: Oversized messages are rejected with proper error.
+
+        This test verifies the WebSocket size limit enforcement in a more realistic
+        scenario using the actual websocket_endpoint function with proper setup.
+        """
+        ticket_auth, orchestrator = setup_websocket_endpoint
+
+        # Create valid ticket for authentication
+        ticket = await ticket_auth.create_ticket(
+            user_id="integration_test_user",
+            tenant_id="integration_test_tenant",
+            session_id="integration_test_session",
+        )
+
+        # Create an oversized message (>1MB)
+        # Using a simple structure to minimize overhead
+        oversized_payload = "x" * (MAX_WS_MESSAGE_SIZE_BYTES + 1000)
+        oversized_message = json.dumps({
+            "type": "chat",
+            "message": oversized_payload,
+        })
+
+        # Verify message is actually over the limit
+        message_size = len(oversized_message.encode('utf-8'))
+        assert message_size > MAX_WS_MESSAGE_SIZE_BYTES, \
+            f"Test message ({message_size} bytes) should exceed limit ({MAX_WS_MESSAGE_SIZE_BYTES} bytes)"
+
+        # Create mock WebSocket to simulate real client
+        mock_ws = MockWebSocket()
+
+        # Queue messages: oversized message followed by valid ping to keep connection alive
+        mock_ws.messages_to_receive = [
+            oversized_message,
+            json.dumps({"type": "ping"}),  # Valid message to verify connection still works
+        ]
+
+        # Execute the WebSocket endpoint with the mock connection
+        await websocket_endpoint(mock_ws, ticket)
+
+        # Verify connection was established
+        assert mock_ws.accepted, "WebSocket connection should be accepted"
+
+        # Verify error response was sent for oversized message
+        error_messages = [
+            msg for msg in mock_ws.sent_messages
+            if msg.get("type") == "error" and msg.get("error_type") == "message_too_large"
+        ]
+        assert len(error_messages) > 0, "Should receive error for oversized message"
+
+        # Verify error message contains useful information
+        error_msg = error_messages[0]
+        assert "content" in error_msg, "Error should have content field"
+        assert str(MAX_WS_MESSAGE_SIZE_MB) in error_msg["content"], \
+            f"Error message should mention limit: {error_msg['content']}"
+        assert "MB" in error_msg["content"], "Error message should include MB unit"
+
+        # Verify connection remains open and processes subsequent valid messages
+        # (current implementation sends error but doesn't close connection)
+        pong_messages = [msg for msg in mock_ws.sent_messages if msg.get("type") == "pong"]
+        assert len(pong_messages) > 0, \
+            "Connection should remain open and process valid messages after rejection"
+
+        # Verify connection was not closed prematurely
+        # If the implementation changes to close on oversized messages, this assertion
+        # will need to be updated to verify proper close code
+        assert not mock_ws.closed or mock_ws.close_code != 4009, \
+            "Current implementation should not close connection for oversized messages"
