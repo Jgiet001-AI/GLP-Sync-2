@@ -383,7 +383,7 @@ export function DevicesList() {
               {searchInput && (
                 <button
                   onClick={() => setSearchInput('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-all animate-scale-in"
                   aria-label="Clear search"
                   data-testid="clear-search-btn"
                 >
