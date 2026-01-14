@@ -48,6 +48,7 @@ try:
     from src.glp.api.client import GLPClient
     from src.glp.api.device_manager import DeviceManager
     from src.glp.api.devices import DeviceSyncer
+    from src.glp.api.resilience import SequentialRateLimiter
     from src.glp.api.subscriptions import SubscriptionSyncer
 
     ASSIGNMENT_MODULE_AVAILABLE = True
@@ -69,6 +70,7 @@ except ImportError as e:
     DeviceManager = None
     DeviceSyncer = None
     SubscriptionSyncer = None
+    SequentialRateLimiter = None
 
 # =============================================================================
 # Database Connection Pool (Lifespan)
@@ -92,6 +94,10 @@ _DEVICE_SYNCER_ADAPTER = None
 _APPLY_ASSIGNMENTS_USE_CASE = None
 _DEVICE_ACTIONS_USE_CASE = None
 
+# Global rate limiters for write operations
+_PATCH_RATE_LIMITER = None  # For PATCH operations (20/min limit)
+_POST_RATE_LIMITER = None   # For POST operations (25/min limit)
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
@@ -101,6 +107,7 @@ async def lifespan(server: FastMCP):
     global _DEVICE_REPO, _SUBSCRIPTION_REPO
     global _DEVICE_MANAGER_ADAPTER, _DEVICE_SYNCER_ADAPTER
     global _APPLY_ASSIGNMENTS_USE_CASE, _DEVICE_ACTIONS_USE_CASE
+    global _PATCH_RATE_LIMITER, _POST_RATE_LIMITER
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -151,6 +158,13 @@ async def lifespan(server: FastMCP):
             )
             logger.info("Use cases initialized successfully")
 
+            # Initialize rate limiters for write operations
+            # PATCH operations: 3.5s interval (for 20/min limits, yields ~17 req/min)
+            # POST operations: 2.6s interval (for 25/min limits, yields ~23 req/min)
+            _PATCH_RATE_LIMITER = SequentialRateLimiter(operation_type="patch")
+            _POST_RATE_LIMITER = SequentialRateLimiter(operation_type="post")
+            logger.info("Rate limiters initialized successfully")
+
         except Exception as e:
             logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
     else:
@@ -160,6 +174,8 @@ async def lifespan(server: FastMCP):
         yield {"db_pool": pool}
     finally:
         # Cleanup (reverse order of initialization)
+        _PATCH_RATE_LIMITER = None
+        _POST_RATE_LIMITER = None
         _APPLY_ASSIGNMENTS_USE_CASE = None
         _DEVICE_ACTIONS_USE_CASE = None
         _DEVICE_MANAGER_ADAPTER = None
