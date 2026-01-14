@@ -170,66 +170,175 @@ Path: docs/screenshots/ai-chatbot.png
 
 ## Quick Start
 
+Get up and running in minutes! This guide will help you deploy the complete HPE GreenLake sync platform with a web dashboard, AI chatbot, and automated sync scheduler.
+
+### Prerequisites
+
+Before you begin, ensure you have:
+
+✅ **Docker & Docker Compose** installed ([Get Docker](https://docs.docker.com/get-docker/))
+✅ **HPE GreenLake API Credentials** (Client ID, Client Secret, Token URL)
+✅ **Basic terminal/command-line knowledge**
+
+> 💡 **New to Docker?** Our Interactive Setup Wizard (Option 1) handles all the complexity for you!
+
+### Choose Your Installation Method
+
+<table>
+<tr>
+<td width="33%" align="center">
+
+**🎯 Interactive Wizard**
+*Recommended for first-time users*
+
+Guided setup with prompts and validation
+
+[Jump to Option 1 ↓](#option-1-interactive-setup-wizard-recommended)
+
+</td>
+<td width="33%" align="center">
+
+**⚙️ Manual Setup**
+*For advanced users*
+
+Full control over configuration
+
+[Jump to Option 2 ↓](#option-2-manual-docker-compose)
+
+</td>
+<td width="33%" align="center">
+
+**🚀 Production Deploy**
+*Pre-built Docker images*
+
+Fastest deployment with Docker Hub
+
+[Jump to Option 3 ↓](#option-3-production-deployment-docker-hub-images)
+
+</td>
+</tr>
+</table>
+
+---
+
 ### Option 1: Interactive Setup Wizard (Recommended)
 
+The easiest way to get started! The wizard will guide you through every step:
+
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
 cd GLP-Sync-2
 
-# Make setup script executable and run it
+# 2. Run the setup wizard
 chmod +x setup.sh
 ./setup.sh
 ```
 
-The wizard will guide you through:
-- GreenLake API credentials
-- PostgreSQL configuration
-- API security settings (dev/production mode)
-- AI chatbot provider selection
-- Deployment mode (local build vs Docker Hub images)
+**What the wizard does:**
+- ✅ Prompts for GreenLake API credentials (with validation)
+- ✅ Configures PostgreSQL settings with smart defaults
+- ✅ Sets up API security (development or production mode)
+- ✅ Configures AI chatbot providers (Anthropic Claude or OpenAI)
+- ✅ Chooses deployment mode (local build or Docker Hub images)
+- ✅ Creates `.env` file automatically
+- ✅ Starts all Docker containers
+- ✅ Performs initial database sync
+
+**What happens next:**
+1. The wizard will check for Docker installation
+2. You'll be prompted for your GreenLake credentials
+3. Configuration options will be presented with recommended defaults
+4. Docker containers will be built and started automatically
+5. Dashboard will be accessible at `http://localhost`
+
+---
 
 ### Option 2: Manual Docker Compose
 
+For users who prefer full control over their configuration:
+
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
 cd GLP-Sync-2
 
-# Create .env file from template
+# 2. Create and configure environment file
 cp .env.example .env
 nano .env  # Edit with your credentials
 
-# Start all services (development mode - builds locally)
+# 3. Start all services (development mode - builds locally)
 docker compose up -d
 
-# View logs
-docker compose logs -f
+# 4. Verify services are running
+docker compose ps
 
-# Access the dashboard
-open http://localhost
+# 5. View logs
+docker compose logs -f
 ```
+
+**Access your services:**
+- 🌐 **Dashboard**: http://localhost
+- 🔌 **API**: http://localhost:8000/docs
+- 🤖 **MCP Server**: http://localhost:8010
+
+**Useful commands:**
+```bash
+# Run a one-time sync
+docker compose run --rm sync-once
+
+# Stop all services
+docker compose down
+
+# Reset database (if needed)
+docker compose down -v
+```
+
+---
 
 ### Option 3: Production Deployment (Docker Hub Images)
 
+For production environments with pre-built, security-hardened images:
+
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/Jgiet001-AI/GLP-Sync-2.git
 cd GLP-Sync-2
 
-# Create .env file
+# 2. Create environment file
 cp .env.example .env
-nano .env  # Edit with your credentials
+nano .env  # Edit with your production credentials
 
-# Pull pre-built images from Docker Hub
+# 3. Pull pre-built images from Docker Hub
 docker pull jgiet001/glp-sync:latest
 docker pull jgiet001/glp-frontend:latest
 docker pull jgiet001/glp-mcp-server:latest
 docker pull jgiet001/glp-scheduler:latest
 
-# Start all services
-docker compose up -d
+# 4. Start services with production configuration
+docker compose -f docker-compose.prod.yml up -d
 ```
+
+**Production features:**
+- 🔒 Non-root containers with security hardening
+- 📦 Multi-architecture support (amd64, arm64)
+- 🛡️ Trivy vulnerability scanning
+- ⚡ Pre-built images for faster deployment
+- 🔐 Security best practices enabled by default
+
+---
+
+### Next Steps
+
+Once your services are running, you can:
+
+1. **Access the Dashboard** → http://localhost
+2. **View API Documentation** → http://localhost:8000/docs
+3. **Check Sync Status** → View logs with `docker compose logs -f scheduler`
+4. **Try the AI Chatbot** → Click the chat icon in the dashboard
+5. **Explore Device Assignment** → Upload Excel files for bulk operations
+
+**Need help?** See the [Troubleshooting](#troubleshooting) section or [open an issue](https://github.com/Jgiet001-AI/GLP-Sync-2/issues).
 
 ## Docker Architecture
 
