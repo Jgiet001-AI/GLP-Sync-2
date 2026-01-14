@@ -12,6 +12,8 @@ The QueryBuilder supports:
 - GROUP BY clauses
 - ORDER BY clauses
 - LIMIT and OFFSET for pagination
+
+It also provides metadata services for discovering available fields and operators.
 """
 
 import logging
@@ -20,11 +22,14 @@ from typing import Any
 from .schemas import (
     AggregationFunction,
     FieldConfig,
+    FieldMetadata,
+    FieldType,
     FilterConfig,
     FilterOperator,
     LogicOperator,
     ReportConfig,
     SortDirection,
+    TableMetadata,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,6 +111,242 @@ ALLOWED_FIELDS = {
 }
 
 ALLOWED_TABLES = set(ALLOWED_FIELDS.keys())
+
+
+# ============================================
+# Field Type Mappings - Data types for each field
+# ============================================
+
+FIELD_TYPES = {
+    "devices": {
+        # Primary identifiers
+        "id": FieldType.UUID,
+        "mac_address": FieldType.STRING,
+        "serial_number": FieldType.STRING,
+        "part_number": FieldType.STRING,
+        # Device info
+        "device_type": FieldType.STRING,
+        "model": FieldType.STRING,
+        "region": FieldType.STRING,
+        "archived": FieldType.BOOLEAN,
+        "device_name": FieldType.STRING,
+        "secondary_name": FieldType.STRING,
+        "assigned_state": FieldType.STRING,
+        "resource_type": FieldType.STRING,
+        # IDs
+        "tenant_workspace_id": FieldType.STRING,
+        "application_id": FieldType.STRING,
+        "application_resource_uri": FieldType.STRING,
+        "dedicated_platform_id": FieldType.STRING,
+        # Location fields
+        "location_id": FieldType.STRING,
+        "location_name": FieldType.STRING,
+        "location_city": FieldType.STRING,
+        "location_state": FieldType.STRING,
+        "location_country": FieldType.STRING,
+        "location_postal_code": FieldType.STRING,
+        "location_street_address": FieldType.STRING,
+        "location_latitude": FieldType.FLOAT,
+        "location_longitude": FieldType.FLOAT,
+        "location_source": FieldType.STRING,
+        # Timestamps
+        "created_at": FieldType.DATETIME,
+        "updated_at": FieldType.DATETIME,
+        "synced_at": FieldType.DATETIME,
+    },
+    "subscriptions": {
+        # Primary identifiers
+        "id": FieldType.UUID,
+        "key": FieldType.STRING,
+        "resource_type": FieldType.STRING,
+        # Subscription info
+        "subscription_type": FieldType.STRING,
+        "subscription_status": FieldType.STRING,
+        "quantity": FieldType.INTEGER,
+        "available_quantity": FieldType.INTEGER,
+        # SKU details
+        "sku": FieldType.STRING,
+        "sku_description": FieldType.STRING,
+        # Time range
+        "start_time": FieldType.DATETIME,
+        "end_time": FieldType.DATETIME,
+        # Tier information
+        "tier": FieldType.STRING,
+        "tier_description": FieldType.STRING,
+        # Classification
+        "product_type": FieldType.STRING,
+        "is_eval": FieldType.BOOLEAN,
+        # Order references
+        "contract": FieldType.STRING,
+        "quote": FieldType.STRING,
+        "po": FieldType.STRING,
+        "reseller_po": FieldType.STRING,
+        # Timestamps
+        "created_at": FieldType.DATETIME,
+        "updated_at": FieldType.DATETIME,
+        "synced_at": FieldType.DATETIME,
+    },
+}
+
+
+# ============================================
+# Field Display Names - Human-readable names
+# ============================================
+
+FIELD_DISPLAY_NAMES = {
+    "devices": {
+        # Primary identifiers
+        "id": "Device ID",
+        "mac_address": "MAC Address",
+        "serial_number": "Serial Number",
+        "part_number": "Part Number",
+        # Device info
+        "device_type": "Device Type",
+        "model": "Model",
+        "region": "Region",
+        "archived": "Archived",
+        "device_name": "Device Name",
+        "secondary_name": "Secondary Name",
+        "assigned_state": "Assignment State",
+        "resource_type": "Resource Type",
+        # IDs
+        "tenant_workspace_id": "Tenant Workspace ID",
+        "application_id": "Application ID",
+        "application_resource_uri": "Application Resource URI",
+        "dedicated_platform_id": "Dedicated Platform ID",
+        # Location fields
+        "location_id": "Location ID",
+        "location_name": "Location Name",
+        "location_city": "City",
+        "location_state": "State",
+        "location_country": "Country",
+        "location_postal_code": "Postal Code",
+        "location_street_address": "Street Address",
+        "location_latitude": "Latitude",
+        "location_longitude": "Longitude",
+        "location_source": "Location Source",
+        # Timestamps
+        "created_at": "Created At",
+        "updated_at": "Updated At",
+        "synced_at": "Synced At",
+    },
+    "subscriptions": {
+        # Primary identifiers
+        "id": "Subscription ID",
+        "key": "Key",
+        "resource_type": "Resource Type",
+        # Subscription info
+        "subscription_type": "Subscription Type",
+        "subscription_status": "Status",
+        "quantity": "Total Quantity",
+        "available_quantity": "Available Quantity",
+        # SKU details
+        "sku": "SKU",
+        "sku_description": "SKU Description",
+        # Time range
+        "start_time": "Start Time",
+        "end_time": "End Time",
+        # Tier information
+        "tier": "Tier",
+        "tier_description": "Tier Description",
+        # Classification
+        "product_type": "Product Type",
+        "is_eval": "Is Evaluation",
+        # Order references
+        "contract": "Contract",
+        "quote": "Quote",
+        "po": "Purchase Order",
+        "reseller_po": "Reseller PO",
+        # Timestamps
+        "created_at": "Created At",
+        "updated_at": "Updated At",
+        "synced_at": "Synced At",
+    },
+}
+
+
+# ============================================
+# Operator Mappings - Available operators by field type
+# ============================================
+
+OPERATORS_BY_TYPE = {
+    FieldType.STRING: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.CONTAINS,
+        FilterOperator.NOT_CONTAINS,
+        FilterOperator.STARTS_WITH,
+        FilterOperator.ENDS_WITH,
+        FilterOperator.IN,
+        FilterOperator.NOT_IN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.INTEGER: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.GT,
+        FilterOperator.GTE,
+        FilterOperator.LT,
+        FilterOperator.LTE,
+        FilterOperator.BETWEEN,
+        FilterOperator.IN,
+        FilterOperator.NOT_IN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.FLOAT: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.GT,
+        FilterOperator.GTE,
+        FilterOperator.LT,
+        FilterOperator.LTE,
+        FilterOperator.BETWEEN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.BOOLEAN: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.DATE: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.GT,
+        FilterOperator.GTE,
+        FilterOperator.LT,
+        FilterOperator.LTE,
+        FilterOperator.BETWEEN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.DATETIME: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.GT,
+        FilterOperator.GTE,
+        FilterOperator.LT,
+        FilterOperator.LTE,
+        FilterOperator.BETWEEN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.UUID: [
+        FilterOperator.EQUALS,
+        FilterOperator.NOT_EQUALS,
+        FilterOperator.IN,
+        FilterOperator.NOT_IN,
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+    FieldType.JSONB: [
+        FilterOperator.IS_NULL,
+        FilterOperator.IS_NOT_NULL,
+    ],
+}
 
 
 class QueryBuilderError(Exception):
@@ -509,3 +750,126 @@ class QueryBuilder:
         param_name = f"param_{self.param_counter}"
         self.params[param_name] = value
         return param_name
+
+
+# ============================================
+# Field Metadata Service Functions
+# ============================================
+
+
+def get_operators_for_field_type(field_type: FieldType) -> list[FilterOperator]:
+    """Get available filter operators for a given field type.
+
+    Args:
+        field_type: The field data type
+
+    Returns:
+        List of available filter operators for this field type
+
+    Example:
+        >>> operators = get_operators_for_field_type(FieldType.STRING)
+        >>> FilterOperator.CONTAINS in operators
+        True
+    """
+    return OPERATORS_BY_TYPE.get(field_type, [])
+
+
+def get_available_fields(table: str) -> list[FieldMetadata]:
+    """Get metadata for all available fields in a table.
+
+    Args:
+        table: Table name (e.g., 'devices', 'subscriptions')
+
+    Returns:
+        List of FieldMetadata objects for all fields in the table
+
+    Raises:
+        QueryBuilderError: If the table name is invalid
+
+    Example:
+        >>> fields = get_available_fields('devices')
+        >>> len(fields) > 0
+        True
+        >>> fields[0].field_name in ALLOWED_FIELDS['devices']
+        True
+    """
+    if table not in ALLOWED_TABLES:
+        raise QueryBuilderError(f"Invalid table: {table}. Must be one of: {ALLOWED_TABLES}")
+
+    fields = []
+    for field_name in ALLOWED_FIELDS[table]:
+        field_type = FIELD_TYPES[table].get(field_name, FieldType.STRING)
+        display_name = FIELD_DISPLAY_NAMES[table].get(field_name, field_name.replace("_", " ").title())
+        operators = get_operators_for_field_type(field_type)
+
+        # Determine if field is groupable (generally not for JSONB or large text fields)
+        is_groupable = field_type not in [FieldType.JSONB]
+
+        # Determine if field is sortable (all fields are sortable in SQL)
+        is_sortable = True
+
+        # All fields are filterable
+        is_filterable = True
+
+        field_metadata = FieldMetadata(
+            field_name=field_name,
+            display_name=display_name,
+            data_type=field_type,
+            table=table,
+            description=None,  # Could be enhanced with field descriptions
+            is_filterable=is_filterable,
+            is_groupable=is_groupable,
+            is_sortable=is_sortable,
+            available_operators=operators,
+        )
+        fields.append(field_metadata)
+
+    logger.debug(f"Retrieved {len(fields)} field metadata for table '{table}'")
+    return fields
+
+
+def get_available_tables() -> list[TableMetadata]:
+    """Get metadata for all available tables.
+
+    Returns:
+        List of TableMetadata objects for all available tables
+
+    Example:
+        >>> tables = get_available_tables()
+        >>> len(tables) > 0
+        True
+        >>> any(t.table_name == 'devices' for t in tables)
+        True
+    """
+    tables = []
+
+    # Define display names and descriptions for tables
+    table_info = {
+        "devices": {
+            "display_name": "Devices",
+            "description": "Device inventory from HPE GreenLake",
+        },
+        "subscriptions": {
+            "display_name": "Subscriptions",
+            "description": "Subscription inventory from HPE GreenLake",
+        },
+    }
+
+    for table_name in ALLOWED_TABLES:
+        info = table_info.get(table_name, {})
+        display_name = info.get("display_name", table_name.title())
+        description = info.get("description")
+
+        # Get all fields for this table
+        fields = get_available_fields(table_name)
+
+        table_metadata = TableMetadata(
+            table_name=table_name,
+            display_name=display_name,
+            description=description,
+            fields=fields,
+        )
+        tables.append(table_metadata)
+
+    logger.debug(f"Retrieved metadata for {len(tables)} tables")
+    return tables
