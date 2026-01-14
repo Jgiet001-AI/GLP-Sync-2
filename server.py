@@ -30,6 +30,47 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # =============================================================================
+# Assignment Module Dependencies (optional - for write tools)
+# =============================================================================
+
+# Try to import assignment module dependencies for write operations
+try:
+    from src.glp.assignment.adapters import (
+        GLPDeviceManagerAdapter,
+        DeviceSyncerAdapter,
+        PostgresDeviceRepository,
+        PostgresSubscriptionRepository,
+    )
+    from src.glp.assignment.domain.entities import DeviceAssignment, WorkflowAction
+    from src.glp.assignment.use_cases.apply_assignments import ApplyAssignmentsUseCase
+    from src.glp.assignment.use_cases.device_actions import DeviceActionsUseCase
+    from src.glp.api.auth import TokenManager
+    from src.glp.api.client import GLPClient
+    from src.glp.api.device_manager import DeviceManager
+    from src.glp.api.devices import DeviceSyncer
+    from src.glp.api.subscriptions import SubscriptionSyncer
+
+    ASSIGNMENT_MODULE_AVAILABLE = True
+    logger.info("Assignment module dependencies loaded successfully")
+except ImportError as e:
+    ASSIGNMENT_MODULE_AVAILABLE = False
+    logger.warning(f"Assignment module not available (write tools will not work): {e}")
+    # Define placeholders to avoid NameError
+    GLPDeviceManagerAdapter = None
+    DeviceSyncerAdapter = None
+    PostgresDeviceRepository = None
+    PostgresSubscriptionRepository = None
+    DeviceAssignment = None
+    WorkflowAction = None
+    ApplyAssignmentsUseCase = None
+    DeviceActionsUseCase = None
+    TokenManager = None
+    GLPClient = None
+    DeviceManager = None
+    DeviceSyncer = None
+    SubscriptionSyncer = None
+
+# =============================================================================
 # Database Connection Pool (Lifespan)
 # =============================================================================
 
@@ -65,24 +106,21 @@ async def lifespan(server: FastMCP):
     )
     _DB_POOL = pool  # Store globally for REST API access
 
-    # Initialize GLP client for write operations
-    try:
-        from src.glp.api.auth import TokenManager
-        from src.glp.api.client import GLPClient
-        from src.glp.api.device_manager import DeviceManager
-        from src.glp.api.devices import DeviceSyncer
-        from src.glp.api.subscriptions import SubscriptionSyncer
+    # Initialize GLP client for write operations (if assignment module is available)
+    if ASSIGNMENT_MODULE_AVAILABLE:
+        try:
+            _TOKEN_MANAGER = TokenManager()
+            _GLP_CLIENT = GLPClient(_TOKEN_MANAGER)
+            await _GLP_CLIENT.__aenter__()
+            _DEVICE_MANAGER = DeviceManager(_GLP_CLIENT)
+            _DEVICE_SYNCER = DeviceSyncer(_GLP_CLIENT, pool)
+            _SUBSCRIPTION_SYNCER = SubscriptionSyncer(_GLP_CLIENT, pool)
 
-        _TOKEN_MANAGER = TokenManager()
-        _GLP_CLIENT = GLPClient(_TOKEN_MANAGER)
-        await _GLP_CLIENT.__aenter__()
-        _DEVICE_MANAGER = DeviceManager(_GLP_CLIENT)
-        _DEVICE_SYNCER = DeviceSyncer(_GLP_CLIENT, pool)
-        _SUBSCRIPTION_SYNCER = SubscriptionSyncer(_GLP_CLIENT, pool)
-
-        logger.info("GLP client initialized successfully")
-    except Exception as e:
-        logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
+            logger.info("GLP client initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
+    else:
+        logger.warning("Assignment module not available - write tools disabled")
 
     try:
         yield {"db_pool": pool}
@@ -2017,15 +2055,6 @@ async def apply_device_assignments(
         }
 
     try:
-        # Import required classes
-        from src.glp.assignment.adapters import (
-            GLPDeviceManagerAdapter,
-            PostgresDeviceRepository,
-            DeviceSyncerAdapter,
-        )
-        from src.glp.assignment.domain.entities import DeviceAssignment
-        from src.glp.assignment.use_cases.apply_assignments import ApplyAssignmentsUseCase
-
         # Convert input dictionaries to DeviceAssignment entities
         device_assignments = []
         for a in assignments:
@@ -2346,14 +2375,6 @@ async def archive_devices(
         }
 
     try:
-        # Import required classes
-        from src.glp.assignment.adapters import (
-            GLPDeviceManagerAdapter,
-            DeviceSyncerAdapter,
-        )
-        from src.glp.assignment.domain.entities import DeviceAssignment, WorkflowAction
-        from src.glp.assignment.use_cases.device_actions import DeviceActionsUseCase
-
         # Convert device_ids to DeviceAssignment entities
         device_assignments = []
         for i, device_id_str in enumerate(device_ids):
@@ -2498,14 +2519,6 @@ async def unarchive_devices(
         }
 
     try:
-        # Import required classes
-        from src.glp.assignment.adapters import (
-            GLPDeviceManagerAdapter,
-            DeviceSyncerAdapter,
-        )
-        from src.glp.assignment.domain.entities import DeviceAssignment, WorkflowAction
-        from src.glp.assignment.use_cases.device_actions import DeviceActionsUseCase
-
         # Convert device_ids to DeviceAssignment entities
         device_assignments = []
         for i, device_id_str in enumerate(device_ids):
