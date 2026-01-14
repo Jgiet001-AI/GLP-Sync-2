@@ -38,7 +38,7 @@ server {
 
     # HSTS: Enforce HTTPS (1 year, include subdomains)
     # Note: Only enable this if you have HTTPS configured
-    # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
 
     # Permissions Policy: Restrict browser features
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
