@@ -74,6 +74,15 @@ A comprehensive platform for syncing device and subscription inventory from HPE 
   - [Security Best Practices Summary](#security-best-practices-summary)
   - [Additional Resources](#additional-resources)
 - [FAQ](#faq)
+- [Roadmap](#roadmap)
+  - [Near Term](#-near-term-q1-q2-2026)
+  - [Mid Term](#-mid-term-q3-q4-2026)
+  - [Long Term](#-long-term-2027)
+  - [Performance & Scalability](#-performance--scalability)
+  - [Developer Experience](#-developer-experience)
+  - [Community Requests](#-community-requests)
+  - [Contributing to the Roadmap](#-contributing-to-the-roadmap)
+  - [Release Schedule](#-release-schedule)
 - [License](#license)
 
 ## Features
@@ -2565,6 +2574,135 @@ For enterprise support, custom development, or consulting:
 - Or email directly (see repository maintainer profile)
 
 **We're here to help!** Don't hesitate to ask questions or report issues. Every issue report helps improve the project for everyone.
+
+## Roadmap
+
+We're actively developing new features and improvements to make HPE GreenLake Device & Subscription Sync more powerful and user-friendly. Here's what's planned for future releases:
+
+### 🎯 Near Term (Q1-Q2 2026)
+
+#### Enhanced Dashboard Experience
+- **Interactive Charts** - Click-through navigation from all dashboard elements to filtered views
+- **Advanced Command Palette** - Universal search across devices, subscriptions, and Aruba Central clients with keyboard shortcuts
+- **Real-Time Updates** - WebSocket-based live data refresh with visual indicators for data freshness
+- **Customizable Widgets** - Drag-and-drop dashboard layout with collapsible sections and saved preferences
+
+#### Smart Filtering & Search
+- **Faceted Filters** - Multi-select filters with result counts and filter chips for quick clearing
+- **Search History** - Persistent search history with recent items carousel and quick actions
+- **Advanced Query Builder** - Visual query builder for complex AND/OR/NOT filter combinations
+- **View Presets** - Save and share filter configurations as named presets ("Expiring Soon", "Unassigned APs", etc.)
+
+#### Device Assignment Enhancements
+- **Bulk Operations** - Assign subscriptions, regions, and tags to hundreds of devices simultaneously
+- **Assignment Validation** - Pre-flight checks for compatibility and quota availability
+- **Progress Tracking** - Real-time SSE streaming for long-running operations with detailed status updates
+- **Rollback Support** - Undo recent assignment changes with one-click rollback
+
+### 🚀 Mid Term (Q3-Q4 2026)
+
+#### Multi-Tenant Architecture
+- **Tenant Isolation** - Row-level security in PostgreSQL for secure multi-tenant deployments
+- **Per-Tenant Credentials** - Separate GreenLake API credentials and settings per tenant
+- **Tenant Dashboard** - Admin panel for managing multiple tenants and viewing aggregate statistics
+- **Usage Metering** - Track sync operations, API calls, and storage per tenant
+
+#### Advanced Analytics
+- **Subscription Forecasting** - Predict subscription renewal dates and capacity requirements using ML
+- **Cost Optimization** - Identify underutilized subscriptions and recommend consolidation opportunities
+- **Trend Analysis** - Historical charts showing device growth, subscription utilization, and regional distribution
+- **Anomaly Detection** - Alert on unusual patterns (e.g., spike in expiring subscriptions, unexpected device additions)
+
+#### Enhanced AI Chatbot
+- **Proactive Insights** - AI-generated summaries of key changes ("10 subscriptions expiring in 7 days")
+- **Natural Language Queries** - Ask complex questions in plain English ("Show me all APs in US-West with expiring subscriptions")
+- **Automated Reports** - Schedule AI-generated reports delivered via email or Slack
+- **Multi-Turn Conversations** - Context-aware follow-up questions with conversation branching
+
+#### Integration Ecosystem
+- **ServiceNow Integration** - Sync device inventory to CMDB with bidirectional updates
+- **Slack/Teams Notifications** - Real-time alerts for expiring subscriptions and sync failures
+- **Webhook Support** - Trigger external workflows on device/subscription changes
+- **REST API Expansion** - Public API for third-party integrations with OpenAPI 3.1 spec
+
+### 🔮 Long Term (2027+)
+
+#### Intelligent Automation
+- **Auto-Assignment Rules** - Define policies to automatically assign devices to subscriptions based on type, region, or tags
+- **Self-Healing Sync** - Automatically retry failed syncs with exponential backoff and circuit breaker recovery
+- **Capacity Planning** - Recommend subscription purchases based on forecasted device growth
+- **License Optimization** - Suggest subscription tier changes to match actual usage patterns
+
+#### Advanced Visualization
+- **Interactive Network Topology** - Visual map of devices, subscriptions, and their relationships
+- **Geolocation Mapping** - Plot devices on world map based on region/site data
+- **Timeline View** - Visualize device lifecycle events and subscription validity periods
+- **Custom Dashboards** - Build personalized dashboards with drag-and-drop widgets and custom metrics
+
+#### Enterprise Features
+- **RBAC (Role-Based Access Control)** - Fine-grained permissions for read/write access to devices and subscriptions
+- **Audit Logging** - Comprehensive audit trail for all changes with compliance reporting
+- **SSO Integration** - OAuth2/SAML support for Okta, Azure AD, Google Workspace
+- **High Availability** - Multi-region deployment with automatic failover and data replication
+- **Disaster Recovery** - Automated backups with point-in-time recovery and geo-redundant storage
+
+#### Platform Extensions
+- **HPE Compute Ops Management** - Sync compute server inventory from COM API
+- **HPE Alletra Storage** - Track storage arrays and capacity utilization
+- **Aruba EdgeConnect SD-WAN** - Integrate WAN edge devices and policies
+- **Custom Connectors** - Plugin architecture for integrating arbitrary data sources
+
+### 📊 Performance & Scalability
+
+#### Optimization Roadmap
+- **Incremental Sync** - Delta sync to only fetch changed devices/subscriptions (reduce sync time by 90%)
+- **Database Partitioning** - Table partitioning for 100k+ devices with improved query performance
+- **Redis Caching** - Cache frequently accessed data with automatic invalidation
+- **Read Replicas** - PostgreSQL read replicas for scaling dashboard queries
+- **CDN Integration** - Serve frontend assets via CDN for global low-latency access
+
+### 🧪 Developer Experience
+
+#### Tooling & Testing
+- **GraphQL API** - Alternative to REST with type-safe queries and schema introspection
+- **OpenAPI SDK Generation** - Auto-generated client libraries for Python, TypeScript, Go
+- **Local Development Mode** - Mock GreenLake API for offline development and testing
+- **Helm Charts** - Production-ready Kubernetes deployment with GitOps support
+- **Terraform Modules** - Infrastructure as Code for cloud deployments (AWS, Azure, GCP)
+
+### 💡 Community Requests
+
+We prioritize features based on community feedback. Vote for features or suggest new ones via [GitHub Discussions](https://github.com/Jgiet001-AI/GLP-Sync-2/discussions).
+
+**Most Requested:**
+- **Mobile App** - iOS/Android app for on-the-go device management
+- **Export to Excel** - Export filtered device/subscription lists to Excel with custom columns
+- **Email Reports** - Scheduled email reports with PDF attachments
+- **Dark Mode** - Full dark theme support across dashboard and chat
+- **Bulk Import** - Upload CSV to create/update devices in bulk
+
+### 🤝 Contributing to the Roadmap
+
+Have an idea for a feature? We'd love to hear it!
+
+1. **Check existing issues** - See if it's already planned: [GitHub Issues](https://github.com/Jgiet001-AI/GLP-Sync-2/issues)
+2. **Open a feature request** - Use the feature request template
+3. **Join the discussion** - Comment on roadmap items to show support
+4. **Contribute code** - See [Contributing](#contributing) section for guidelines
+
+### 📅 Release Schedule
+
+- **Patch releases** (bug fixes, security updates) - Monthly
+- **Minor releases** (new features) - Quarterly
+- **Major releases** (breaking changes, architecture updates) - Annually
+
+**Latest release:** v0.2.0 ([Changelog](https://github.com/Jgiet001-AI/GLP-Sync-2/releases))
+
+**Next planned release:** v0.3.0 (March 2026) - Enhanced Dashboard Experience
+
+---
+
+*Roadmap items are subject to change based on community feedback, technical feasibility, and business priorities. Dates are estimates and not commitments.*
 
 ## License
 
