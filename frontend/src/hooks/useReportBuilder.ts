@@ -12,10 +12,7 @@ import type {
   UpdateReportRequest,
   CustomReportResponse,
   ExecuteReportResponse,
-  FieldsResponse,
   AggregationFunction,
-  FilterOperator,
-  LogicOperator,
   SortDirection,
 } from '../types'
 import { ApiError } from '../types'
@@ -164,25 +161,9 @@ export function useReportBuilder() {
   )
 
   // Filter actions
-  const addFilter = useCallback(
-    (
-      field: string,
-      operator: FilterOperator,
-      value: any,
-      table?: string | null,
-      logic?: LogicOperator
-    ) => {
-      const newFilter: FilterConfig = {
-        field,
-        table: table || null,
-        operator,
-        value,
-        logic: logic || 'AND',
-      }
-      setFilters((prev) => [...prev, newFilter])
-    },
-    []
-  )
+  const addFilter = useCallback((filter: FilterConfig) => {
+    setFilters((prev) => [...prev, filter])
+  }, [])
 
   const removeFilter = useCallback((index: number) => {
     setFilters((prev) => prev.filter((_, i) => i !== index))
@@ -281,7 +262,7 @@ export function useReportBuilder() {
           id: currentReport.id,
           request: {
             name,
-            description,
+            description: description ?? null,
             config,
             is_shared: isShared,
             shared_with: sharedWith,
@@ -291,7 +272,7 @@ export function useReportBuilder() {
         // Create new report
         createMutation.mutate({
           name,
-          description,
+          description: description ?? null,
           config,
           is_shared: isShared,
           shared_with: sharedWith,

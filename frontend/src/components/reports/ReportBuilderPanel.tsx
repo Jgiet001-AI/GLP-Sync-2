@@ -6,7 +6,7 @@ import { FieldSelector } from './FieldSelector'
 import { FilterBuilder } from './FilterBuilder'
 import { GroupingPanel } from './GroupingPanel'
 import { ReportPreview } from './ReportPreview'
-import type { FieldMetadata, TableMetadata } from '../../types'
+import type { FieldMetadata } from '../../types'
 
 interface ReportBuilderPanelProps {
   className?: string
@@ -29,7 +29,6 @@ export function ReportBuilderPanel({ className = '' }: ReportBuilderPanelProps) 
     // Field actions
     addField,
     removeField,
-    updateField,
 
     // Filter actions
     addFilter,
@@ -139,19 +138,8 @@ export function ReportBuilderPanel({ className = '' }: ReportBuilderPanelProps) 
     }
   }
 
-  // Adapt TableMetadata for GroupingPanel (fix field names)
-  const adaptedTables: Array<{
-    name: string
-    display_name: string
-    fields: Array<{ name: string; display_name: string }>
-  }> = availableFields?.tables.map((table) => ({
-    name: table.table_name,
-    display_name: table.display_name,
-    fields: table.fields.map((field) => ({
-      name: field.field_name,
-      display_name: field.display_name,
-    })),
-  })) || []
+  // No adapter needed - GroupingPanel now uses correct TableMetadata properties
+  const availableTables = availableFields?.tables || []
 
   if (isLoadingFields) {
     return (
@@ -337,7 +325,7 @@ export function ReportBuilderPanel({ className = '' }: ReportBuilderPanelProps) 
 
           {/* Grouping and Sorting */}
           <GroupingPanel
-            tables={adaptedTables}
+            tables={availableTables}
             grouping={grouping}
             sorting={sorting}
             onAddGrouping={addGrouping}

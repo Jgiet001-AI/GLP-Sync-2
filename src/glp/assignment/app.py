@@ -7,13 +7,11 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from .api.clients_router import router as clients_router
 from .api.dashboard_router import router as dashboard_router
-from .api.health_router import router as health_router
 from .api.dependencies import (
     close_db_pool,
     close_glp_client,
@@ -22,12 +20,8 @@ from .api.dependencies import (
 )
 from .api.router import router
 
-# Import error sanitizer for exception handling
-from ..api.error_sanitizer import sanitize_error_message
-
 # Import reports router
 from ..reports.api import router as reports_router
-from ..reports.custom_reports_api import router as custom_reports_router
 
 # Import agent router and components (optional - only if agent module exists)
 try:
@@ -35,8 +29,8 @@ try:
         AgentConfig,
         AgentOrchestrator,
         AnthropicProvider,
-        OllamaProvider,
         OpenAIProvider,
+        VoyageAIProvider,
         ToolRegistry,
     )
     from ..agent.api import create_agent_dependencies
@@ -58,6 +52,7 @@ except ImportError:
     MCPClientConfig = None
     init_background_worker = None
     shutdown_background_worker = None
+    VoyageAIProvider = None
 
 # Redis client (for WebSocket ticket auth)
 _redis_client = None
@@ -83,14 +78,12 @@ def _init_agent_orchestrator(redis_client=None) -> None:
         logger.info("Agent module not available, skipping orchestrator init")
         return
 
-    # Check for API keys and Ollama config
+    # Check for API keys
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
-    ollama_model = os.getenv("OLLAMA_MODEL")
-    ollama_base_url = os.getenv("OLLAMA_BASE_URL")
 
-    if not anthropic_key and not openai_key and not ollama_model:
-        logger.warning("No LLM API keys configured (ANTHROPIC_API_KEY or OPENAI_API_KEY) and no OLLAMA_MODEL set")
+    if not anthropic_key and not openai_key:
+        logger.warning("No LLM API keys configured (ANTHROPIC_API_KEY or OPENAI_API_KEY)")
         return
 
     llm_provider = None
@@ -119,26 +112,46 @@ def _init_agent_orchestrator(redis_client=None) -> None:
         except Exception as e:
             logger.warning(f"Failed to initialize OpenAI provider: {e}")
 
-    # Fall back to Ollama if Anthropic and OpenAI failed
-    if not llm_provider and ollama_model:
-        try:
-            config = LLMProviderConfig(
-                api_key="not-needed",  # Ollama doesn't require API key
-                model=ollama_model,
-                base_url=ollama_base_url or "http://localhost:11434",
-            )
-            llm_provider = OllamaProvider(config)
-            logger.info(f"Using Ollama provider with model: {config.model}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Ollama provider: {e}")
-
     if not llm_provider:
         logger.warning("No LLM provider could be initialized - chatbot will be unavailable")
         return
 
-    # Create OpenAI embedding provider (needed for semantic memory even with Anthropic chat)
+    # Create embedding provider with fallback logic
     embedding_provider = None
-    if openai_key:
+    embedding_provider_name = os.getenv("EMBEDDING_PROVIDER", "openai").lower()
+
+    # Validate embedding provider configuration
+    valid_providers = ["openai", "voyageai", "voyage"]
+    if embedding_provider_name not in valid_providers:
+        logger.warning(
+            f"Invalid EMBEDDING_PROVIDER '{embedding_provider_name}'. "
+            f"Valid options are: {', '.join(valid_providers)}. "
+            "Falling back to OpenAI embeddings."
+        )
+        embedding_provider_name = "openai"
+
+    # Try primary provider based on EMBEDDING_PROVIDER env var
+    if embedding_provider_name == "voyageai" or embedding_provider_name == "voyage":
+        voyage_key = os.getenv("VOYAGE_API_KEY")
+        if voyage_key and VoyageAIProvider:
+            try:
+                embedding_config = LLMProviderConfig(
+                    api_key=voyage_key,
+                    model="voyage-2",  # Not used, but required by base
+                    embedding_model=os.getenv("VOYAGE_EMBEDDING_MODEL", "voyage-2"),
+                )
+                embedding_provider = VoyageAIProvider(embedding_config)
+                logger.info(f"Using Voyage AI embedding provider: {embedding_config.embedding_model}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Voyage AI embedding provider: {e}")
+                logger.info("Falling back to OpenAI embeddings...")
+        elif not voyage_key:
+            logger.warning("VOYAGE_API_KEY not configured, falling back to OpenAI")
+        elif not VoyageAIProvider:
+            logger.warning("VoyageAIProvider not available, falling back to OpenAI")
+
+    # Fallback to OpenAI if primary provider failed or if OpenAI was specified
+    if not embedding_provider and openai_key:
         try:
             embedding_config = LLMProviderConfig(
                 api_key=openai_key,
@@ -146,9 +159,12 @@ def _init_agent_orchestrator(redis_client=None) -> None:
                 embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
             )
             embedding_provider = OpenAIProvider(embedding_config)
-            logger.info(f"Embedding provider configured: {embedding_config.embedding_model}")
+            logger.info(f"Using OpenAI embedding provider: {embedding_config.embedding_model}")
         except Exception as e:
-            logger.warning(f"Failed to initialize embedding provider: {e}")
+            logger.warning(f"Failed to initialize OpenAI embedding provider: {e}")
+
+    if not embedding_provider:
+        logger.warning("No embedding provider could be initialized - semantic memory will be unavailable")
 
     try:
         # Create MCP client for read-only database operations
@@ -272,49 +288,6 @@ async def lifespan(app: FastAPI):
     logger.info("Database pool closed")
 
 
-# Exception handlers for automatic error sanitization
-async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
-    """Handle HTTPException with sanitized error messages.
-
-    Sanitizes the detail field to remove sensitive information before
-    returning to the client. Original error is logged internally.
-    """
-    # Log original error internally
-    logger.warning(f"HTTPException: {exc.status_code} - {exc.detail}")
-
-    # Sanitize error message
-    sanitized_detail = sanitize_error_message(str(exc.detail), error_type=None)
-
-    # Return sanitized response
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": sanitized_detail},
-        headers=getattr(exc, "headers", None),
-    )
-
-
-async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Handle generic exceptions with sanitized error messages.
-
-    Catches all unhandled exceptions, sanitizes them, and returns
-    500 Internal Server Error. Original exception is logged internally.
-    """
-    # Log original error internally with full traceback
-    logger.exception(f"Unhandled exception: {exc}")
-
-    # Sanitize error message
-    sanitized_message = sanitize_error_message(
-        str(exc),
-        error_type="Internal Server Error"
-    )
-
-    # Return sanitized response
-    return JSONResponse(
-        status_code=500,
-        content={"detail": sanitized_message},
-    )
-
-
 # Create FastAPI application
 app = FastAPI(
     title="HPE GreenLake Device Assignment API",
@@ -340,10 +313,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Register exception handlers for automatic error sanitization
-app.add_exception_handler(HTTPException, http_exception_handler)
-app.add_exception_handler(Exception, generic_exception_handler)
-
 # Configure CORS
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
 
@@ -351,17 +320,15 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "Accept"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Include routers
 app.include_router(router)
 app.include_router(dashboard_router)
 app.include_router(clients_router)
-app.include_router(health_router)
 app.include_router(reports_router)
-app.include_router(custom_reports_router)
 
 # Include agent router if available
 if AGENT_AVAILABLE and agent_router:
@@ -407,5 +374,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
         reload=True,
-        ws_max_size=int(os.getenv("WS_MAX_MESSAGE_SIZE_MB", "1")) * 1024 * 1024,
     )

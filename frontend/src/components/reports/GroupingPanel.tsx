@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Layers, SortAsc, Plus, X, ArrowUp, ArrowDown } from 'lucide-react'
 import clsx from 'clsx'
-import type { GroupingConfig, SortingConfig, SortDirection, TableMetadata, FieldMetadata } from '../../types'
+import type { GroupingConfig, SortingConfig, SortDirection, TableMetadata } from '../../types'
 
 interface GroupingPanelProps {
   tables: TableMetadata[]
@@ -30,16 +30,6 @@ export function GroupingPanel({
   const [selectedSortField, setSelectedSortField] = useState('')
   const [selectedSortDirection, setSelectedSortDirection] = useState<SortDirection>('ASC')
 
-  // Build a flat list of all available fields for selection
-  const allFields = tables.flatMap((table) =>
-    table.fields.map((field) => ({
-      table: table.name,
-      field: field.name,
-      displayName: field.display_name,
-      type: field.type,
-    }))
-  )
-
   const handleAddGrouping = () => {
     if (selectedGroupField) {
       const [table, field] = selectedGroupField.split('.')
@@ -64,10 +54,10 @@ export function GroupingPanel({
 
   // Get display name for a field
   const getFieldDisplayName = (table: string | null, field: string): string => {
-    const tableObj = tables.find((t) => t.name === table)
+    const tableObj = tables.find((t) => t.table_name === table)
     if (!tableObj) return field
 
-    const fieldObj = tableObj.fields.find((f) => f.name === field)
+    const fieldObj = tableObj.fields.find((f) => f.field_name === field)
     return fieldObj?.display_name || field
   }
 
@@ -144,11 +134,11 @@ export function GroupingPanel({
           >
             <option value="">Select a field to group by...</option>
             {tables.map((table) => (
-              <optgroup key={table.name} label={table.display_name}>
+              <optgroup key={table.table_name} label={table.display_name}>
                 {table.fields.map((field) => (
                   <option
-                    key={`${table.name}.${field.name}`}
-                    value={`${table.name}.${field.name}`}
+                    key={`${table.table_name}.${field.field_name}`}
+                    value={`${table.table_name}.${field.field_name}`}
                   >
                     {field.display_name}
                   </option>
@@ -243,11 +233,11 @@ export function GroupingPanel({
           >
             <option value="">Select a field to sort by...</option>
             {tables.map((table) => (
-              <optgroup key={table.name} label={table.display_name}>
+              <optgroup key={table.table_name} label={table.display_name}>
                 {table.fields.map((field) => (
                   <option
-                    key={`${table.name}.${field.name}`}
-                    value={`${table.name}.${field.name}`}
+                    key={`${table.table_name}.${field.field_name}`}
+                    value={`${table.table_name}.${field.field_name}`}
                   >
                     {field.display_name}
                   </option>

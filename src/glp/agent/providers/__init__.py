@@ -3,7 +3,7 @@
 from .base import BaseLLMProvider, LLMProviderError, LLMProviderConfig
 from .anthropic import AnthropicProvider
 from .openai import OpenAIProvider
-from .ollama import OllamaProvider
+from .voyageai import VoyageAIProvider
 
 __all__ = [
     "BaseLLMProvider",
@@ -11,5 +11,5 @@ __all__ = [
     "LLMProviderConfig",
     "AnthropicProvider",
     "OpenAIProvider",
-    "OllamaProvider",
+    "VoyageAIProvider",
 ]
