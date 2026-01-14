@@ -741,6 +741,27 @@ class WriteExecutor(IToolExecutor):
                 is_read_only=False,
                 requires_confirmation=True,
             ),
+            ToolDefinition(
+                name="bulk_update_device_tags",
+                description="Add, update, or remove tags on multiple devices. Automatically batches large device lists into groups of 25. Set tag value to null to remove. Confirmation required for >5 devices.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "device_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of device UUIDs to update (max 100 devices, automatically batched)",
+                        },
+                        "tags": {
+                            "type": "object",
+                            "description": "Tags to add/update as key-value pairs. Set value to null to remove a tag. Example: {'environment': 'production', 'old_tag': null}",
+                        },
+                    },
+                    "required": ["device_ids", "tags"],
+                },
+                is_read_only=False,
+                requires_confirmation=False,
+            ),
         ]
 
     def _assess_risk(
@@ -1084,6 +1105,7 @@ class WriteExecutor(IToolExecutor):
         tool_to_operation = {
             "add_device": WriteOperationType.ADD_DEVICE,
             "update_device_tags": WriteOperationType.UPDATE_TAGS,
+            "bulk_update_device_tags": WriteOperationType.BULK_UPDATE_TAGS,
             "assign_application": WriteOperationType.ASSIGN_APPLICATION,
             "unassign_application": WriteOperationType.UNASSIGN_APPLICATION,
             "archive_devices": WriteOperationType.ARCHIVE_DEVICES,
