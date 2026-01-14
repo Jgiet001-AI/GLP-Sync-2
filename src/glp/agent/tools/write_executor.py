@@ -46,6 +46,7 @@ class WriteOperationType(str, Enum):
 
     ADD_DEVICE = "add_device"
     UPDATE_TAGS = "update_tags"
+    BULK_UPDATE_TAGS = "bulk_update_tags"
     ASSIGN_APPLICATION = "assign_application"
     UNASSIGN_APPLICATION = "unassign_application"
     ARCHIVE_DEVICES = "archive_devices"
@@ -112,6 +113,14 @@ class IDeviceManager(Protocol):
     ) -> Any: ...
 
     async def update_tags(
+        self,
+        device_ids: list[str],
+        tags: dict[str, Optional[str]],
+        *,
+        dry_run: bool = False,
+    ) -> Any: ...
+
+    async def update_tags_batch(
         self,
         device_ids: list[str],
         tags: dict[str, Optional[str]],
@@ -417,6 +426,7 @@ class WriteExecutor(IToolExecutor):
     RISK_THRESHOLDS = {
         WriteOperationType.ADD_DEVICE: RiskLevel.LOW,
         WriteOperationType.UPDATE_TAGS: RiskLevel.LOW,
+        WriteOperationType.BULK_UPDATE_TAGS: RiskLevel.MEDIUM,
         WriteOperationType.ASSIGN_APPLICATION: RiskLevel.MEDIUM,
         WriteOperationType.UNASSIGN_APPLICATION: RiskLevel.MEDIUM,
         WriteOperationType.ARCHIVE_DEVICES: RiskLevel.HIGH,
@@ -731,6 +741,27 @@ class WriteExecutor(IToolExecutor):
                 is_read_only=False,
                 requires_confirmation=True,
             ),
+            ToolDefinition(
+                name="bulk_update_device_tags",
+                description="Add, update, or remove tags on multiple devices. Automatically batches large device lists into groups of 25. Set tag value to null to remove. Confirmation required for >5 devices.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "device_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of device UUIDs to update (max 100 devices, automatically batched)",
+                        },
+                        "tags": {
+                            "type": "object",
+                            "description": "Tags to add/update as key-value pairs. Set value to null to remove a tag. Example: {'environment': 'production', 'old_tag': null}",
+                        },
+                    },
+                    "required": ["device_ids", "tags"],
+                },
+                is_read_only=False,
+                requires_confirmation=False,
+            ),
         ]
 
     def _assess_risk(
@@ -782,6 +813,27 @@ class WriteExecutor(IToolExecutor):
         """
         device_count = len(arguments.get("device_ids", []))
 
+        # Build tag change summary for BULK_UPDATE_TAGS
+        tag_summary = ""
+        if operation_type == WriteOperationType.BULK_UPDATE_TAGS:
+            tags = arguments.get("tags", {})
+            additions = []
+            removals = []
+
+            for key, value in tags.items():
+                if value is None:
+                    removals.append(key)
+                else:
+                    additions.append(f"{key}={value}")
+
+            parts = []
+            if additions:
+                parts.append(f"add/update: {', '.join(additions)}")
+            if removals:
+                parts.append(f"remove: {', '.join(removals)}")
+
+            tag_summary = f" ({'; '.join(parts)})" if parts else ""
+
         messages = {
             WriteOperationType.ARCHIVE_DEVICES: (
                 f"Are you sure you want to archive {device_count} device(s)? "
@@ -800,6 +852,9 @@ class WriteExecutor(IToolExecutor):
             ),
             WriteOperationType.ASSIGN_SUBSCRIPTION: (
                 f"Assign subscription to {device_count} device(s)?"
+            ),
+            WriteOperationType.BULK_UPDATE_TAGS: (
+                f"Update tags on {device_count} device(s){tag_summary}?"
             ),
         }
 
@@ -986,6 +1041,12 @@ class WriteExecutor(IToolExecutor):
                 tags=args["tags"],
             )
 
+        elif op_type == WriteOperationType.BULK_UPDATE_TAGS:
+            return await self.device_manager.update_tags_batch(
+                device_ids=args["device_ids"],
+                tags=args["tags"],
+            )
+
         elif op_type == WriteOperationType.ASSIGN_APPLICATION:
             return await self.device_manager.assign_application(
                 device_ids=args["device_ids"],
@@ -1044,6 +1105,7 @@ class WriteExecutor(IToolExecutor):
         tool_to_operation = {
             "add_device": WriteOperationType.ADD_DEVICE,
             "update_device_tags": WriteOperationType.UPDATE_TAGS,
+            "bulk_update_device_tags": WriteOperationType.BULK_UPDATE_TAGS,
             "assign_application": WriteOperationType.ASSIGN_APPLICATION,
             "unassign_application": WriteOperationType.UNASSIGN_APPLICATION,
             "archive_devices": WriteOperationType.ARCHIVE_DEVICES,
