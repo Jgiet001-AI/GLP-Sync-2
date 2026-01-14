@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Save, Play, Trash2, RotateCcw, FileText } from 'lucide-react'
 import clsx from 'clsx'
 import { useReportBuilder } from '../../hooks/useReportBuilder'
@@ -60,6 +60,12 @@ export function ReportBuilderPanel({ className = '' }: ReportBuilderPanelProps) 
   const [reportName, setReportName] = useState(currentReport?.name || '')
   const [reportDescription, setReportDescription] = useState(currentReport?.description || '')
   const [showSaveDialog, setShowSaveDialog] = useState(false)
+
+  // Reset form when currentReport changes (e.g., "+ New" button clicked)
+  useEffect(() => {
+    setReportName(currentReport?.name || '')
+    setReportDescription(currentReport?.description || '')
+  }, [currentReport])
 
   // Convert fields to "table.field" format for FieldSelector
   const selectedFieldKeys = fields.map((f) => `${f.table}.${f.field}`)

@@ -225,6 +225,7 @@ export function useReportBuilder() {
     setSorting([])
     setLimit(null)
     setPreviewData(null)
+    setCurrentReport(null)
   }, [])
 
   const getConfig = useCallback((): ReportConfig => {
