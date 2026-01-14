@@ -108,8 +108,8 @@ mcp = FastMCP(
     instructions=(
         "This server provides access to HPE GreenLake device and subscription inventory. "
         "Use the read-only tools to search devices, list subscriptions, and analyze inventory data. "
-        "Use the write tools (add_devices, apply_device_assignments, archive_devices) to add new devices, "
-        "assign subscriptions/applications/tags to devices, and archive devices. "
+        "Use the write tools (add_devices, apply_device_assignments, archive_devices, unarchive_devices) to add new devices, "
+        "assign subscriptions/applications/tags to devices, archive devices, and restore archived devices. "
         "Write operations require proper GreenLake API credentials."
     ),
     lifespan=lifespan,
@@ -127,7 +127,7 @@ async def health_check(request: Request) -> JSONResponse:
     return JSONResponse({
         "status": "healthy",
         "service": "greenlake-mcp",
-        "tools": 30,  # 27 read-only + 3 write (apply_device_assignments, add_devices, archive_devices)
+        "tools": 31,  # 27 read-only + 4 write (apply_device_assignments, add_devices, archive_devices, unarchive_devices)
     })
 
 
@@ -2429,6 +2429,158 @@ async def archive_devices(
             "success": False,
             "error": str(e),
             "action": "ARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+
+@mcp.tool(annotations={"readOnlyHint": False})
+async def unarchive_devices(
+    ctx: Context,
+    device_ids: list[str],
+    wait_for_completion: bool = True,
+    sync_after: bool = True,
+) -> dict[str, Any]:
+    """Unarchive devices in GreenLake Platform.
+
+    This tool unarchives (restores) devices in the GreenLake workspace.
+    Unarchived devices will be visible in normal views again.
+
+    Args:
+        ctx: FastMCP context
+        device_ids: List of device UUIDs to unarchive (as strings)
+        wait_for_completion: Whether to wait for async operations to complete
+        sync_after: Whether to sync the database after unarchiving
+
+    Returns:
+        Dictionary with operation results:
+            - success (bool): Overall success status
+            - action (str): The action performed (UNARCHIVE)
+            - devices_processed (int): Total number of devices processed
+            - devices_succeeded (int): Number of devices unarchived successfully
+            - devices_failed (int): Number of failed device unarchival
+            - total_duration_seconds (float): Total operation duration
+            - failed_device_ids (list[str]): List of failed device UUIDs
+            - failed_device_serials (list[str]): List of failed device serial numbers
+            - operations (list): List of operation results
+
+    Example:
+        ```python
+        result = await unarchive_devices(
+            ctx,
+            device_ids=[
+                "550e8400-e29b-41d4-a716-446655440000",
+                "660e8400-e29b-41d4-a716-446655440001"
+            ],
+            wait_for_completion=True,
+            sync_after=True
+        )
+        ```
+    """
+    # Check if GLP client is initialized
+    if _DEVICE_MANAGER is None:
+        return {
+            "success": False,
+            "error": "GLP client not initialized. Required environment variables may be missing.",
+            "action": "UNARCHIVE",
+            "devices_processed": len(device_ids),
+            "devices_succeeded": 0,
+            "devices_failed": len(device_ids),
+            "total_duration_seconds": 0.0,
+            "failed_device_ids": device_ids,
+            "failed_device_serials": [],
+            "operations": [],
+        }
+
+    try:
+        # Import required classes
+        from src.glp.assignment.adapters import (
+            GLPDeviceManagerAdapter,
+            DeviceSyncerAdapter,
+        )
+        from src.glp.assignment.domain.entities import DeviceAssignment, WorkflowAction
+        from src.glp.assignment.use_cases.device_actions import DeviceActionsUseCase
+
+        # Convert device_ids to DeviceAssignment entities
+        device_assignments = []
+        for i, device_id_str in enumerate(device_ids):
+            try:
+                device_id = UUID(device_id_str)
+                assignment = DeviceAssignment(
+                    serial_number=f"device_{i}",  # Placeholder, will be fetched
+                    device_id=device_id,
+                )
+                device_assignments.append(assignment)
+            except ValueError as e:
+                logger.error(f"Invalid UUID format: {device_id_str}: {e}")
+                return {
+                    "success": False,
+                    "error": f"Invalid UUID format: {device_id_str}",
+                    "action": "UNARCHIVE",
+                    "devices_processed": len(device_ids),
+                    "devices_succeeded": 0,
+                    "devices_failed": len(device_ids),
+                    "total_duration_seconds": 0.0,
+                    "failed_device_ids": device_ids,
+                    "failed_device_serials": [],
+                    "operations": [],
+                }
+
+        # Create adapters
+        device_manager = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+        sync_service = DeviceSyncerAdapter(
+            _DEVICE_SYNCER,
+            _SUBSCRIPTION_SYNCER,
+            db_pool=_DB_POOL,
+        ) if sync_after else None
+
+        # Execute the use case
+        use_case = DeviceActionsUseCase(
+            device_manager=device_manager,
+            sync_service=sync_service,
+        )
+
+        result = await use_case.execute(
+            action=WorkflowAction.UNARCHIVE,
+            devices=device_assignments,
+            wait_for_completion=wait_for_completion,
+            sync_after=sync_after,
+        )
+
+        # Convert result to dictionary
+        return {
+            "success": result.success,
+            "action": result.action.value,
+            "devices_processed": result.devices_processed,
+            "devices_succeeded": result.devices_succeeded,
+            "devices_failed": result.devices_failed,
+            "total_duration_seconds": result.total_duration_seconds,
+            "failed_device_ids": [str(d) for d in result.failed_device_ids],
+            "failed_device_serials": result.failed_device_serials,
+            "operations": [
+                {
+                    "success": op.success,
+                    "operation_type": op.operation_type,
+                    "device_ids": [str(d) for d in op.device_ids] if op.device_ids else [],
+                    "device_serials": op.device_serials or [],
+                    "error": op.error,
+                    "operation_url": op.operation_url,
+                }
+                for op in result.operations
+            ],
+        }
+
+    except Exception as e:
+        logger.exception("Error unarchiving devices")
+        return {
+            "success": False,
+            "error": str(e),
+            "action": "UNARCHIVE",
             "devices_processed": len(device_ids),
             "devices_succeeded": 0,
             "devices_failed": len(device_ids),
