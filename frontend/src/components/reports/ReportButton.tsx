@@ -163,7 +163,7 @@ export function ReportButton({
       {/* Dropdown menu */}
       {showDropdown && isOpen && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 min-w-[180px] rounded-lg border border-slate-700 bg-slate-800 py-1 shadow-xl animate-fade-in"
+          className="absolute right-0 top-full z-[9999] mt-1 min-w-[180px] rounded-lg border border-slate-700 bg-slate-800 py-1 shadow-xl animate-fade-in"
           role="menu"
         >
           {availableFormats.map((format) => (
