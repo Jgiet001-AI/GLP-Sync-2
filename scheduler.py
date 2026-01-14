@@ -45,9 +45,11 @@ Docker Usage:
 Author: HPE GreenLake Team
 """
 import asyncio
+import logging
 import os
 import signal
 import sys
+import traceback
 from datetime import UTC, datetime, timedelta
 from typing import Optional
 
@@ -65,6 +67,9 @@ from src.glp.api import (
     SubscriptionSyncer,
     TokenManager,
 )
+
+# Initialize logger
+logger = logging.getLogger(__name__)
 
 # ============================================
 # Configuration
@@ -144,6 +149,9 @@ async def run_sync(
 ) -> dict:
     """Run a single sync cycle.
 
+    Subscriptions are synced first (sequential) to satisfy FK constraints,
+    then GreenLake devices and Aruba Central are synced in parallel.
+
     Args:
         config: Scheduler configuration
         token_manager: TokenManager instance for GreenLake
@@ -164,52 +172,183 @@ async def run_sync(
     }
 
     try:
-        # GreenLake sync
-        async with GLPClient(token_manager) as client:
-            # Sync subscriptions FIRST (before devices)
-            # This ensures subscription records exist before device_subscriptions
-            # foreign key references are created during device sync
-            if config.sync_subscriptions:
-                print("[Scheduler] Syncing subscriptions...")
-                syncer = SubscriptionSyncer(client=client, db_pool=db_pool)
+        # Step 1: Sync subscriptions FIRST (before devices)
+        # This ensures subscription records exist before device_subscriptions
+        # foreign key references are created during device sync
+        if config.sync_subscriptions:
+            try:
+                async with GLPClient(token_manager) as client:
+                    print("[Scheduler] Step 1/2: Syncing subscriptions (sequential, required for FK constraints)...")
+                    syncer = SubscriptionSyncer(client=client, db_pool=db_pool)
 
-                if db_pool:
-                    results["subscriptions"] = await syncer.sync()
-                else:
-                    subs = await syncer.fetch_all_subscriptions()
-                    results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
+                    if db_pool:
+                        results["subscriptions"] = await syncer.sync()
+                    else:
+                        subs = await syncer.fetch_all_subscriptions()
+                        results["subscriptions"] = {"fetched": len(subs), "mode": "fetch-only"}
 
-            # Sync devices AFTER subscriptions exist
-            if config.sync_devices:
-                print("[Scheduler] Syncing GreenLake devices...")
-                syncer = DeviceSyncer(client=client, db_pool=db_pool)
+                    logger.info("Subscription sync completed successfully (sequential phase)")
+                    print("[Scheduler] ✓ Subscriptions synced successfully")
 
-                if db_pool:
-                    results["devices"] = await syncer.sync()
-                else:
-                    devices = await syncer.fetch_all_devices()
-                    results["devices"] = {"fetched": len(devices), "mode": "fetch-only"}
+            except Exception as e:
+                # Log detailed error for subscription sync
+                error_type = type(e).__name__
+                error_msg = str(e)
 
-        # Aruba Central sync (separate client/token)
+                logger.error(
+                    f"Subscription sync failed: {error_type}: {error_msg}",
+                    exc_info=True
+                )
+                print(f"[Scheduler] ERROR: Subscription sync failed: {error_type}: {error_msg}")
+                print(f"[Scheduler] Traceback: {traceback.format_exc()}")
+
+                results["subscriptions"] = {
+                    "error": error_msg,
+                    "error_type": error_type,
+                    "success": False
+                }
+                # Re-raise since subscription sync must succeed before device sync
+                raise
+
+        # Step 2: Run GreenLake device sync and Aruba Central sync in PARALLEL
+        # These are independent operations writing to different columns
+        print("[Scheduler] Step 2/2: Preparing parallel sync tasks...")
+        parallel_tasks = []
+        task_names = []
+
+        # Define GreenLake device sync task
+        async def sync_glp_devices():
+            """Sync GreenLake devices with comprehensive error handling."""
+            try:
+                async with GLPClient(token_manager) as client:
+                    print("[Scheduler]   → GreenLake devices sync started (parallel task)")
+                    syncer = DeviceSyncer(client=client, db_pool=db_pool)
+
+                    if db_pool:
+                        return await syncer.sync()
+                    else:
+                        devices = await syncer.fetch_all_devices()
+                        return {"fetched": len(devices), "mode": "fetch-only"}
+
+            except Exception as e:
+                # Log detailed error information
+                logger.error(
+                    f"GreenLake device sync failed: {type(e).__name__}: {e}",
+                    exc_info=True
+                )
+                print(f"[Scheduler] ERROR: GreenLake device sync failed: {type(e).__name__}: {e}")
+                print(f"[Scheduler] Traceback: {traceback.format_exc()}")
+                # Re-raise to be caught by gather()
+                raise
+
+        # Define Aruba Central sync task
+        async def sync_aruba_central():
+            """Sync Aruba Central devices with comprehensive error handling."""
+            try:
+                async with ArubaCentralClient(aruba_token_manager) as central_client:
+                    print("[Scheduler]   → Aruba Central sync started (parallel task)")
+                    syncer = ArubaCentralSyncer(client=central_client, db_pool=db_pool)
+
+                    if db_pool:
+                        return await syncer.sync()
+                    else:
+                        central_devices = await syncer.fetch_all_devices()
+                        return {"fetched": len(central_devices), "mode": "fetch-only"}
+
+            except Exception as e:
+                # Log detailed error information
+                logger.error(
+                    f"Aruba Central sync failed: {type(e).__name__}: {e}",
+                    exc_info=True
+                )
+                print(f"[Scheduler] ERROR: Aruba Central sync failed: {type(e).__name__}: {e}")
+                print(f"[Scheduler] Traceback: {traceback.format_exc()}")
+                # Re-raise to be caught by gather()
+                raise
+
+        # Build task list
+        if config.sync_devices:
+            parallel_tasks.append(sync_glp_devices())
+            task_names.append("devices")
+
         if config.sync_central and aruba_token_manager:
-            print("[Scheduler] Syncing Aruba Central devices...")
-            async with ArubaCentralClient(aruba_token_manager) as central_client:
-                syncer = ArubaCentralSyncer(client=central_client, db_pool=db_pool)
+            parallel_tasks.append(sync_aruba_central())
+            task_names.append("central")
 
-                if db_pool:
-                    results["central"] = await syncer.sync()
-                else:
-                    devices = await syncer.fetch_all_devices()
-                    results["central"] = {"fetched": len(devices), "mode": "fetch-only"}
-        elif config.sync_central and not aruba_token_manager:
+        # Handle missing credentials warning
+        if config.sync_central and not aruba_token_manager:
             print("[Scheduler] WARNING: SYNC_CENTRAL enabled but Aruba credentials not configured")
             results["central"] = {"skipped": True, "reason": "credentials_missing"}
 
-        results["success"] = True
+        # Execute parallel tasks if any
+        if parallel_tasks:
+            task_list = " and ".join(task_names)
+            if len(parallel_tasks) > 1:
+                print(f"[Scheduler] ⚡ Running {len(parallel_tasks)} sync tasks in parallel: {task_list}")
+            else:
+                print(f"[Scheduler] Running single task: {task_list}")
+
+            # Use return_exceptions=True to handle partial failures
+            parallel_results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+
+            # Process results and handle exceptions
+            has_errors = False
+            for i, result in enumerate(parallel_results):
+                task_name = task_names[i]
+
+                if isinstance(result, Exception):
+                    # Log detailed error information
+                    error_type = type(result).__name__
+                    error_msg = str(result)
+
+                    logger.error(
+                        f"Parallel sync task '{task_name}' failed: {error_type}: {error_msg}",
+                        exc_info=result
+                    )
+                    print(f"[Scheduler] ERROR: {task_name} sync failed: {error_type}: {error_msg}")
+
+                    # Store error details in results
+                    results[task_name] = {
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "success": False
+                    }
+                    has_errors = True
+                else:
+                    # Successful result
+                    logger.info(f"Parallel sync task '{task_name}' completed successfully")
+                    print(f"[Scheduler]   ✓ {task_name.capitalize()} sync completed successfully")
+                    results[task_name] = result
+
+            # Only mark success if no errors occurred
+            if not has_errors:
+                results["success"] = True
+                print(f"[Scheduler] ✓ All parallel sync tasks completed successfully")
+            else:
+                # Log summary of parallel sync failures
+                failed_tasks = [task_names[i] for i, r in enumerate(parallel_results) if isinstance(r, Exception)]
+                successful_tasks = [task_names[i] for i, r in enumerate(parallel_results) if not isinstance(r, Exception)]
+                logger.warning(f"Partial parallel sync failure - succeeded: {successful_tasks}, failed: {failed_tasks}")
+                print(f"[Scheduler] ⚠ Partial parallel sync failure - succeeded: {successful_tasks}, failed: {failed_tasks}")
+        else:
+            # No parallel tasks to run, mark as successful
+            results["success"] = True
 
     except Exception as e:
-        results["error"] = str(e)
-        print(f"[Scheduler] ERROR during sync: {e}")
+        # Log top-level sync errors with full context
+        error_type = type(e).__name__
+        error_msg = str(e)
+
+        logger.error(
+            f"Sync cycle failed: {error_type}: {error_msg}",
+            exc_info=True
+        )
+        print(f"[Scheduler] ERROR during sync: {error_type}: {error_msg}")
+        print(f"[Scheduler] Traceback: {traceback.format_exc()}")
+
+        results["error"] = error_msg
+        results["error_type"] = error_type
+        results["success"] = False
 
     end_time = datetime.now(UTC)
     results["completed_at"] = end_time.isoformat()
@@ -396,6 +535,13 @@ async def scheduler_loop(
 
 async def main():
     """Main entry point for the scheduler."""
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
     print("=" * 60)
     print("HPE GreenLake Sync Scheduler")
     print("=" * 60)
