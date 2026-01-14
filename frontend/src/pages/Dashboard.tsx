@@ -692,6 +692,23 @@ export function Dashboard() {
                         <p>Total: {dt.count.toLocaleString()}</p>
                         <p>Assigned: {dt.assigned.toLocaleString()}</p>
                         <p>Unassigned: {dt.unassigned.toLocaleString()}</p>
+                        {dt.models && dt.models.length > 0 && (
+                          <>
+                            <div className="border-t border-slate-600/50 my-1 pt-1">
+                              <p className="text-[10px] text-slate-400 uppercase tracking-wide">Top Models:</p>
+                            </div>
+                            {dt.models.slice(0, 5).map((m, idx) => (
+                              <p key={idx} className="text-[11px] text-slate-300">
+                                {m.model}: {m.count.toLocaleString()}
+                              </p>
+                            ))}
+                            {dt.models.length > 5 && (
+                              <p className="text-[10px] text-slate-500">
+                                +{dt.models.length - 5} more...
+                              </p>
+                            )}
+                          </>
+                        )}
                         <p className="text-slate-400 text-[10px] mt-1">Click to view devices</p>
                       </div>
                     )
@@ -704,14 +721,20 @@ export function Dashboard() {
                 <div className="mb-6 flex items-center justify-between">
                   <div>
                     <h2 className="text-lg font-semibold text-white">Subscriptions by Type</h2>
-                    <p className="text-sm text-slate-400">Active license distribution</p>
+                    <p className="text-sm text-slate-400">License utilization per type</p>
                   </div>
                   <Shield className="h-5 w-5 text-slate-400" />
                 </div>
                 <HorizontalBarChart
-                  data={subscription_by_type as unknown as { [key: string]: unknown }[]}
-                  valueKey="total_quantity"
+                  data={subscription_by_type.map(sub => ({
+                    ...sub,
+                    used_percent: sub.total_quantity > 0
+                      ? ((sub.total_quantity - sub.available_quantity) / sub.total_quantity) * 100
+                      : 0
+                  })) as unknown as { [key: string]: unknown }[]}
+                  valueKey="used_percent"
                   labelKey="subscription_type"
+                  maxValue={100}
                   loading={isSyncing}
                   getHref={(item) => {
                     const st = item as unknown as SubscriptionTypeBreakdown
@@ -724,11 +747,12 @@ export function Dashboard() {
                   renderValue={(item) => {
                     const st = item as unknown as SubscriptionTypeBreakdown
                     const used = st.total_quantity - st.available_quantity
+                    const utilization = st.total_quantity > 0 ? Math.round((used / st.total_quantity) * 100) : 0
                     return (
                       <span>
-                        {used.toLocaleString()}/{st.total_quantity.toLocaleString()}
+                        {utilization}%
                         <span className="ml-2 text-xs text-slate-500">
-                          ({st.available_quantity} free)
+                          ({used.toLocaleString()}/{st.total_quantity.toLocaleString()})
                         </span>
                       </span>
                     )

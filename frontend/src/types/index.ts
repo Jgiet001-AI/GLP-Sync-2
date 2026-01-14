@@ -405,11 +405,17 @@ export interface DeviceStats {
   archived: number
 }
 
+export interface DeviceModel {
+  model: string
+  count: number
+}
+
 export interface DeviceTypeBreakdown {
   device_type: string
   count: number
   assigned: number
   unassigned: number
+  models?: DeviceModel[]
 }
 
 export interface RegionBreakdown {

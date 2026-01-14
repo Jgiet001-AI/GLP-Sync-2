@@ -36,12 +36,19 @@ class DeviceStats(BaseModel):
     archived: int = 0
 
 
+class DeviceModel(BaseModel):
+    """Model distribution within a device type."""
+    model: str
+    count: int
+
+
 class DeviceTypeBreakdown(BaseModel):
     """Device count by type."""
     device_type: str
     count: int
     assigned: int
     unassigned: int
+    models: list[DeviceModel] = []
 
 
 class RegionBreakdown(BaseModel):
@@ -187,18 +194,54 @@ async def get_dashboard(
             archived=device_stats_row['archived'] or 0,
         )
 
-        # 2. Device by Type
+        # 2. Device by Type (merge IAP and AP into single AP category)
         device_type_rows = await conn.fetch("""
             SELECT
-                COALESCE(device_type, 'UNKNOWN') as device_type,
+                CASE
+                    WHEN device_type IN ('IAP', 'AP') THEN 'AP'
+                    ELSE COALESCE(device_type, 'UNKNOWN')
+                END as device_type,
                 COUNT(*) as count,
                 COUNT(*) FILTER (WHERE assigned_state = 'ASSIGNED_TO_SERVICE') as assigned,
                 COUNT(*) FILTER (WHERE assigned_state = 'UNASSIGNED') as unassigned
             FROM devices
             WHERE NOT archived
-            GROUP BY device_type
+            GROUP BY CASE
+                WHEN device_type IN ('IAP', 'AP') THEN 'AP'
+                ELSE COALESCE(device_type, 'UNKNOWN')
+            END
             ORDER BY count DESC
         """)
+
+        # 2b. Model distribution per device type (top 10 models per type)
+        model_rows = await conn.fetch("""
+            SELECT
+                CASE
+                    WHEN device_type IN ('IAP', 'AP') THEN 'AP'
+                    ELSE COALESCE(device_type, 'UNKNOWN')
+                END as device_type,
+                COALESCE(model, 'Unknown') as model,
+                COUNT(*) as count
+            FROM devices
+            WHERE NOT archived
+            GROUP BY CASE
+                WHEN device_type IN ('IAP', 'AP') THEN 'AP'
+                ELSE COALESCE(device_type, 'UNKNOWN')
+            END, model
+            ORDER BY device_type, count DESC
+        """)
+
+        # Group models by device type
+        models_by_type: dict[str, list[DeviceModel]] = {}
+        for row in model_rows:
+            dtype = row['device_type']
+            if dtype not in models_by_type:
+                models_by_type[dtype] = []
+            # Limit to top 10 models per type to keep payload manageable
+            if len(models_by_type[dtype]) < 10:
+                models_by_type[dtype].append(
+                    DeviceModel(model=row['model'], count=row['count'])
+                )
 
         device_by_type = [
             DeviceTypeBreakdown(
@@ -206,6 +249,7 @@ async def get_dashboard(
                 count=row['count'],
                 assigned=row['assigned'],
                 unassigned=row['unassigned'],
+                models=models_by_type.get(row['device_type'], []),
             )
             for row in device_type_rows
         ]
@@ -773,9 +817,16 @@ async def list_devices(
             param_idx += 1
 
         if device_type:
-            where_clauses.append(f"d.device_type = ${param_idx}")
-            params.append(device_type)
-            param_idx += 1
+            # Handle AP/IAP merge: when filtering by AP, include both AP and IAP
+            if device_type == 'AP':
+                where_clauses.append(f"d.device_type IN (${param_idx}, ${param_idx + 1})")
+                params.append('AP')
+                params.append('IAP')
+                param_idx += 2
+            else:
+                where_clauses.append(f"d.device_type = ${param_idx}")
+                params.append(device_type)
+                param_idx += 1
 
         if region:
             where_clauses.append(f"d.region = ${param_idx}")
