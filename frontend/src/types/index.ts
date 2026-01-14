@@ -186,6 +186,194 @@ export interface ReportResponse {
   errors: string[]
 }
 
+// Custom Report Builder Types
+
+// Filter operators for building report filters
+export type FilterOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'not_contains'
+  | 'starts_with'
+  | 'ends_with'
+  | 'gt'
+  | 'gte'
+  | 'lt'
+  | 'lte'
+  | 'between'
+  | 'in'
+  | 'not_in'
+  | 'is_null'
+  | 'is_not_null'
+
+// Logical operators for combining filters
+export type LogicOperator = 'AND' | 'OR'
+
+// Aggregation functions for grouped fields
+export type AggregationFunction =
+  | 'COUNT'
+  | 'SUM'
+  | 'AVG'
+  | 'MIN'
+  | 'MAX'
+  | 'COUNT_DISTINCT'
+
+// Sort direction
+export type SortDirection = 'ASC' | 'DESC'
+
+// Field data types
+export type FieldType =
+  | 'string'
+  | 'integer'
+  | 'float'
+  | 'boolean'
+  | 'date'
+  | 'datetime'
+  | 'uuid'
+  | 'jsonb'
+
+// Export format options
+export type ExportFormat = 'json' | 'csv' | 'xlsx'
+
+// Configuration for a selected field in the report
+export interface FieldConfig {
+  table: string
+  field: string
+  alias: string | null
+  aggregation: AggregationFunction | null
+}
+
+// Configuration for a report filter
+export interface FilterConfig {
+  field: string
+  table: string | null
+  operator: FilterOperator
+  value: any
+  logic: LogicOperator
+}
+
+// Configuration for grouping results
+export interface GroupingConfig {
+  field: string
+  table: string | null
+}
+
+// Configuration for sorting results
+export interface SortingConfig {
+  field: string
+  table: string | null
+  direction: SortDirection
+}
+
+// Complete report configuration
+export interface ReportConfig {
+  fields: FieldConfig[]
+  filters: FilterConfig[]
+  grouping: GroupingConfig[]
+  sorting: SortingConfig[]
+  limit: number | null
+}
+
+// Metadata about an available field
+export interface FieldMetadata {
+  field_name: string
+  display_name: string
+  data_type: FieldType
+  table: string
+  description: string | null
+  is_filterable: boolean
+  is_groupable: boolean
+  is_sortable: boolean
+  available_operators: FilterOperator[]
+}
+
+// Metadata about an available table
+export interface TableMetadata {
+  table_name: string
+  display_name: string
+  description: string | null
+  fields: FieldMetadata[]
+}
+
+// Response with available fields grouped by table
+export interface FieldsResponse {
+  tables: TableMetadata[]
+}
+
+// Request to create a new custom report
+export interface CreateReportRequest {
+  name: string
+  description: string | null
+  config: ReportConfig
+  is_shared: boolean
+  shared_with: string[]
+}
+
+// Request to update an existing custom report
+export interface UpdateReportRequest {
+  name?: string
+  description?: string | null
+  config?: ReportConfig
+  is_shared?: boolean
+  shared_with?: string[]
+}
+
+// Response with custom report details (prefixed to avoid conflict with assignment ReportResponse)
+export interface CustomReportResponse {
+  id: string
+  name: string
+  description: string | null
+  created_by: string
+  config: ReportConfig
+  is_shared: boolean
+  shared_with: string[]
+  created_at: string
+  updated_at: string
+  last_executed_at: string | null
+  execution_count: number
+}
+
+// Summary item for custom report list
+export interface CustomReportListItem {
+  id: string
+  name: string
+  description: string | null
+  created_by: string
+  is_shared: boolean
+  created_at: string
+  updated_at: string
+  last_executed_at: string | null
+  execution_count: number
+}
+
+// Response with list of custom reports
+export interface CustomReportListResponse {
+  reports: CustomReportListItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// Request to execute a custom report
+export interface ExecuteReportRequest {
+  format: ExportFormat
+  page: number
+  page_size: number
+}
+
+// Response from executing a custom report
+export interface ExecuteReportResponse {
+  success: boolean
+  columns: string[]
+  data: Record<string, any>[]
+  total_rows: number
+  page: number
+  page_size: number
+  execution_time_ms: number
+  generated_sql: string | null
+  errors: string[]
+}
+
 // UI State Types
 
 export type WorkflowStep = 'upload' | 'review' | 'assign' | 'apply' | 'report'

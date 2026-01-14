@@ -27,6 +27,7 @@ from ..api.error_sanitizer import sanitize_error_message
 
 # Import reports router
 from ..reports.api import router as reports_router
+from ..reports.custom_reports_api import router as custom_reports_router
 
 # Import agent router and components (optional - only if agent module exists)
 try:
@@ -360,6 +361,7 @@ app.include_router(dashboard_router)
 app.include_router(clients_router)
 app.include_router(health_router)
 app.include_router(reports_router)
+app.include_router(custom_reports_router)
 
 # Include agent router if available
 if AGENT_AVAILABLE and agent_router:
