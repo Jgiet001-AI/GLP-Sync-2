@@ -1,24 +1,22 @@
 import { useState, useCallback, useEffect, memo, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { dashboardApiClient, type DeviceListParams } from '../api/client'
 import type { DeviceListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
 import { DropdownMenu } from '../components/ui/DropdownMenu'
 import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
+import { SortableHeader } from '../components/shared/SortableHeader'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 import {
   Server,
   Search,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Wifi,
   Router,
   HardDrive,
   Filter,
   X,
-  ArrowUpDown,
   RefreshCw,
   Check,
   AlertCircle,
@@ -34,6 +32,9 @@ import {
 } from 'lucide-react'
 import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
+import { formatDate, formatDateTime, formatUptime } from '../utils/formatting'
+import { PAGE_SIZE_OPTIONS } from '../utils/pagination'
+import { PaginationControls } from '../components/shared/PaginationControls'
 
 // Device type icon mapping
 const deviceIcons: Record<string, typeof Server> = {
@@ -46,114 +47,65 @@ const deviceIcons: Record<string, typeof Server> = {
   UNKNOWN: Server,
 }
 
-// Format date
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
+// Filter fields for devices
+interface DeviceFilters {
+  device_type?: string
+  region?: string
+  assigned_state?: string
+  subscription_key?: string
+  search?: string
+  [key: string]: string | undefined
 }
-
-// Format full date with time
-function formatDateTime(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-// Format uptime from milliseconds to human readable
-function formatUptime(millis: number | null): string {
-  if (!millis) return '-'
-  const seconds = Math.floor(millis / 1000)
-  const minutes = Math.floor(seconds / 60)
-  const hours = Math.floor(minutes / 60)
-  const days = Math.floor(hours / 24)
-
-  if (days > 0) {
-    const remainingHours = hours % 24
-    return `${days}d ${remainingHours}h`
-  } else if (hours > 0) {
-    const remainingMinutes = minutes % 60
-    return `${hours}h ${remainingMinutes}m`
-  } else if (minutes > 0) {
-    return `${minutes}m`
-  } else {
-    return `${seconds}s`
-  }
-}
-
-// Page size options
-const PAGE_SIZE_OPTIONS = [10, 100, 500, 1000]
 
 export function DevicesList() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const [params, setParams] = useState<DeviceListParams>(() => ({
+  // Use paginated list hook for URL-synced state
+  const { state, handlers } = usePaginatedList<DeviceFilters>({
     page: 1,
     page_size: 100,
-    sort_by: searchParams.get('sort_by') || 'updated_at',
-    sort_order: (searchParams.get('sort_order') as 'asc' | 'desc') || 'desc',
-    device_type: searchParams.get('device_type') || undefined,
-    region: searchParams.get('region') || undefined,
-    assigned_state: searchParams.get('assigned_state') || undefined,
-    subscription_key: searchParams.get('subscription_key') || undefined,
-    include_archived: searchParams.get('include_archived') === 'true',
-    search: searchParams.get('search') || undefined,
-  }))
-  const [searchInput, setSearchInput] = useState(searchParams.get('search') || '')
+    sort_by: 'updated_at',
+    sort_order: 'desc',
+    filters: {
+      device_type: undefined,
+      region: undefined,
+      assigned_state: undefined,
+      subscription_key: undefined,
+      search: undefined,
+    },
+  })
+
+  const [searchInput, setSearchInput] = useState(state.filters.search || '')
   const [showFilters, setShowFilters] = useState(
-    !!(searchParams.get('device_type') || searchParams.get('region') || searchParams.get('assigned_state') || searchParams.get('subscription_key'))
+    !!(state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key)
   )
   const [selectedDevice, setSelectedDevice] = useState<DeviceListItem | null>(null)
 
-  // Sync URL params to state on mount and when URL changes (external navigation)
+  // Sync search input with URL state on mount
   useEffect(() => {
-    const deviceType = searchParams.get('device_type')
-    const region = searchParams.get('region')
-    const assignedState = searchParams.get('assigned_state')
-    const subscriptionKey = searchParams.get('subscription_key')
-    const includeArchived = searchParams.get('include_archived') === 'true'
-    const search = searchParams.get('search')
-    const sortBy = searchParams.get('sort_by')
-    const sortOrder = searchParams.get('sort_order') as 'asc' | 'desc' | null
-
-    setParams((prev) => ({
-      ...prev,
-      device_type: deviceType || undefined,
-      region: region || undefined,
-      assigned_state: assignedState || undefined,
-      subscription_key: subscriptionKey || undefined,
-      include_archived: includeArchived,
-      search: search || undefined,
-      sort_by: sortBy || prev.sort_by,
-      sort_order: sortOrder || prev.sort_order,
-      page: 1,
-    }))
-
-    if (search) {
-      setSearchInput(search)
+    if (state.filters.search && state.filters.search !== searchInput) {
+      setSearchInput(state.filters.search)
     }
-
-    if (deviceType || region || assignedState || subscriptionKey) {
+    if (state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.subscription_key) {
       setShowFilters(true)
     }
-  }, [searchParams])
+  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.search])
 
   // Debounced search
+  const debouncedSearch = useDebouncedSearch(searchInput, 300)
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setParams((prev) => ({ ...prev, search: searchInput || undefined, page: 1 }))
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchInput])
+    if (debouncedSearch !== state.filters.search) {
+      handlers.handleFilterChange('search', debouncedSearch || undefined)
+    }
+  }, [debouncedSearch])
+
+  // Build params for API from state
+  const params = useMemo<DeviceListParams>(() => ({
+    page: state.page,
+    page_size: state.page_size,
+    sort_by: state.sort_by,
+    sort_order: state.sort_order,
+    ...state.filters,
+  }), [state])
 
   // Fetch devices
   const { data, isLoading, error, refetch, isFetching } = useQuery({
@@ -169,126 +121,74 @@ export function DevicesList() {
     staleTime: 60000,
   })
 
-  const handlePageChange = useCallback((newPage: number) => {
-    setParams((prev) => ({ ...prev, page: newPage }))
-  }, [])
-
-  const handlePageSizeChange = useCallback((newSize: number) => {
-    setParams((prev) => ({ ...prev, page_size: newSize, page: 1 }))
-  }, [])
-
-  const handleSort = useCallback((column: string) => {
-    setParams((prev) => ({
-      ...prev,
-      sort_by: column,
-      sort_order: prev.sort_by === column && prev.sort_order === 'asc' ? 'desc' : 'asc',
-    }))
-  }, [])
-
-  const handleFilterChange = useCallback((key: keyof DeviceListParams, value: string | undefined) => {
-    setParams((prev) => ({ ...prev, [key]: value || undefined, page: 1 }))
-    // Sync filter changes to URL
-    setSearchParams((prevParams) => {
-      const next = new URLSearchParams(prevParams)
-      if (value) {
-        next.set(key, value)
-      } else {
-        next.delete(key)
-      }
-      return next
-    })
-  }, [setSearchParams])
+  const handleFilterChange = useCallback((key: keyof DeviceFilters, value: string | undefined) => {
+    handlers.handleFilterChange(key, value)
+  }, [handlers])
 
   const clearFilters = useCallback(() => {
-    setParams({
-      page: 1,
-      page_size: params.page_size,
-      sort_by: 'updated_at',
-      sort_order: 'desc',
-    })
+    handlers.clearFilters()
     setSearchInput('')
-    setSearchParams({})
-  }, [params.page_size, setSearchParams])
+  }, [handlers])
 
   const copyToClipboard = useCallback((text: string, label: string) => {
     navigator.clipboard.writeText(text)
     toast.success(`${label} copied to clipboard`)
   }, [])
 
-  const hasActiveFilters = params.device_type || params.region || params.assigned_state || params.search || params.subscription_key || params.include_archived
+  const hasActiveFilters = state.filters.device_type || state.filters.region || state.filters.assigned_state || state.filters.search || state.filters.subscription_key
 
   // Generate filter chips from active params
   const filterChips = useMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = []
-    if (params.include_archived) {
-      chips.push({
-        key: 'include_archived',
-        label: 'Showing',
-        value: 'true',
-        displayValue: 'Archived Devices',
-        color: 'slate',
-      })
-    }
-    if (params.device_type) {
+    if (state.filters.device_type) {
       chips.push({
         key: 'device_type',
         label: 'Type',
-        value: params.device_type,
+        value: state.filters.device_type,
         color: 'sky',
       })
     }
-    if (params.region) {
+    if (state.filters.region) {
       chips.push({
         key: 'region',
         label: 'Region',
-        value: params.region,
+        value: state.filters.region,
         color: 'violet',
       })
     }
-    if (params.assigned_state) {
+    if (state.filters.assigned_state) {
       chips.push({
         key: 'assigned_state',
         label: 'Status',
-        value: params.assigned_state,
-        displayValue: params.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'Assigned' : params.assigned_state === 'UNASSIGNED' ? 'Unassigned' : params.assigned_state,
-        color: params.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'emerald' : 'amber',
+        value: state.filters.assigned_state,
+        displayValue: state.filters.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'Assigned' : state.filters.assigned_state === 'UNASSIGNED' ? 'Unassigned' : state.filters.assigned_state,
+        color: state.filters.assigned_state === 'ASSIGNED_TO_SERVICE' ? 'emerald' : 'amber',
       })
     }
-    if (params.subscription_key) {
+    if (state.filters.subscription_key) {
       chips.push({
         key: 'subscription_key',
         label: 'Subscription',
-        value: params.subscription_key,
+        value: state.filters.subscription_key,
         color: 'rose',
       })
     }
-    if (params.search) {
+    if (state.filters.search) {
       chips.push({
         key: 'search',
         label: 'Search',
-        value: params.search,
+        value: state.filters.search,
         color: 'slate',
       })
     }
     return chips
-  }, [params.include_archived, params.device_type, params.region, params.assigned_state, params.subscription_key, params.search])
+  }, [state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.subscription_key, state.filters.search])
 
   // Remove a specific filter
   const removeFilter = useCallback((key: string) => {
-    // Handle boolean filters specially
-    if (key === 'include_archived') {
-      setParams((prev) => ({ ...prev, include_archived: false, page: 1 }))
-    } else {
-      setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
-    }
     if (key === 'search') setSearchInput('')
-    // Update URL params
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete(key)
-      return next
-    })
-  }, [setSearchParams])
+    handlers.handleFilterChange(key as keyof DeviceFilters, undefined)
+  }, [handlers])
 
   if (error) {
     return (
@@ -339,10 +239,10 @@ export function DevicesList() {
                   reportType="devices"
                   variant="secondary"
                   filters={{
-                    device_type: params.device_type,
-                    region: params.region,
-                    assigned_state: params.assigned_state,
-                    search: params.search,
+                    device_type: state.filters.device_type,
+                    region: state.filters.region,
+                    assigned_state: state.filters.assigned_state,
+                    search: state.filters.search,
                   }}
                 />
                 <button
@@ -406,7 +306,7 @@ export function DevicesList() {
                 Filters
                 {hasActiveFilters && (
                   <span className="ml-1 rounded-full bg-sky-500 px-1.5 py-0.5 text-xs text-white">
-                    {[params.device_type, params.region, params.assigned_state, params.search].filter(Boolean).length}
+                    {[state.filters.device_type, state.filters.region, state.filters.assigned_state, state.filters.search].filter(Boolean).length}
                   </span>
                 )}
               </button>
@@ -425,8 +325,8 @@ export function DevicesList() {
               <div className="flex items-center gap-2">
                 <span className="text-sm text-slate-400">Show:</span>
                 <select
-                  value={params.page_size}
-                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  value={state.page_size}
+                  onChange={(e) => handlers.handlePageSizeChange(Number(e.target.value))}
                   className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-500/20"
                 >
                   {PAGE_SIZE_OPTIONS.map((size) => (
@@ -452,7 +352,7 @@ export function DevicesList() {
                     Device Type
                   </label>
                   <select
-                    value={params.device_type || ''}
+                    value={state.filters.device_type || ''}
                     onChange={(e) => handleFilterChange('device_type', e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
                   >
@@ -471,7 +371,7 @@ export function DevicesList() {
                     Region
                   </label>
                   <select
-                    value={params.region || ''}
+                    value={state.filters.region || ''}
                     onChange={(e) => handleFilterChange('region', e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
                   >
@@ -490,7 +390,7 @@ export function DevicesList() {
                     Assignment State
                   </label>
                   <select
-                    value={params.assigned_state || ''}
+                    value={state.filters.assigned_state || ''}
                     onChange={(e) => handleFilterChange('assigned_state', e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-sky-500 focus:outline-none"
                   >
@@ -522,9 +422,9 @@ export function DevicesList() {
                     <SortableHeader
                       column="serial_number"
                       label="Serial Number"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       MAC Address
@@ -532,23 +432,23 @@ export function DevicesList() {
                     <SortableHeader
                       column="device_type"
                       label="Type"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <SortableHeader
                       column="model"
                       label="Model"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <SortableHeader
                       column="region"
                       label="Region"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Location
@@ -556,9 +456,9 @@ export function DevicesList() {
                     <SortableHeader
                       column="assigned_state"
                       label="Status"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       <div className="flex items-center gap-1">
@@ -578,9 +478,9 @@ export function DevicesList() {
                     <SortableHeader
                       column="updated_at"
                       label="Updated"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Actions
@@ -631,71 +531,16 @@ export function DevicesList() {
 
             {/* Pagination */}
             {data && data.total_pages > 1 && (
-              <div className="border-t border-slate-700/50 px-4 py-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-400">
-                    Showing {((data.page - 1) * data.page_size) + 1} to{' '}
-                    {Math.min(data.page * data.page_size, data.total)} of {data.total.toLocaleString()} devices
-                  </p>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handlePageChange(1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
-                      aria-label="First page"
-                    >
-                      <ChevronsLeft className="h-4 w-4" aria-hidden="true" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.page - 1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
-                      aria-label="Previous page"
-                    >
-                      <ChevronLeft className="h-4 w-4" aria-hidden="true" />
-                    </button>
-
-                    <div className="flex items-center gap-1 px-2">
-                      {generatePageNumbers(data.page, data.total_pages).map((pageNum, idx) =>
-                        pageNum === '...' ? (
-                          <span key={`ellipsis-${idx}`} className="px-2 text-slate-500">
-                            ...
-                          </span>
-                        ) : (
-                          <button
-                            key={pageNum}
-                            onClick={() => handlePageChange(pageNum as number)}
-                            className={`min-w-[2rem] rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
-                              data.page === pageNum
-                                ? 'bg-sky-500 text-white'
-                                : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-                            }`}
-                          >
-                            {pageNum}
-                          </button>
-                        )
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => handlePageChange(data.page + 1)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
-                      aria-label="Next page"
-                    >
-                      <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.total_pages)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30 disabled:hover:bg-transparent"
-                      aria-label="Last page"
-                    >
-                      <ChevronsRight className="h-4 w-4" aria-hidden="true" />
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <PaginationControls
+                page={data.page}
+                totalPages={data.total_pages}
+                total={data.total}
+                pageSize={data.page_size}
+                itemName="devices"
+                onPageChange={handlers.handlePageChange}
+                variant="icon"
+                theme="sky"
+              />
             )}
           </div>
         </main>
@@ -953,50 +798,6 @@ function DeviceDetailContent({
   )
 }
 
-// Sortable Header Component
-const SortableHeader = memo(function SortableHeader({
-  column,
-  label,
-  currentSort,
-  sortOrder,
-  onSort,
-}: {
-  column: string
-  label: string
-  currentSort?: string
-  sortOrder?: string
-  onSort: (column: string) => void
-}) {
-  const isActive = currentSort === column
-
-  return (
-    <th
-      className="cursor-pointer px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400 transition-colors hover:text-white"
-      onClick={() => onSort(column)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onSort(column)
-        }
-      }}
-      tabIndex={0}
-      role="button"
-      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <div className="flex items-center gap-1">
-        {label}
-        <ArrowUpDown
-          className={`h-3.5 w-3.5 ${isActive ? 'text-hpe-green' : 'text-slate-600'}`}
-          aria-hidden="true"
-        />
-        {isActive && (
-          <span className="text-hpe-green" aria-hidden="true">{sortOrder === 'asc' ? '↑' : '↓'}</span>
-        )}
-      </div>
-    </th>
-  )
-})
-
 // Device Row Component with actions
 const DeviceRow = memo(function DeviceRow({
   device,
@@ -1166,36 +967,3 @@ const DeviceRow = memo(function DeviceRow({
     </tr>
   )
 })
-
-// Generate page numbers for pagination
-function generatePageNumbers(currentPage: number, totalPages: number): (number | string)[] {
-  const pages: (number | string)[] = []
-  const delta = 2
-
-  if (totalPages <= 7) {
-    for (let i = 1; i <= totalPages; i++) {
-      pages.push(i)
-    }
-  } else {
-    pages.push(1)
-
-    if (currentPage > delta + 2) {
-      pages.push('...')
-    }
-
-    const rangeStart = Math.max(2, currentPage - delta)
-    const rangeEnd = Math.min(totalPages - 1, currentPage + delta)
-
-    for (let i = rangeStart; i <= rangeEnd; i++) {
-      pages.push(i)
-    }
-
-    if (currentPage < totalPages - delta - 1) {
-      pages.push('...')
-    }
-
-    pages.push(totalPages)
-  }
-
-  return pages
-}

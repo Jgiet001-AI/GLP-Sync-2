@@ -26,6 +26,8 @@ import { clientsApiClient, type ClientItem, type SiteStats, type ClientsSummary 
 import { useClientsFilters, type FilterPreset, filtersToQueryParams } from '../hooks/useClientsFilters'
 import { ClientsFilterPanel, ClientsFilterBar } from '../components/filters/ClientsFilterPanel'
 import { ReportButton } from '../components/reports/ReportButton'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
+import { PaginationControls } from '../components/shared/PaginationControls'
 
 // Health color mapping
 const healthColors = {
@@ -390,96 +392,6 @@ function PageSizeSelector({
   )
 }
 
-// Pagination Controls Component
-function PaginationControls({
-  page,
-  totalPages,
-  total,
-  pageSize,
-  onPageChange,
-}: {
-  page: number
-  totalPages: number
-  total: number
-  pageSize: number
-  onPageChange: (page: number) => void
-}) {
-  const startItem = (page - 1) * pageSize + 1
-  const endItem = Math.min(page * pageSize, total)
-
-  // Generate page numbers to show
-  const getPageNumbers = () => {
-    const pages: (number | string)[] = []
-    const maxVisible = 7
-
-    if (totalPages <= maxVisible) {
-      for (let i = 1; i <= totalPages; i++) pages.push(i)
-    } else {
-      pages.push(1)
-      if (page > 3) pages.push('...')
-
-      const start = Math.max(2, page - 1)
-      const end = Math.min(totalPages - 1, page + 1)
-
-      for (let i = start; i <= end; i++) pages.push(i)
-
-      if (page < totalPages - 2) pages.push('...')
-      pages.push(totalPages)
-    }
-    return pages
-  }
-
-  return (
-    <div className="flex items-center justify-between px-4 py-3 border-t border-slate-700/50 bg-slate-900/30">
-      <div className="text-sm text-slate-400">
-        Showing <span className="font-medium text-white">{startItem.toLocaleString()}</span> to{' '}
-        <span className="font-medium text-white">{endItem.toLocaleString()}</span> of{' '}
-        <span className="font-medium text-white">{total.toLocaleString()}</span> clients
-      </div>
-
-      <div className="flex items-center gap-1">
-        {/* Previous button */}
-        <button
-          onClick={() => onPageChange(page - 1)}
-          disabled={page === 1}
-          className="px-3 py-1.5 text-sm rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Previous
-        </button>
-
-        {/* Page numbers */}
-        <div className="flex items-center gap-1 mx-2">
-          {getPageNumbers().map((p, idx) => (
-            typeof p === 'number' ? (
-              <button
-                key={idx}
-                onClick={() => onPageChange(p)}
-                className={`min-w-[36px] px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                  p === page
-                    ? 'bg-violet-600 text-white'
-                    : 'border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700'
-                }`}
-              >
-                {p}
-              </button>
-            ) : (
-              <span key={idx} className="px-2 text-slate-500">...</span>
-            )
-          ))}
-        </div>
-
-        {/* Next button */}
-        <button
-          onClick={() => onPageChange(page + 1)}
-          disabled={page === totalPages}
-          className="px-3 py-1.5 text-sm rounded-lg border border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          Next
-        </button>
-      </div>
-    </div>
-  )
-}
 
 // Filtered Clients Table Component
 function FilteredClientsTable({ filters }: { filters: ReturnType<typeof useClientsFilters>['filters'] }) {
@@ -666,7 +578,10 @@ function FilteredClientsTable({ filters }: { filters: ReturnType<typeof useClien
           totalPages={data.total_pages}
           total={data.total}
           pageSize={pageSize}
+          itemName="clients"
           onPageChange={setCurrentPage}
+          variant="text"
+          theme="violet"
         />
       )}
     </div>
@@ -679,6 +594,9 @@ export function ClientsPage() {
   const [expandedSites, setExpandedSites] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState('')
   const [showFilterPanel, setShowFilterPanel] = useState(false)
+
+  // Debounce search to avoid excessive API calls
+  const debouncedSearchQuery = useDebouncedSearch(searchQuery, 300)
 
   // Filter state from URL
   const {
@@ -705,11 +623,11 @@ export function ClientsPage() {
     staleTime: 30000,
   })
 
-  // Search results
+  // Search results - using debounced search query
   const { data: searchResults, isLoading: searchLoading } = useQuery({
-    queryKey: ['clients-search', searchQuery],
-    queryFn: () => clientsApiClient.searchClients(searchQuery, { page_size: 50 }),
-    enabled: searchQuery.length >= 2,
+    queryKey: ['clients-search', debouncedSearchQuery],
+    queryFn: () => clientsApiClient.searchClients(debouncedSearchQuery, { page_size: 50 }),
+    enabled: debouncedSearchQuery.length >= 2,
     staleTime: 10000,
   })
 
@@ -916,7 +834,7 @@ export function ClientsPage() {
                 clearFilters()
                 setSearchQuery('')
               }}
-              isActive={!hasFilters && !searchQuery}
+              isActive={!hasFilters && !debouncedSearchQuery}
               ariaLabel="Show all sites"
             />
           </section>
@@ -941,7 +859,7 @@ export function ClientsPage() {
           )}
 
           {/* Filtered View - Shows when filters are active */}
-          {hasFilters && !searchQuery && (
+          {hasFilters && !debouncedSearchQuery && (
             <section className="mb-8">
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <Filter className="h-5 w-5 text-violet-400" />
@@ -955,7 +873,7 @@ export function ClientsPage() {
           )}
 
           {/* Search Results */}
-          {searchQuery.length >= 2 && (
+          {debouncedSearchQuery.length >= 2 && (
             <section className="mb-8">
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <Search className="h-5 w-5 text-slate-400" />
@@ -1027,14 +945,14 @@ export function ClientsPage() {
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-slate-400 rounded-2xl border border-slate-700/50 bg-slate-800/30">
                   <Search className="h-10 w-10 mb-3 opacity-50" />
-                  <p>No clients found matching "{searchQuery}"</p>
+                  <p>No clients found matching "{debouncedSearchQuery}"</p>
                 </div>
               )}
             </section>
           )}
 
           {/* Sites List - Shows when no filters or search */}
-          {!searchQuery && !hasFilters && (
+          {!debouncedSearchQuery && !hasFilters && (
             <section>
               <h2 className="mb-4 text-lg font-semibold text-white flex items-center gap-2">
                 <MapPin className="h-5 w-5 text-violet-400" />

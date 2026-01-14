@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, memo, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { dashboardApiClient, type SubscriptionListParams } from '../api/client'
 import type { SubscriptionListItem } from '../types'
 import { Drawer, DetailRow, DetailSection } from '../components/ui/Drawer'
@@ -9,13 +9,8 @@ import { FilterChips, type FilterChip } from '../components/filters/FilterChips'
 import {
   Shield,
   Search,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Filter,
   X,
-  ArrowUpDown,
   RefreshCw,
   Clock,
   AlertTriangle,
@@ -26,75 +21,72 @@ import {
   Copy,
   Eye,
   Calendar,
+  ChevronRight,
 } from 'lucide-react'
 import { ReportButton } from '../components/reports/ReportButton'
 import toast from 'react-hot-toast'
+import { formatDate } from '../utils/formatting'
+import { PAGE_SIZE_OPTIONS } from '../utils/pagination'
+import { SortableHeader } from '../components/shared/SortableHeader'
+import { PaginationControls } from '../components/shared/PaginationControls'
+import { useDebouncedSearch } from '../hooks/useDebouncedSearch'
+import { usePaginatedList } from '../hooks/usePaginatedList'
 
-// Format date
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const date = new Date(dateStr)
-  return date.toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  })
+// Filter fields for subscriptions
+interface SubscriptionFilters {
+  subscription_type?: string
+  subscription_status?: string
+  search?: string
+  [key: string]: string | undefined
 }
 
-// Page size options
-const PAGE_SIZE_OPTIONS = [10, 100, 500, 1000]
-
 export function SubscriptionsList() {
-  const [searchParams, setSearchParams] = useSearchParams()
-  const [params, setParams] = useState<SubscriptionListParams>(() => ({
+  // Use paginated list hook for URL-synced state
+  const { state, handlers } = usePaginatedList<SubscriptionFilters>({
     page: 1,
     page_size: 100,
-    sort_by: searchParams.get('sort_by') || 'end_time',
-    sort_order: (searchParams.get('sort_order') as 'asc' | 'desc') || 'asc',
-    subscription_type: searchParams.get('subscription_type') || undefined,
-    subscription_status: searchParams.get('status') || undefined,
-    search: searchParams.get('search') || undefined,
-  }))
-  const [searchInput, setSearchInput] = useState(searchParams.get('search') || '')
+    sort_by: 'end_time',
+    sort_order: 'asc',
+    filters: {
+      subscription_type: undefined,
+      subscription_status: undefined,
+      search: undefined,
+    },
+  })
+
+  const [searchInput, setSearchInput] = useState(state.filters.search || '')
   const [showFilters, setShowFilters] = useState(
-    !!(searchParams.get('subscription_type') || searchParams.get('status'))
+    !!(state.filters.subscription_type || state.filters.subscription_status)
   )
   const [selectedSubscription, setSelectedSubscription] = useState<SubscriptionListItem | null>(null)
 
-  // Sync URL params to state on mount
+  // Sync search input with URL state on mount
   useEffect(() => {
-    const subType = searchParams.get('subscription_type')
-    const status = searchParams.get('status')
-    const search = searchParams.get('search')
-    const sortBy = searchParams.get('sort_by')
-    const sortOrder = searchParams.get('sort_order')
-
-    setParams((prev) => ({
-      ...prev,
-      subscription_type: subType || undefined,
-      subscription_status: status || undefined,
-      search: search || undefined,
-      sort_by: sortBy || prev.sort_by,
-      sort_order: (sortOrder as 'asc' | 'desc') || prev.sort_order,
-      page: 1,
-    }))
-
-    if (search) {
-      setSearchInput(search)
+    if (state.filters.search && state.filters.search !== searchInput) {
+      setSearchInput(state.filters.search)
     }
-
-    if (subType || status) {
+    if (state.filters.subscription_type || state.filters.subscription_status) {
       setShowFilters(true)
     }
-  }, [searchParams])
+  }, [state.filters.subscription_type, state.filters.subscription_status, state.filters.search])
 
   // Debounced search
+  const debouncedSearch = useDebouncedSearch(searchInput, 300)
+
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setParams((prev) => ({ ...prev, search: searchInput || undefined, page: 1 }))
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [searchInput])
+    if (debouncedSearch !== state.filters.search) {
+      handlers.handleFilterChange('search', debouncedSearch || undefined)
+    }
+  }, [debouncedSearch])
+
+  // Build params for API from state
+  const params = useMemo<SubscriptionListParams>(() => ({
+    page: state.page,
+    page_size: state.page_size,
+    sort_by: state.sort_by,
+    sort_order: state.sort_order,
+    ...state.filters,
+  }), [state])
 
   // Fetch subscriptions
   const { data, isLoading, error, refetch, isFetching } = useQuery({
@@ -110,98 +102,58 @@ export function SubscriptionsList() {
     staleTime: 60000,
   })
 
-  const handlePageChange = useCallback((newPage: number) => {
-    setParams((prev) => ({ ...prev, page: newPage }))
-  }, [])
-
-  const handlePageSizeChange = useCallback((newSize: number) => {
-    setParams((prev) => ({ ...prev, page_size: newSize, page: 1 }))
-  }, [])
-
-  const handleSort = useCallback((column: string) => {
-    setParams((prev) => ({
-      ...prev,
-      sort_by: column,
-      sort_order: prev.sort_by === column && prev.sort_order === 'asc' ? 'desc' : 'asc',
-    }))
-  }, [])
-
-  const handleFilterChange = useCallback((key: keyof SubscriptionListParams, value: string | undefined) => {
-    setParams((prev) => ({ ...prev, [key]: value || undefined, page: 1 }))
-    // Sync filter changes to URL - map subscription_status back to 'status' for URL
-    const urlKey = key === 'subscription_status' ? 'status' : key
-    setSearchParams((prevParams) => {
-      const next = new URLSearchParams(prevParams)
-      if (value) {
-        next.set(urlKey, value)
-      } else {
-        next.delete(urlKey)
-      }
-      return next
-    })
-  }, [setSearchParams])
+  const handleFilterChange = useCallback((key: keyof SubscriptionFilters, value: string | undefined) => {
+    handlers.handleFilterChange(key, value)
+  }, [handlers])
 
   const clearFilters = useCallback(() => {
-    setParams({
-      page: 1,
-      page_size: params.page_size,
-      sort_by: 'end_time',
-      sort_order: 'asc',
-    })
+    handlers.clearFilters()
     setSearchInput('')
-    setSearchParams({})
-  }, [params.page_size, setSearchParams])
+  }, [handlers])
 
   const copyToClipboard = useCallback((text: string, label: string) => {
     navigator.clipboard.writeText(text)
     toast.success(`${label} copied to clipboard`)
   }, [])
 
-  const hasActiveFilters = params.subscription_type || params.subscription_status || params.search
+  const hasActiveFilters = state.filters.subscription_type || state.filters.subscription_status || state.filters.search
 
   // Generate filter chips from active params
   const filterChips = useMemo<FilterChip[]>(() => {
     const chips: FilterChip[] = []
-    if (params.subscription_type) {
+    if (state.filters.subscription_type) {
       chips.push({
         key: 'subscription_type',
         label: 'Type',
-        value: params.subscription_type,
-        displayValue: params.subscription_type.replace('CENTRAL_', ''),
+        value: state.filters.subscription_type,
+        displayValue: state.filters.subscription_type.replace('CENTRAL_', ''),
         color: 'violet',
       })
     }
-    if (params.subscription_status) {
+    if (state.filters.subscription_status) {
       chips.push({
         key: 'subscription_status',
         label: 'Status',
-        value: params.subscription_status,
+        value: state.filters.subscription_status,
         color: 'emerald',
       })
     }
-    if (params.search) {
+    if (state.filters.search) {
       chips.push({
         key: 'search',
         label: 'Search',
-        value: params.search,
+        value: state.filters.search,
         color: 'slate',
       })
     }
     return chips
-  }, [params.subscription_type, params.subscription_status, params.search])
+  }, [state.filters.subscription_type, state.filters.subscription_status, state.filters.search])
 
   // Remove a specific filter
   const removeFilter = useCallback((key: string) => {
-    setParams((prev) => ({ ...prev, [key]: undefined, page: 1 }))
     if (key === 'search') setSearchInput('')
-    // Map key for URL - subscription_status uses 'status' in URL
-    const urlKey = key === 'subscription_status' ? 'status' : key
-    setSearchParams((prev) => {
-      const next = new URLSearchParams(prev)
-      next.delete(urlKey)
-      return next
-    })
-  }, [setSearchParams])
+    handlers.handleFilterChange(key as keyof SubscriptionFilters, undefined)
+  }, [handlers])
 
   if (error) {
     return (
@@ -252,9 +204,9 @@ export function SubscriptionsList() {
                   reportType="subscriptions"
                   variant="secondary"
                   filters={{
-                    subscription_type: params.subscription_type,
-                    status: params.subscription_status,
-                    search: params.search,
+                    subscription_type: state.filters.subscription_type,
+                    status: state.filters.subscription_status,
+                    search: state.filters.search,
                   }}
                 />
                 <button
@@ -317,7 +269,7 @@ export function SubscriptionsList() {
                 Filters
                 {hasActiveFilters && (
                   <span className="ml-1 rounded-full bg-violet-500 px-1.5 py-0.5 text-xs text-white">
-                    {[params.subscription_type, params.subscription_status, params.search].filter(Boolean).length}
+                    {[state.filters.subscription_type, state.filters.subscription_status, state.filters.search].filter(Boolean).length}
                   </span>
                 )}
               </button>
@@ -336,8 +288,8 @@ export function SubscriptionsList() {
               <div className="flex items-center gap-2">
                 <span className="text-sm text-slate-400">Show:</span>
                 <select
-                  value={params.page_size}
-                  onChange={(e) => handlePageSizeChange(Number(e.target.value))}
+                  value={state.page_size}
+                  onChange={(e) => handlers.handlePageSizeChange(Number(e.target.value))}
                   className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none focus:ring-2 focus:ring-violet-500/20"
                 >
                   {PAGE_SIZE_OPTIONS.map((size) => (
@@ -363,7 +315,7 @@ export function SubscriptionsList() {
                     Subscription Type
                   </label>
                   <select
-                    value={params.subscription_type || ''}
+                    value={state.filters.subscription_type || ''}
                     onChange={(e) => handleFilterChange('subscription_type', e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                   >
@@ -382,7 +334,7 @@ export function SubscriptionsList() {
                     Status
                   </label>
                   <select
-                    value={params.subscription_status || ''}
+                    value={state.filters.subscription_status || ''}
                     onChange={(e) => handleFilterChange('subscription_status', e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                   >
@@ -417,16 +369,16 @@ export function SubscriptionsList() {
                     <SortableHeader
                       column="key"
                       label="Subscription Key"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <SortableHeader
                       column="subscription_type"
                       label="Type"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Status
@@ -434,16 +386,16 @@ export function SubscriptionsList() {
                     <SortableHeader
                       column="tier"
                       label="Tier"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <SortableHeader
                       column="quantity"
                       label="Licenses"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Utilization
@@ -454,16 +406,16 @@ export function SubscriptionsList() {
                     <SortableHeader
                       column="start_time"
                       label="Start Date"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <SortableHeader
                       column="end_time"
                       label="End Date"
-                      currentSort={params.sort_by}
-                      sortOrder={params.sort_order}
-                      onSort={handleSort}
+                      currentSort={state.sort_by}
+                      sortOrder={state.sort_order}
+                      onSort={handlers.handleSort}
                     />
                     <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400">
                       Days Left
@@ -516,71 +468,16 @@ export function SubscriptionsList() {
 
             {/* Pagination */}
             {data && data.total_pages > 1 && (
-              <div className="border-t border-slate-700/50 px-4 py-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-400">
-                    Showing {((data.page - 1) * data.page_size) + 1} to{' '}
-                    {Math.min(data.page * data.page_size, data.total)} of {data.total.toLocaleString()} subscriptions
-                  </p>
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handlePageChange(1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="First page"
-                    >
-                      <ChevronsLeft className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.page - 1)}
-                      disabled={data.page === 1}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Previous page"
-                    >
-                      <ChevronLeft className="h-4 w-4" />
-                    </button>
-
-                    <div className="flex items-center gap-1 px-2">
-                      {generatePageNumbers(data.page, data.total_pages).map((pageNum, idx) =>
-                        pageNum === '...' ? (
-                          <span key={`ellipsis-${idx}`} className="px-2 text-slate-500">
-                            ...
-                          </span>
-                        ) : (
-                          <button
-                            key={pageNum}
-                            onClick={() => handlePageChange(pageNum as number)}
-                            className={`min-w-[2rem] rounded-lg px-3 py-1 text-sm font-medium transition-colors ${
-                              data.page === pageNum
-                                ? 'bg-hpe-purple text-white'
-                                : 'text-slate-400 hover:bg-slate-700 hover:text-white'
-                            }`}
-                          >
-                            {pageNum}
-                          </button>
-                        )
-                      )}
-                    </div>
-
-                    <button
-                      onClick={() => handlePageChange(data.page + 1)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Next page"
-                    >
-                      <ChevronRight className="h-4 w-4" />
-                    </button>
-                    <button
-                      onClick={() => handlePageChange(data.total_pages)}
-                      disabled={data.page === data.total_pages}
-                      className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-white disabled:opacity-30"
-                      aria-label="Last page"
-                    >
-                      <ChevronsRight className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
+              <PaginationControls
+                page={data.page}
+                totalPages={data.total_pages}
+                total={data.total}
+                pageSize={data.page_size}
+                itemName="subscriptions"
+                onPageChange={handlers.handlePageChange}
+                variant="icon"
+                theme="purple"
+              />
             )}
           </div>
         </main>
@@ -783,41 +680,6 @@ function SubscriptionDetailContent({
   )
 }
 
-// Sortable Header Component
-const SortableHeader = memo(function SortableHeader({
-  column,
-  label,
-  currentSort,
-  sortOrder,
-  onSort,
-}: {
-  column: string
-  label: string
-  currentSort?: string
-  sortOrder?: string
-  onSort: (column: string) => void
-}) {
-  const isActive = currentSort === column
-
-  return (
-    <th
-      className="cursor-pointer px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400 transition-colors hover:text-white"
-      onClick={() => onSort(column)}
-      tabIndex={0}
-      role="button"
-      aria-sort={isActive ? (sortOrder === 'asc' ? 'ascending' : 'descending') : undefined}
-    >
-      <div className="flex items-center gap-1">
-        {label}
-        <ArrowUpDown className={`h-3.5 w-3.5 ${isActive ? 'text-hpe-purple' : 'text-slate-600'}`} />
-        {isActive && (
-          <span className="text-hpe-purple">{sortOrder === 'asc' ? '↑' : '↓'}</span>
-        )}
-      </div>
-    </th>
-  )
-})
-
 // Subscription Row Component with clickable device count
 const SubscriptionRow = memo(function SubscriptionRow({
   subscription,
@@ -964,36 +826,3 @@ const SubscriptionRow = memo(function SubscriptionRow({
     </tr>
   )
 })
-
-// Generate page numbers for pagination
-function generatePageNumbers(currentPage: number, totalPages: number): (number | string)[] {
-  const pages: (number | string)[] = []
-  const delta = 2
-
-  if (totalPages <= 7) {
-    for (let i = 1; i <= totalPages; i++) {
-      pages.push(i)
-    }
-  } else {
-    pages.push(1)
-
-    if (currentPage > delta + 2) {
-      pages.push('...')
-    }
-
-    const rangeStart = Math.max(2, currentPage - delta)
-    const rangeEnd = Math.min(totalPages - 1, currentPage + delta)
-
-    for (let i = rangeStart; i <= rangeEnd; i++) {
-      pages.push(i)
-    }
-
-    if (currentPage < totalPages - delta - 1) {
-      pages.push('...')
-    }
-
-    pages.push(totalPages)
-  }
-
-  return pages
-}
