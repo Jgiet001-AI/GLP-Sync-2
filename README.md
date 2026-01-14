@@ -216,6 +216,14 @@ python main.py --backup devices.json --subscription-backup subs.json
 | `run_query` | Execute read-only SQL queries |
 | `ask_database` | Natural language database queries |
 
+## Agent Chatbot Documentation
+
+For detailed information about the AI chatbot features, see:
+
+- **[WebSocket Authentication](docs/websocket-authentication.md)** - Ticket-based authentication system for WebSocket connections
+- **[Chatbot Integration Guide](docs/chatbot-integration-guide.md)** - How to integrate and customize the chatbot
+- **[Chatbot API Reference](docs/chatbot-api-reference.md)** - Complete API reference for chatbot endpoints
+
 ## Project Structure
 
 ```
