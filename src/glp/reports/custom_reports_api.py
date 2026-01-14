@@ -218,3 +218,78 @@ async def list_reports(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list reports: {str(e)}",
         )
+
+
+@router.get("/custom/{id}", response_model=ReportResponse)
+async def get_report(
+    id: str,
+    pool: asyncpg.Pool = Depends(get_db_pool),
+    _auth: bool = Depends(verify_api_key),
+):
+    """Get a single custom report by ID.
+
+    Retrieves the complete report configuration including all fields,
+    filters, grouping, and sorting settings.
+
+    Args:
+        id: Report ID (UUID)
+        pool: Database connection pool
+        _auth: API key authentication
+
+    Returns:
+        ReportResponse: Complete report details including configuration
+
+    Raises:
+        HTTPException: 404 if report not found, 500 if database error occurs
+    """
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    id,
+                    name,
+                    description,
+                    created_by,
+                    config,
+                    is_shared,
+                    shared_with,
+                    created_at,
+                    updated_at,
+                    last_executed_at,
+                    execution_count
+                FROM custom_reports
+                WHERE id = $1
+                """,
+                id,
+            )
+
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Report with id '{id}' not found",
+            )
+
+        # Convert database row to response model
+        return ReportResponse(
+            id=row["id"],
+            name=row["name"],
+            description=row["description"],
+            created_by=row["created_by"],
+            config=json.loads(row["config"]) if isinstance(row["config"], str) else row["config"],
+            is_shared=row["is_shared"],
+            shared_with=json.loads(row["shared_with"]) if isinstance(row["shared_with"], str) else row["shared_with"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            last_executed_at=row["last_executed_at"],
+            execution_count=row["execution_count"],
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting report {id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get report: {str(e)}",
+        )
