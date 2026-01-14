@@ -201,13 +201,14 @@ async def export_devices(
     region: Optional[str] = Query(None, description="Filter by region"),
     assigned_state: Optional[str] = Query(None, description="Filter by assignment state"),
     search: Optional[str] = Query(None, description="Search term"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum records"),
+    limit: int = Query(100000, ge=1, le=100000, description="Maximum records (default: all)"),
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
     """Export device inventory as Excel or CSV.
 
     Supports filtering by device type, region, assignment state, and search.
+    Default limit increased to 100000 to export all records.
     """
     # Build query with filters
     where_clauses = []
@@ -333,11 +334,14 @@ async def export_subscriptions(
     subscription_type: Optional[str] = Query(None, description="Filter by type"),
     status: Optional[str] = Query(None, description="Filter by status"),
     search: Optional[str] = Query(None, description="Search term"),
-    limit: int = Query(10000, ge=1, le=100000, description="Maximum records"),
+    limit: int = Query(100000, ge=1, le=100000, description="Maximum records (default: all)"),
     pool=Depends(get_db_pool),
     _auth: bool = Depends(verify_api_key),
 ):
-    """Export subscription inventory as Excel or CSV."""
+    """Export subscription inventory as Excel or CSV.
+
+    Default limit increased to 100000 to export all records.
+    """
     where_clauses = []
     params = []
     param_idx = 1
