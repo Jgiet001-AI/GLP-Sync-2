@@ -40,7 +40,6 @@ from ..memory.long_term import ConversationSummarizer, FactExtractor
 from ..memory.agentdb import (
     AgentDBAdapter,
     PatternType,
-    SessionType,
 )
 from ..security.cot_redactor import get_redactor
 from ..tools.registry import ToolRegistry
@@ -180,9 +179,60 @@ class AgentOrchestrator:
         self.agentdb = agentdb
         self.config = config or AgentConfig()
 
-        # Fallback in-memory store for confirmations (when AgentDB not available)
-        # Structure: {conversation_id: {operation_id: {...}}}
-        self._pending_confirmations: dict[UUID, dict[str, dict[str, Any]]] = {}
+        # Initialize focused manager modules
+        from .conversation_manager import ConversationManager
+        from .memory_manager import MemoryManager
+        from .pattern_manager import PatternManager
+        from .tool_executor import ToolExecutor
+        from .event_streamer import EventStreamer
+        from .confirmation_manager import ConfirmationManager
+        from .prompt_builder import PromptBuilder
+
+        # Conversation lifecycle management
+        self.conversation_manager = ConversationManager(
+            conversation_store=conversation_store,
+        )
+
+        # Semantic memory and fact extraction
+        self.memory_manager = MemoryManager(
+            memory_store=memory_store,
+            fact_extractor=fact_extractor,
+            search_limit=self.config.memory_search_limit,
+            min_confidence=self.config.memory_min_confidence,
+            enable_search=self.config.enable_memory_search,
+            enable_extraction=self.config.enable_fact_extraction,
+        )
+
+        # Pattern learning and matching
+        self.pattern_manager = PatternManager(
+            agentdb=agentdb,
+            match_limit=self.config.memory_search_limit,  # Reuse same limit
+            min_confidence=self.config.pattern_min_confidence,
+            enable_learning=self.config.enable_pattern_learning,
+            enable_matching=self.config.enable_pattern_matching,
+        )
+
+        # Tool execution with error handling
+        self.tool_executor = ToolExecutor(
+            tool_registry=tool_registry,
+        )
+
+        # Event streaming with sequence tracking
+        self.event_streamer = EventStreamer(
+            correlation_id=None,  # Set per chat() call
+        )
+
+        # Operation confirmation management
+        self.confirmation_manager = ConfirmationManager(
+            agentdb=agentdb,
+            ttl_seconds=self.config.confirmation_ttl_seconds,
+        )
+
+        # System prompt construction
+        self.prompt_builder = PromptBuilder(
+            pattern_similarity_threshold=self.config.pattern_min_confidence,
+        )
+
 
     async def chat(
         self,
@@ -203,21 +253,14 @@ class AgentOrchestrator:
             ChatEvent objects for streaming to client
         """
         turn = 0
-        sequence = 0
 
-        def next_event(event_type: ChatEventType, **kwargs) -> ChatEvent:
-            nonlocal sequence
-            sequence += 1
-            return ChatEvent(
-                type=event_type,
-                sequence=sequence,
-                correlation_id=context.session_id,
-                **kwargs,
-            )
+        # Initialize event streamer for this conversation turn
+        self.event_streamer.set_correlation_id(context.session_id)
+        self.event_streamer.reset()
 
         try:
             # Get or create conversation
-            conversation = await self._get_or_create_conversation(
+            conversation = await self.conversation_manager.get_or_create(
                 conversation_id, context
             )
 
@@ -228,20 +271,31 @@ class AgentOrchestrator:
                 conversation_id=conversation.id,
             )
             if self.conversations:
-                await self.conversations.add_message(conversation.id, user_msg, context)
+                await self.conversation_manager.add_message(conversation.id, user_msg, context)
             conversation.messages.append(user_msg)
 
             # Search memory for context
-            memory_context = await self._get_memory_context(user_message, context)
+            memories = await self.memory_manager.search_memory(
+                query=user_message,
+                context=context,
+                embedding_model=self.llm.embedding_model if hasattr(self.llm, 'embedding_model') else "text-embedding-3-large",
+            )
 
             # Get pattern context (similar successful interactions)
-            pattern_context = await self._get_pattern_context(user_message, context)
+            patterns = await self.pattern_manager.find_similar_patterns(
+                query=user_message,
+                context=context,
+            )
 
             # Get available tools
             available_tools = await self.tools.get_all_tools()
 
             # Build system prompt with memory and patterns
-            system_prompt = self._build_system_prompt(memory_context, pattern_context)
+            system_prompt = self.prompt_builder.build(
+                base_prompt=self.config.system_prompt,
+                memories=memories,
+                patterns=patterns,
+            )
 
             # Main conversation loop
             while turn < self.config.max_turns:
@@ -264,7 +318,7 @@ class AgentOrchestrator:
                     # Forward events to client
                     if event.type == ChatEventType.TEXT_DELTA:
                         response_text += event.content or ""
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.TEXT_DELTA,
                             content=event.content,
                         )
@@ -273,7 +327,7 @@ class AgentOrchestrator:
                         thinking_text += event.content or ""
                         # Redact sensitive data before streaming to client
                         redacted_chunk = get_redactor().redact(event.content or "").summary
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.THINKING_DELTA,
                             content=redacted_chunk,
                         )
@@ -284,7 +338,7 @@ class AgentOrchestrator:
                             "name": event.tool_name,
                             "arguments": {},
                         }
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.TOOL_CALL_START,
                             tool_call_id=event.tool_call_id,
                             tool_name=event.tool_name,
@@ -300,7 +354,7 @@ class AgentOrchestrator:
                                     arguments=current_tool_call["arguments"],
                                 )
                             )
-                            yield next_event(
+                            yield self.event_streamer.create_event(
                                 ChatEventType.TOOL_CALL_END,
                                 tool_call_id=event.tool_call_id,
                                 tool_arguments=event.tool_arguments,
@@ -308,7 +362,7 @@ class AgentOrchestrator:
                             current_tool_call = None
 
                     elif event.type == ChatEventType.ERROR:
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.ERROR,
                             content=event.content,
                             error_type=event.error_type,
@@ -345,7 +399,7 @@ class AgentOrchestrator:
 
                 # Store assistant message
                 if self.conversations:
-                    await self.conversations.add_message(
+                    await self.conversation_manager.add_message(
                         conversation.id, assistant_msg, context
                     )
                 conversation.messages.append(assistant_msg)
@@ -356,7 +410,7 @@ class AgentOrchestrator:
 
                 # Execute tool calls
                 for tc in tool_calls[:self.config.max_tool_calls_per_turn]:
-                    result = await self._execute_tool_call(tc, context, conversation.id)
+                    result = await self.tool_executor.execute_tool_call(tc, context, conversation.id)
 
                     # Check if confirmation is required
                     if isinstance(result.result, dict) and result.result.get("status") == "confirmation_required":
@@ -371,25 +425,15 @@ class AgentOrchestrator:
                             },
                         }
 
-                        # Use AgentDB persistent session store if available
-                        if self.agentdb:
-                            session_key = f"{conversation.id}:{operation_id}"
-                            await self.agentdb.sessions.set(
-                                tenant_id=context.tenant_id,
-                                user_id=context.user_id,
-                                session_type=SessionType.CONFIRMATION,
-                                key=session_key,
-                                data=confirmation_data,
-                                ttl_seconds=self.config.confirmation_ttl_seconds,
-                            )
-                            logger.debug(f"Stored confirmation in AgentDB: {session_key}")
-                        else:
-                            # Fallback to in-memory store
-                            if conversation.id not in self._pending_confirmations:
-                                self._pending_confirmations[conversation.id] = {}
-                            self._pending_confirmations[conversation.id][operation_id] = confirmation_data
+                        # Use ConfirmationManager to store
+                        await self.confirmation_manager.store(
+                            context=context,
+                            conversation_id=conversation.id,
+                            operation_id=operation_id,
+                            confirmation_data=confirmation_data,
+                        )
 
-                        yield next_event(
+                        yield self.event_streamer.create_event(
                             ChatEventType.CONFIRMATION_REQUIRED,
                             tool_call_id=tc.id,
                             content=result.result.get("message"),
@@ -402,7 +446,7 @@ class AgentOrchestrator:
                         return
 
                     # Send tool result
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TOOL_RESULT,
                         tool_call_id=tc.id,
                         content=str(result.result)[:1000],  # Truncate for event
@@ -416,16 +460,12 @@ class AgentOrchestrator:
                         and not result.error
                     ):
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_tool_success,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.TOOL_SUCCESS,
                             trigger=user_message,
-                            response=tc.name,
-                            context={
-                                "arguments": tc.arguments,
-                                "result_preview": str(result.result)[:100],
-                            },
-                            success=True,
+                            tool_name=tc.name,
+                            arguments=tc.arguments,
+                            result_preview=str(result.result)[:100],
                             name=f"learn_pattern:{tc.name}",
                         )
 
@@ -437,7 +477,7 @@ class AgentOrchestrator:
                         conversation_id=conversation.id,
                     )
                     if self.conversations:
-                        await self.conversations.add_message(
+                        await self.conversation_manager.add_message(
                             conversation.id, tool_msg, context
                         )
                     conversation.messages.append(tool_msg)
@@ -446,16 +486,16 @@ class AgentOrchestrator:
             # Uses bounded queue with retries instead of fire-and-forget
             if self.config.enable_fact_extraction and response_text:
                 await get_background_worker().submit(
-                    self._extract_and_store_facts,
-                    response_text,
-                    conversation.id,
-                    assistant_msg.id,
-                    context,
+                    self.memory_manager.extract_and_store_facts,
+                    content=response_text,
+                    conversation_id=conversation.id,
+                    message_id=assistant_msg.id,
+                    context=context,
                     name="extract_facts",
                 )
 
             # Done
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.DONE,
                 metadata={
                     "conversation_id": str(conversation.id),
@@ -465,7 +505,7 @@ class AgentOrchestrator:
 
         except Exception as e:
             logger.exception(f"Chat error: {e}")
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.ERROR,
                 content=f"An error occurred: {str(e)}",
                 error_type=ErrorType.FATAL,
@@ -489,105 +529,40 @@ class AgentOrchestrator:
         Yields:
             ChatEvent objects
         """
-        sequence = 0
+        # Initialize event streamer for this confirmation
+        self.event_streamer.set_correlation_id(context.session_id)
+        self.event_streamer.reset()
 
-        def next_event(event_type: ChatEventType, **kwargs) -> ChatEvent:
-            nonlocal sequence
-            sequence += 1
-            return ChatEvent(
-                type=event_type,
-                sequence=sequence,
-                correlation_id=context.session_id,
-                **kwargs,
-            )
+        # Use ConfirmationManager to get and delete confirmation
+        pending = await self.confirmation_manager.get_and_delete(
+            context=context,
+            conversation_id=conversation_id,
+            operation_id=operation_id,
+        )
 
-        pending = None
-
-        # Try AgentDB persistent session store first
-        if self.agentdb:
-            if operation_id:
-                session_key = f"{conversation_id}:{operation_id}"
-                session = await self.agentdb.sessions.get_and_delete(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    key=session_key,
-                )
-                if session:
-                    pending = session.data
-                    logger.debug(f"Retrieved confirmation from AgentDB: {session_key}")
-            else:
-                # List all confirmations for this conversation and get first
-                sessions = await self.agentdb.sessions.list_by_type(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    prefix=f"{conversation_id}:",
-                )
-                if sessions:
-                    first_session = sessions[0]
-                    pending = first_session.data
-                    operation_id = pending.get("operation_id")
-                    # Delete it
-                    await self.agentdb.sessions.delete(
-                        tenant_id=context.tenant_id,
-                        user_id=context.user_id,
-                        session_type=SessionType.CONFIRMATION,
-                        key=first_session.key,
-                    )
-                    logger.debug(f"Retrieved first confirmation from AgentDB: {first_session.key}")
-
-        # Fallback to in-memory store
-        if not pending:
-            conv_confirmations = self._pending_confirmations.get(conversation_id, {})
-
-            if not conv_confirmations:
-                yield next_event(
-                    ChatEventType.ERROR,
-                    content="No pending operation to confirm",
-                    error_type=ErrorType.RECOVERABLE,
-                )
-                return
-
-            # Get the specific operation or the first one
-            if operation_id and operation_id in conv_confirmations:
-                pending = conv_confirmations.pop(operation_id)
-            elif conv_confirmations:
-                # Use first available operation for backward compatibility
-                first_op_id = next(iter(conv_confirmations))
-                pending = conv_confirmations.pop(first_op_id)
-                operation_id = pending.get("operation_id")
-            else:
-                yield next_event(
-                    ChatEventType.ERROR,
-                    content="No pending operation to confirm",
-                    error_type=ErrorType.RECOVERABLE,
-                )
-                return
-
-            # Clean up empty conversation entry
-            if not conv_confirmations:
-                self._pending_confirmations.pop(conversation_id, None)
+        # Update operation_id if it was found from first available confirmation
+        if pending and not operation_id:
+            operation_id = pending.get("operation_id")
 
         if not pending:
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.ERROR,
                 content="No pending operation to confirm",
                 error_type=ErrorType.RECOVERABLE,
             )
             return
 
-        yield next_event(
+        yield self.event_streamer.create_event(
             ChatEventType.CONFIRMATION_RESPONSE,
             metadata={"confirmed": confirmed, "operation_id": operation_id},
         )
 
         if not confirmed:
-            yield next_event(
+            yield self.event_streamer.create_event(
                 ChatEventType.TEXT_DELTA,
                 content="Operation cancelled.",
             )
-            yield next_event(ChatEventType.DONE)
+            yield self.event_streamer.create_event(ChatEventType.DONE)
             return
 
         # Execute the confirmed operation
@@ -612,7 +587,7 @@ class AgentOrchestrator:
                 )
 
                 if operation.error:
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.ERROR,
                         content=f"Operation failed: {operation.error}",
                         error_type=ErrorType.RECOVERABLE,
@@ -620,47 +595,45 @@ class AgentOrchestrator:
                     # Learn from failure (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_error_recovery,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.ERROR_RECOVERY,
-                            trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
-                            response=f"Retry or escalate: {tool_call.name}",
-                            context={"error": operation.error, "tool": tool_call.name},
-                            success=False,
+                            error_trigger=f"Tool '{tool_call.name}' failed: {operation.error}",
+                            recovery_action=f"Retry or escalate: {tool_call.name}",
+                            error_details=operation.error,
+                            tool_name=tool_call.name,
                             name=f"learn_failure:{tool_call.name}",
                         )
                 else:
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TOOL_RESULT,
                         tool_call_id=tool_call.id if tool_call else "unknown",
                         content=f"Operation completed successfully: {operation.result}",
                     )
-                    yield next_event(
+                    yield self.event_streamer.create_event(
                         ChatEventType.TEXT_DELTA,
                         content="Done! The operation completed successfully.",
                     )
                     # Learn from success (via background worker)
                     if self.agentdb and self.config.enable_pattern_learning and tool_call:
                         await get_background_worker().submit(
-                            self._learn_pattern,
+                            self.pattern_manager.learn_tool_success,
                             tenant_id=context.tenant_id,
-                            pattern_type=PatternType.TOOL_SUCCESS,
                             trigger=f"User requested: {tool_call.name} with {tool_call.arguments}",
-                            response=tool_call.name,
-                            context={"arguments": tool_call.arguments, "result": str(operation.result)[:200]},
-                            success=True,
+                            tool_name=tool_call.name,
+                            arguments=tool_call.arguments,
+                            result_preview=str(operation.result)[:200],
                             name=f"learn_success:{tool_call.name}",
                         )
 
             except Exception as e:
                 logger.exception(f"Confirmation execution failed: {e}")
-                yield next_event(
+                yield self.event_streamer.create_event(
                     ChatEventType.ERROR,
                     content=f"Failed to execute operation: {e}",
                     error_type=ErrorType.RECOVERABLE,
                 )
 
-        yield next_event(ChatEventType.DONE)
+        yield self.event_streamer.create_event(ChatEventType.DONE)
 
     async def cancel_chat(
         self,
@@ -673,260 +646,13 @@ class AgentOrchestrator:
             conversation_id: Conversation to cancel
             context: User context
         """
-        # Remove pending confirmations from AgentDB if available
-        if self.agentdb:
-            sessions = await self.agentdb.sessions.list_by_type(
-                tenant_id=context.tenant_id,
-                user_id=context.user_id,
-                session_type=SessionType.CONFIRMATION,
-                prefix=f"{conversation_id}:",
-            )
-            for session in sessions:
-                await self.agentdb.sessions.delete(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    session_type=SessionType.CONFIRMATION,
-                    key=session.key,
-                )
-            if sessions:
-                logger.debug(f"Cleaned up {len(sessions)} AgentDB sessions for conversation {conversation_id}")
-
-        # Also clean up in-memory store
-        self._pending_confirmations.pop(conversation_id, None)
-
-        logger.info(f"Cancelled chat for conversation {conversation_id}")
-
-    async def _learn_pattern(
-        self,
-        tenant_id: str,
-        pattern_type: PatternType,
-        trigger: str,
-        response: str,
-        context: dict[str, Any],
-        success: bool,
-    ) -> None:
-        """Learn a pattern from an interaction.
-
-        Called asynchronously after tool executions to capture successful patterns.
-
-        Args:
-            tenant_id: Tenant identifier
-            pattern_type: Type of pattern
-            trigger: What triggered this pattern
-            response: The response/action taken
-            context: Additional context
-            success: Whether this was successful
-        """
-        if not self.agentdb:
-            return
-
-        try:
-            pattern = await self.agentdb.patterns.learn(
-                tenant_id=tenant_id,
-                pattern_type=pattern_type,
-                trigger=trigger,
-                response=response,
-                context=context,
-                success=success,
-            )
-            logger.debug(
-                f"Learned pattern {pattern_type.value}: "
-                f"confidence={pattern.confidence:.2f}, "
-                f"success_rate={pattern.success_rate:.2f}"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to learn pattern: {e}")
-
-    async def _get_pattern_context(
-        self,
-        query: str,
-        context: UserContext,
-    ) -> list[tuple[Any, float]]:
-        """Get relevant patterns for context.
-
-        Searches for similar successful patterns to inform the response.
-
-        Args:
-            query: User's query
-            context: User context
-
-        Returns:
-            List of (pattern, similarity) tuples
-        """
-        if not self.agentdb or not self.config.enable_pattern_matching:
-            return []
-
-        try:
-            patterns = await self.agentdb.patterns.find_similar(
-                tenant_id=context.tenant_id,
-                query=query,
-                limit=3,
-                min_confidence=self.config.pattern_min_confidence,
-            )
-            return patterns
-        except Exception as e:
-            logger.warning(f"Pattern search failed: {e}")
-            return []
-
-    async def _get_or_create_conversation(
-        self,
-        conversation_id: Optional[UUID],
-        context: UserContext,
-    ) -> Conversation:
-        """Get existing or create new conversation.
-
-        Args:
-            conversation_id: Existing ID or None
-            context: User context
-
-        Returns:
-            Conversation object
-        """
-        if conversation_id and self.conversations:
-            conversation = await self.conversations.get(conversation_id, context)
-            if conversation:
-                return conversation
-
-        # Create new conversation
-        conversation = Conversation(
-            tenant_id=context.tenant_id,
-            user_id=context.user_id,
+        # Use ConfirmationManager to cleanup all confirmations
+        await self.confirmation_manager.cleanup_conversation(
+            context=context,
+            conversation_id=conversation_id,
         )
 
-        if self.conversations:
-            conversation = await self.conversations.create(conversation)
-
-        return conversation
-
-    async def _get_memory_context(
-        self,
-        query: str,
-        context: UserContext,
-    ) -> list[Memory]:
-        """Search memory for relevant context.
-
-        Args:
-            query: User's query
-            context: User context
-
-        Returns:
-            List of relevant memories
-        """
-        if not self.config.enable_memory_search or not self.memory:
-            return []
-
-        try:
-            results = await self.memory.search(
-                query=query,
-                context=context,
-                embedding_model=self.llm.embedding_model if hasattr(self.llm, 'embedding_model') else "text-embedding-3-large",
-                limit=self.config.memory_search_limit,
-                min_confidence=self.config.memory_min_confidence,
-            )
-            return [memory for memory, _ in results]
-
-        except Exception as e:
-            logger.warning(f"Memory search failed: {e}")
-            return []
-
-    def _build_system_prompt(
-        self,
-        memories: list[Memory],
-        patterns: Optional[list[tuple[Any, float]]] = None,
-    ) -> str:
-        """Build system prompt with memory and pattern context.
-
-        Args:
-            memories: Relevant memories to include
-            patterns: Relevant learned patterns to include
-
-        Returns:
-            Complete system prompt
-        """
-        prompt = self.config.system_prompt
-
-        if memories:
-            memory_context = "\n\nRelevant context from previous conversations:\n"
-            for mem in memories:
-                memory_context += f"- [{mem.memory_type.value}] {mem.content}\n"
-            prompt += memory_context
-
-        if patterns:
-            pattern_context = "\n\nSuccessful patterns from previous interactions:\n"
-            for pattern, similarity in patterns:
-                if similarity > 0.7:  # Only include highly similar patterns
-                    pattern_context += f"- When asked similar to '{pattern.trigger[:50]}...', used '{pattern.response}' (confidence: {pattern.confidence:.0%})\n"
-            if pattern_context != "\n\nSuccessful patterns from previous interactions:\n":
-                prompt += pattern_context
-
-        return prompt
-
-    async def _execute_tool_call(
-        self,
-        tool_call: ToolCall,
-        context: UserContext,
-        conversation_id: UUID,
-    ) -> ToolCall:
-        """Execute a tool call.
-
-        Args:
-            tool_call: Tool call to execute
-            context: User context
-            conversation_id: Current conversation
-
-        Returns:
-            Tool call with result
-        """
-        logger.info(f"Executing tool: {tool_call.name}")
-
-        try:
-            result = await self.tools.execute_tool_call(tool_call, context)
-            logger.debug(f"Tool {tool_call.name} result: {result.result}")
-            return result
-
-        except Exception as e:
-            logger.error(f"Tool execution failed: {e}")
-            tool_call.result = {
-                "error": str(e),
-                "recoverable": True,
-            }
-            return tool_call
-
-    async def _extract_and_store_facts(
-        self,
-        content: str,
-        conversation_id: UUID,
-        message_id: UUID,
-        context: UserContext,
-    ) -> None:
-        """Extract facts from content and store in memory.
-
-        Args:
-            content: Text to extract from
-            conversation_id: Source conversation
-            message_id: Source message
-            context: User context
-        """
-        if not self.fact_extractor or not self.memory:
-            return
-
-        try:
-            facts = await self.fact_extractor.extract(content)
-
-            for fact in facts:
-                memory = fact.to_memory(
-                    tenant_id=context.tenant_id,
-                    user_id=context.user_id,
-                    source_conversation_id=conversation_id,
-                    source_message_id=message_id,
-                )
-                await self.memory.store(memory)
-
-            if facts:
-                logger.info(f"Extracted and stored {len(facts)} facts")
-
-        except Exception as e:
-            logger.warning(f"Fact extraction failed: {e}")
+        logger.info(f"Cancelled chat for conversation {conversation_id}")
 
     async def get_conversation_history(
         self,
@@ -944,10 +670,9 @@ class AgentOrchestrator:
         Returns:
             Conversation with messages
         """
-        if not self.conversations:
-            return None
-
-        return await self.conversations.get(conversation_id, context)
+        return await self.conversation_manager.get_history(
+            conversation_id, context, limit
+        )
 
     async def list_conversations(
         self,
@@ -965,7 +690,6 @@ class AgentOrchestrator:
         Returns:
             List of conversations
         """
-        if not self.conversations:
-            return []
-
-        return await self.conversations.list(context, limit, offset)
+        return await self.conversation_manager.list_conversations(
+            context, limit, offset
+        )
