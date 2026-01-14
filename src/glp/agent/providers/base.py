@@ -50,6 +50,8 @@ class LLMProviderConfig:
         max_retries: Maximum retry attempts
         temperature: Default temperature
         max_tokens: Default max tokens
+        enable_thinking: Enable extended thinking mode
+        thinking_budget: Maximum tokens for thinking (when enabled)
     """
 
     api_key: str
@@ -60,6 +62,8 @@ class LLMProviderConfig:
     max_retries: int = 3
     temperature: float = 0.7
     max_tokens: int = 4096
+    enable_thinking: bool = False
+    thinking_budget: int = 10000
     extra: dict[str, Any] = field(default_factory=dict)
 
 
