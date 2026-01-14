@@ -84,12 +84,23 @@ _DEVICE_MANAGER = None
 _DEVICE_SYNCER = None
 _SUBSCRIPTION_SYNCER = None
 
+# Global repositories, adapters, and use cases for write operations
+_DEVICE_REPO = None
+_SUBSCRIPTION_REPO = None
+_DEVICE_MANAGER_ADAPTER = None
+_DEVICE_SYNCER_ADAPTER = None
+_APPLY_ASSIGNMENTS_USE_CASE = None
+_DEVICE_ACTIONS_USE_CASE = None
+
 
 @asynccontextmanager
 async def lifespan(server: FastMCP):
-    """Initialize and cleanup database connection pool and GLP client."""
+    """Initialize and cleanup database connection pool, GLP client, and use cases."""
     global _DB_POOL, _GLP_CLIENT, _TOKEN_MANAGER, _DEVICE_MANAGER
     global _DEVICE_SYNCER, _SUBSCRIPTION_SYNCER
+    global _DEVICE_REPO, _SUBSCRIPTION_REPO
+    global _DEVICE_MANAGER_ADAPTER, _DEVICE_SYNCER_ADAPTER
+    global _APPLY_ASSIGNMENTS_USE_CASE, _DEVICE_ACTIONS_USE_CASE
 
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
@@ -117,6 +128,29 @@ async def lifespan(server: FastMCP):
             _SUBSCRIPTION_SYNCER = SubscriptionSyncer(_GLP_CLIENT, pool)
 
             logger.info("GLP client initialized successfully")
+
+            # Initialize repositories
+            _DEVICE_REPO = PostgresDeviceRepository(pool)
+            _SUBSCRIPTION_REPO = PostgresSubscriptionRepository(pool)
+            logger.info("Repositories initialized successfully")
+
+            # Initialize adapters
+            _DEVICE_MANAGER_ADAPTER = GLPDeviceManagerAdapter(_DEVICE_MANAGER)
+            _DEVICE_SYNCER_ADAPTER = DeviceSyncerAdapter(_DEVICE_SYNCER)
+            logger.info("Adapters initialized successfully")
+
+            # Initialize use cases
+            _APPLY_ASSIGNMENTS_USE_CASE = ApplyAssignmentsUseCase(
+                device_repo=_DEVICE_REPO,
+                subscription_repo=_SUBSCRIPTION_REPO,
+                device_manager=_DEVICE_MANAGER_ADAPTER,
+                device_syncer=_DEVICE_SYNCER_ADAPTER,
+            )
+            _DEVICE_ACTIONS_USE_CASE = DeviceActionsUseCase(
+                device_manager=_DEVICE_MANAGER_ADAPTER,
+            )
+            logger.info("Use cases initialized successfully")
+
         except Exception as e:
             logger.warning(f"Failed to initialize GLP client (write tools will not work): {e}")
     else:
@@ -125,6 +159,14 @@ async def lifespan(server: FastMCP):
     try:
         yield {"db_pool": pool}
     finally:
+        # Cleanup (reverse order of initialization)
+        _APPLY_ASSIGNMENTS_USE_CASE = None
+        _DEVICE_ACTIONS_USE_CASE = None
+        _DEVICE_MANAGER_ADAPTER = None
+        _DEVICE_SYNCER_ADAPTER = None
+        _DEVICE_REPO = None
+        _SUBSCRIPTION_REPO = None
+
         # Cleanup GLP client
         if _GLP_CLIENT:
             await _GLP_CLIENT.__aexit__(None, None, None)
