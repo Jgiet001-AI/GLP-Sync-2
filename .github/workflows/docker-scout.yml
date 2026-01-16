@@ -102,9 +102,6 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          build-args: |
-            PYTHON_DIGEST=sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36
-            UV_DIGEST=sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5
 
       # Generate SBOM file for attestation (FIX: was referencing non-existent file)
       - name: Install Docker Scout CLI
@@ -516,7 +513,7 @@ jobs:
     steps:
       - name: Pull PostgreSQL image
         run: |
-          docker pull postgres:16-alpine@sha256:8d32048ee4d8d41201412687a485bf2da8b11aab309369cca3fbdf30f8ceab76
+          docker pull postgres:16-alpine@sha256:23e88eb049fd5d54894d70100df61d38a49ed97909263f79d4ff4c30a5d5fca2
 
       - name: Install Docker Scout CLI
         uses: docker/scout-action@v1
